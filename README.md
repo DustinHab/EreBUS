@@ -274,14 +274,24 @@ built binary.
   because being handed something again means doing the job again.
 * **Settings are a text object.** A table, one matter per row, the
   value in the right column: theme, save quiet, clock offset, pointer
-  speed, hints. Click into the value, edit it, and the system obeys as
-  the letters land -- the moment "light" is complete the shell is
-  light, and the journal says so. No dialogue, no apply button, no
-  registry: the kernel holds the only reader, the person holds the
-  text read-write, and handing someone the reference read-only shows
-  them how the system is set without letting them set it. The settings
-  ride the snapshot like everything else, so they survive reboots and
-  appear in time travel as they stood.
+  speed, hints, the scheduler's slice, and where a boot starts. Click
+  into the value, edit it, and the system obeys as the letters land --
+  the moment "light" is complete the shell is light, and the journal
+  says so. No dialogue, no apply button, no registry: the kernel holds
+  the only reader, the person holds the text read-write, and handing
+  someone the reference read-only shows them how the system is set
+  without letting them set it. The settings ride the snapshot like
+  everything else, so they survive reboots and appear in time travel
+  as they stood.
+* **The activity table.** What the machine is doing, as an object the
+  kernel rewrites once a second: uptime, cpu, memory, heap, objects,
+  threads, and one row per running program with its share of the
+  processor and the count of what it holds. The shares are not
+  sampled: every handover of the processor books the interval to the
+  thread that held it, so a row saying 3% means three hundredths of
+  the last second, clock-measured -- and the boot thread, which only
+  halts, is the idle in the summary. The reference is read-only; the
+  machine reports, nobody edits the report.
 * **The editor grew a caret.** Clicking into a text puts the caret
   there; typing inserts, backspace deletes before it. What made the
   settings table editable makes every text editable in the middle.

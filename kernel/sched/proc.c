@@ -241,6 +241,29 @@ fail:
 
 object *proc_object(process *p) { return p ? p->self : NULL; }
 
+u32 proc_live_count(void)
+{
+    return live_count;
+}
+
+bool proc_live_at(u32 i, const char **name, u64 *id, u64 *holds,
+                  u64 *ran_ns)
+{
+    /* One row of the living, for the activity table. Kernel-side only,
+     * like the capability inspection: no system call leads here, and
+     * what it reveals -- that programs exist -- the graph shows anyway. */
+    u64 flags = irq_save();
+    if (i >= live_count) { irq_restore(flags); return false; }
+
+    process *p = live[i];
+    if (name)   *name = p->name;
+    if (id)     *id = p->id;
+    if (holds)  *holds = domain_used(p->dom);
+    if (ran_ns) *ran_ns = p->first ? thread_ran_ns(p->first) : 0;
+    irq_restore(flags);
+    return true;
+}
+
 domain *proc_domain_of(object *program)
 {
     /* The domain behind a program object, for the shell's inspection.

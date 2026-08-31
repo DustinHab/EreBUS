@@ -16,6 +16,8 @@
 #include <eb/settings.h>
 #include <eb/journal.h>
 #include <eb/string.h>
+#include <eb/thread.h>
+#include <eb/time.h>
 #include <eb/io.h>
 
 static object *settings;
@@ -27,11 +29,13 @@ typedef struct {
     u64  save_quiet_ns;
     i64  clock_offset_min;
     i32  pointer_num, pointer_den;
+    u32  slice_ms;
     bool hints;
     bool light;
+    bool start_home;
 } values;
 
-static values current = { DEFAULT_QUIET_NS, 0, 1, 1, true, false };
+static values current = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false };
 
 object *settings_object(void) { return settings; }
 
@@ -39,6 +43,7 @@ u64  settings_save_quiet_ns(void)   { return current.save_quiet_ns; }
 i64  settings_clock_offset_min(void){ return current.clock_offset_min; }
 bool settings_hints(void)           { return current.hints; }
 bool settings_light(void)           { return current.light; }
+bool settings_start_home(void)      { return current.start_home; }
 
 void settings_pointer_scale(i32 *num, i32 *den)
 {
@@ -56,7 +61,9 @@ static const char seed[] =
     "save     | 1 second\n"
     "clock    | on time\n"
     "pointer  | normal\n"
-    "hints    | shown\n";
+    "hints    | shown\n"
+    "slice    | 50 ms\n"
+    "start    | where i left\n";
 
 bool settings_create(void)
 {
@@ -138,6 +145,15 @@ static void read_line(values *v, const char *line, u64 len)
                line_has(line, len, "colors")) {
         if (line_has(line, len, "light")) v->light = true;
         if (line_has(line, len, "dark"))  v->light = false;
+    } else if (line_has(line, len, "slice")) {
+        if (line_number(line, len, &n)) {
+            if (n < 10)  n = 10;
+            if (n > 500) n = 500;
+            v->slice_ms = (u32)n;
+        }
+    } else if (line_has(line, len, "start")) {
+        if (line_has(line, len, "home")) v->start_home = true;
+        if (line_has(line, len, "left")) v->start_home = false;
     }
 }
 
@@ -173,6 +189,25 @@ static void note_changes(const values *was, const values *now)
         journal_says("settings", line);
     }
 
+    if (was->slice_ms != now->slice_ms) {
+        at = 0;
+        const char *p = "the slice is ";
+        while (*p) line[at++] = *p++;
+        u64 ms = now->slice_ms;
+        if (ms >= 100) line[at++] = (char)('0' + ms / 100);
+        if (ms >= 10)  line[at++] = (char)('0' + (ms / 10) % 10);
+        line[at++] = (char)('0' + ms % 10);
+        p = " ms now";
+        while (*p) line[at++] = *p++;
+        line[at] = 0;
+        journal_says("settings", line);
+    }
+
+    if (was->start_home != now->start_home)
+        journal_says("settings", now->start_home
+                     ? "the next start is at home"
+                     : "the next start is where you left");
+
     if (was->clock_offset_min != now->clock_offset_min) {
         i64 m = now->clock_offset_min;
         if (m == 0) {
@@ -200,7 +235,7 @@ void settings_apply(void)
     u64 size = obj_size(settings);
     if (!d) return;
 
-    values next = { DEFAULT_QUIET_NS, 0, 1, 1, true, false };
+    values next = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false };
 
     u64 start = 0;
     for (u64 i = 0; i <= size; i++) {
@@ -216,5 +251,14 @@ void settings_apply(void)
         values was = current;
         current = next;
         note_changes(&was, &current);
+
+        /* The one value someone else keeps: the scheduler holds the
+         * slice, so the new length is handed over in ticks. */
+        if (was.slice_ms != current.slice_ms) {
+            u32 hz = pit_hz();
+            if (hz == 0) hz = 100;
+            u32 t = current.slice_ms * hz / 1000;
+            sched_set_slice_ticks(t ? t : 1);
+        }
     }
 }

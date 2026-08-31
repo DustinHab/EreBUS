@@ -31,5 +31,6 @@ i64  settings_clock_offset_min(void);
 void settings_pointer_scale(i32 *num, i32 *den);
 bool settings_hints(void);
 bool settings_light(void);
+bool settings_start_home(void);
 
 #endif /* EB_SETTINGS_H */

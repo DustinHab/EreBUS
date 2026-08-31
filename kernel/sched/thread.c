@@ -22,6 +22,7 @@
 #include <eb/io.h>
 #include <eb/gdt.h>
 #include <eb/syscall.h>
+#include <eb/time.h>
 #include <eb/panic.h>
 
 /* Thread stacks live in their own window, well clear of the heap. */
@@ -35,7 +36,7 @@
 /* Slice length in timer ticks. At 100 Hz that is 50 ms, which is long
  * enough that switching costs nothing measurable and short enough that
  * a thread stuck in a loop does not hold the machine. */
-#define SLICE_TICKS 5
+#define SLICE_TICKS 5      /* the default; the settings may change it */
 
 typedef enum {
     THREAD_READY,
@@ -57,6 +58,7 @@ struct thread {
     void        *arg;
     phys_addr    pml4;         /* zero means the kernel's own space */
     u64          kstack_top;   /* where an interrupt from ring 3 lands */
+    u64          ran_ns;       /* how long it has actually held the cpu */
 
     /* Called after the thread is truly gone -- off the run queue, off
      * its stack -- by whoever reaps it. This is where a process hangs
@@ -81,6 +83,14 @@ void thread_set_pml4(thread *t, phys_addr pml4)
 
 static thread *current;
 static thread *run_queue;      /* circular; points at some ready thread */
+static thread *boot_thread;    /* the one that idles; its time is idle time */
+
+/* When the running thread last took the processor. Every switch closes
+ * the interval and books it to whoever is leaving, which is the whole
+ * of the accounting: no sampling, no estimate, just the clock read at
+ * each handover. */
+static u64 switch_stamp;
+static u32 slice_ticks = SLICE_TICKS;
 
 static void reap_finished(void);   /* defined beside thread_exit below */
 static u64 next_id = 1;
@@ -184,8 +194,9 @@ void sched_init(domain *boot_domain)
     t->kstack_top = (u64)stack_top_symbol;
 
     current = t;
+    boot_thread = t;
     thread_count = 1;
-    slice_left = SLICE_TICKS;
+    slice_left = slice_ticks;
     queue_add(t);
 }
 
@@ -245,13 +256,18 @@ static void switch_to_next(void)
     } else {
         to = run_queue;
     }
-    if (to == from) { slice_left = SLICE_TICKS; return; }
+    if (to == from) { slice_left = slice_ticks; return; }
+
+    /* Book the interval to whoever is leaving. */
+    u64 now = time_ns();
+    from->ran_ns += now - switch_stamp;
+    switch_stamp = now;
 
     if (from->state == THREAD_RUNNING) from->state = THREAD_READY;
     to->state = THREAD_RUNNING;
     current = to;
     switches++;
-    slice_left = SLICE_TICKS;
+    slice_left = slice_ticks;
     resched_due = false;
 
     /* Two things have to follow the thread, not the code: the address
@@ -384,6 +400,15 @@ domain     *thread_domain(const thread *t)   { return t ? t->dom : NULL; }
 const char *thread_name(const thread *t)     { return t ? t->name : "?"; }
 u64         thread_id(const thread *t)       { return t ? t->id : 0; }
 u64         sched_switches(void)             { return switches; }
+u64         thread_ran_ns(const thread *t)   { return t ? t->ran_ns : 0; }
+u64         sched_idle_ns(void)              { return boot_thread ? boot_thread->ran_ns : 0; }
+
+void sched_set_slice_ticks(u32 t)
+{
+    if (t < 1)   t = 1;
+    if (t > 100) t = 100;
+    slice_ticks = t;
+}
 u64         sched_threads(void)              { return thread_count; }
 u64         sched_runnable(void)             { return runnable_count; }
 

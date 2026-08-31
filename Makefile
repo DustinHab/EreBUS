@@ -89,6 +89,7 @@ KERN_C   := kernel/main.c \
             kernel/obj/snapshot.c \
             kernel/obj/journal.c \
             kernel/obj/settings.c \
+            kernel/obj/activity.c \
             kernel/sched/thread.c \
             kernel/sched/proc.c \
             kernel/arch/x86_64/syscall.c \
@@ -364,19 +365,19 @@ agent: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 # doing the delegating; two programs did.
 # The coordinates track the root's slot layout: seed objects in 0-3,
 # the standard programs in 4-11, the time in 12, the log in 13, the
-# settings in 14, so the note made here becomes slot 15. When the seed
-# graph changes, this changes.
+# settings in 14, the activity in 15, so the note made here becomes
+# slot 16. When the seed graph changes, this changes.
 RELAY_HOME := home $(shell for i in $$(seq 17); do printf 'm100,0 '; done)
-RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,100 m0,100 m0,47 click \
+RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,100 m0,100 m0,69 click \
               m0,22 click ret \
               down down down down down down down down down down down \
-              down down down down right \
+              down down down down down right \
               p a s s spc i t left \
-              up up up up up up up up up up right \
+              up up up up up up up up up up up right \
               $(RELAY_HOME) m0,100 m0,15 click \
               m0,100 m0,100 m0,42 click ret \
               $(RELAY_HOME) m0,100 m0,39 click \
-              m0,100 m0,100 m0,100 m0,100 m0,60 click ret
+              m0,100 m0,100 m0,100 m0,100 m0,82 click ret
 
 relay: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 	@rm -f $(STORE)

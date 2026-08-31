@@ -26,6 +26,7 @@
 #include <eb/proc.h>
 #include <eb/journal.h>
 #include <eb/settings.h>
+#include <eb/activity.h>
 #include <eb/string.h>
 #include <eb/syscall.h>
 #include <eb/pic.h>
@@ -197,6 +198,18 @@ static void console_server(void *arg)
 /* What persistence watches over. One object here; a real system would
  * hand it the roots of everything the user owns. */
 static object *persistent_root;
+
+/* Rewrites the activity table once a second. Between rewrites it only
+ * yields; the table is not worth waking anyone for. */
+static void activity_thread(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        activity_update();
+        u64 since = time_ns();
+        while (time_ns() - since < 1000000000ULL) sched_yield();
+    }
+}
 
 /* Writes the graph out once changes have stopped arriving.
  *
@@ -1032,6 +1045,28 @@ void kmain(eb_boot_info *bi)
         }
         settings_apply();
 
+        /* The activity table: what the machine is doing, rewritten
+         * once a second by its own thread. Read-only for the person --
+         * the machine reports, nobody edits the report. */
+        for (u64 i = 0; i < obj_slots(root); i++) {
+            object *s = obj_get_slot(root, i);
+            const char *nm = obj_slot_name(root, i);
+            if (s && nm && strcmp(nm, "activity") == 0 &&
+                obj_type(s) == TYPE_TEXT) {
+                activity_adopt(s);
+                break;
+            }
+        }
+        if (!activity_object() && activity_create()) {
+            u64 n = obj_slots(root), at = n;
+            for (u64 i = 0; i < n; i++)
+                if (!obj_get_slot(root, i)) { at = i; break; }
+            if (at < n || obj_grow_slots(root, n + 1)) {
+                obj_set_slot(root, at, activity_object(), CAP_READ);
+                obj_set_slot_name(root, at, "activity");
+            }
+        }
+
         journal_says("system", session ? "started; everything is as it was left"
                                        : "started fresh");
 
@@ -1045,17 +1080,23 @@ void kmain(eb_boot_info *bi)
          * a pointer that breaks the day they do. */
         persistent_root = root;
 
+        /* Whether the trail comes back is the person's setting; the
+         * session object itself stays either way, so changing one's
+         * mind later needs no ceremony. */
+        object *resume = settings_start_home() ? NULL : session;
+
         shell_init(kernel_domain, root, CAP_READ | CAP_WRITE | CAP_GRANT,
-                   session);
+                   resume);
         kprintf("shell: %s, %u generations kept on the disk\n",
-                session ? "resumed where it was left"
-                        : "starting at the root",
+                resume ? "resumed where it was left"
+                       : "starting at the root",
                 snap_slot_count());
 
         /* The screen belongs to the shell from here on. The log keeps
          * going to the serial port, where it paints over nothing. */
         kout_detach_screen();
         thread_create("shell", shell_run, NULL, kernel_domain);
+        thread_create("activity", activity_thread, NULL, kernel_domain);
         if (blk_present()) thread_create("persist", persist_thread, NULL,
                                          kernel_domain);
     }

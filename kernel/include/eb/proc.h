@@ -44,6 +44,11 @@ bool    proc_is_running(object *program);
  * can show what the program holds. NULL unless it is running. */
 domain *proc_domain_of(object *program);
 
+/* The living, one row at a time, for the activity table. */
+u32  proc_live_count(void);
+bool proc_live_at(u32 i, const char **name, u64 *id, u64 *holds,
+                  u64 *ran_ns);
+
 domain     *proc_domain(process *p);
 const char *proc_name(const process *p);
 u64         proc_id(const process *p);

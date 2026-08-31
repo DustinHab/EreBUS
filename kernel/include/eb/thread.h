@@ -46,6 +46,17 @@ void thread_set_pml4(thread *t, phys_addr pml4);
 /* Runs fn(arg) after the thread has finished and left its stack, from
  * whoever reaps it. Where a process hangs its teardown. */
 void thread_on_reap(thread *t, void (*fn)(void *), void *arg);
+
+/* Time actually held, booked at every handover of the processor. The
+ * boot thread's time is the machine's idle time: it does nothing but
+ * halt, so whatever it was holding, nobody else wanted. */
+u64  thread_ran_ns(const thread *t);
+u64  sched_idle_ns(void);
+
+/* How long a thread may hold the processor before the timer takes it,
+ * in ticks. The settings speak in milliseconds; this speaks in what
+ * the hardware counts. */
+void sched_set_slice_ticks(u32 t);
 void sched_wake(thread *t);
 
 /* Called from the timer interrupt. Marks the slice as spent; the switch
