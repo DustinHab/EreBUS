@@ -19,6 +19,7 @@
  * authority, which is the property that actually matters.
  */
 #include <eb/object.h>
+#include <eb/cap.h>
 #include <eb/kheap.h>
 #include <eb/fmt.h>
 #include <eb/panic.h>
@@ -35,6 +36,7 @@ struct object {
     u64     nslots;    /* outgoing references */
     u32     mark;      /* used by graph walks; not part of the object */
     u32     _mark_pad;
+    char    name[OBJ_NAME_MAX];   /* what the object calls itself */
     /* payload follows, then the slot array */
 };
 
@@ -44,12 +46,27 @@ static inline u8 *payload_of(object *o)
     return (u8 *)o + sizeof(object);
 }
 
-static inline object **slots_of(object *o)
+/* An outgoing reference carries its own rights.
+ *
+ * Without them a reference would be a bare pointer and every step
+ * through the graph would hand over everything the target can do. With
+ * them, following a reference narrows what you hold in exactly the way
+ * passing a capability to another domain does -- an object can point at
+ * something and let readers of itself only read it. The rule is the
+ * same everywhere: authority never grows by being followed. */
+typedef struct {
+    object *target;
+    u32     rights;
+    u32     _pad;
+    char    name[OBJ_NAME_MAX];   /* what the holder calls it */
+} obj_slot;
+
+static inline obj_slot *slots_of(object *o)
 {
     /* The slot array is pointer-aligned; the payload is rounded up so
      * it stays that way whatever length was asked for. */
     u64 aligned = (o->size + 7) & ~7ULL;
-    return (object **)(payload_of(o) + aligned);
+    return (obj_slot *)(payload_of(o) + aligned);
 }
 
 static u64 next_id = 1;
@@ -111,7 +128,7 @@ object *obj_create(type_id type, u64 payload_size, u64 slot_count)
     if (type >= types_registered) return NULL;
 
     u64 aligned = (payload_size + 7) & ~7ULL;
-    u64 total = sizeof(object) + aligned + slot_count * sizeof(object *);
+    u64 total = sizeof(object) + aligned + slot_count * sizeof(obj_slot);
 
     object *o = (object *)kzalloc(total);
     if (!o) return NULL;
@@ -145,9 +162,9 @@ void obj_release(object *o)
 
     /* Let go of everything this object was holding, which may in turn
      * be the last reference to those. */
-    object **slots = slots_of(o);
+    obj_slot *slots = slots_of(o);
     for (u64 i = 0; i < o->nslots; i++)
-        if (slots[i]) obj_release(slots[i]);
+        if (slots[i].target) obj_release(slots[i].target);
 
     /* Wipe the header before the memory goes back. The heap clears the
      * payload on release; the header is ours to clear, and leaving a
@@ -169,32 +186,92 @@ u64     obj_refs(const object *o)  { check(o, "refs"); return o->refs; }
 u64     obj_size(const object *o)  { check(o, "size"); return o->size; }
 u64     obj_slots(const object *o) { check(o, "slots"); return o->nslots; }
 
+/* Names.
+ *
+ * Two kinds, and the difference matters.
+ *
+ * The name on a reference is the holder's: you wrote it down, about
+ * something you already hold. Nothing else can set it. That is what
+ * stops an object handed to you from calling itself whatever would
+ * best persuade you to use it -- it does not get a say in what you
+ * call it.
+ *
+ * The name on the object is the object's own claim, shown only when
+ * nobody has given it one of their own, and never confused with the
+ * first. It is a convenience, not evidence.
+ *
+ * Neither is a namespace. A name here is readable only by whoever
+ * already holds the reference, and there is nothing anywhere that
+ * turns a name back into an object. */
+static void copy_name(char *dst, const char *src)
+{
+    u32 i = 0;
+    if (src) while (src[i] && i < OBJ_NAME_MAX - 1) { dst[i] = src[i]; i++; }
+    dst[i] = 0;
+}
+
+void obj_set_name(object *o, const char *name)
+{
+    check(o, "set name");
+    copy_name(o->name, name);
+}
+
+const char *obj_name(const object *o)
+{
+    check(o, "name");
+    return o->name[0] ? o->name : NULL;
+}
+
+bool obj_set_slot_name(object *o, u64 index, const char *name)
+{
+    check(o, "set slot name");
+    if (index >= o->nslots) return false;
+    copy_name(slots_of(o)[index].name, name);
+    return true;
+}
+
+const char *obj_slot_name(object *o, u64 index)
+{
+    check(o, "slot name");
+    if (index >= o->nslots) return NULL;
+    const char *n = slots_of(o)[index].name;
+    return n[0] ? n : NULL;
+}
+
 void *obj_data(object *o)
 {
     check(o, "data");
     return o->size ? payload_of(o) : NULL;
 }
 
-bool obj_set_slot(object *o, u64 index, object *target)
+bool obj_set_slot(object *o, u64 index, object *target, u32 rights)
 {
     check(o, "set slot");
     if (index >= o->nslots) return false;
     if (target) check(target, "set slot target");
 
-    object **slots = slots_of(o);
-    object *old = slots[index];
+    obj_slot *slots = slots_of(o);
+    object *old = slots[index].target;
 
     if (target) obj_retain(target);
-    slots[index] = target;
+    slots[index].target = target;
+    slots[index].rights = target ? rights : 0;
     if (old) obj_release(old);
     return true;
+}
+
+u32 obj_slot_rights(object *o, u64 index)
+{
+    check(o, "slot rights");
+    if (index >= o->nslots) return 0;
+    return slots_of(o)[index].rights;
 }
 
 object *obj_get_slot(object *o, u64 index)
 {
     check(o, "get slot");
     if (index >= o->nslots) return NULL;
-    return slots_of(o)[index];
+    return slots_of(o)[index].target;
 }
 
 /* The mark lives on the object rather than in a table beside it. A walk
@@ -230,7 +307,7 @@ bool obj_selftest(void)
     /* A list holding a reference keeps its target alive. */
     object *list = obj_create(TYPE_LIST, 0, 4);
     if (!list) return false;
-    if (!obj_set_slot(list, 0, text)) return false;
+    if (!obj_set_slot(list, 0, text, CAP_READ | CAP_WRITE)) return false;
 
     if (obj_refs(text) != 2) {
         kprintf("obj:  slot did not take a reference\n");
@@ -245,7 +322,7 @@ bool obj_selftest(void)
     }
 
     /* Out of range slots are refused rather than wrapping. */
-    if (obj_set_slot(list, 99, list)) {
+    if (obj_set_slot(list, 99, list, CAP_READ)) {
         kprintf("obj:  accepted a slot index past the end\n");
         return false;
     }
@@ -265,8 +342,8 @@ bool obj_selftest(void)
     object *holder = obj_create(TYPE_LIST, 0, 1);
     if (!a || !b || !holder) return false;
 
-    obj_set_slot(holder, 0, a);
-    obj_set_slot(holder, 0, b);
+    obj_set_slot(holder, 0, a, CAP_READ);
+    obj_set_slot(holder, 0, b, CAP_READ);
     if (obj_refs(a) != 1 || obj_refs(b) != 2) {
         kprintf("obj:  replacing a slot did not release the old target\n");
         return false;

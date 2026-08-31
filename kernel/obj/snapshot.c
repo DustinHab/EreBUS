@@ -8,7 +8,7 @@
 #include <eb/fmt.h>
 
 #define SNAP_MAGIC   0x50414E5342455245ULL   /* "EREBSNAP" */
-#define SNAP_VERSION 1u
+#define SNAP_VERSION 3u
 
 /* Two slots, far apart on the disk so a write to one cannot possibly
  * disturb the other. Each holds a header sector followed by its data. */
@@ -32,10 +32,21 @@ typedef struct {
  * eight bytes, and then the outgoing references as indices into this
  * snapshot rather than as pointers. */
 typedef struct {
-    u32 type;
-    u32 slot_count;
-    u64 size;
+    u32  type;
+    u32  slot_count;
+    u64  size;
+    char name[OBJ_NAME_MAX];      /* the object's own claim */
 } snap_record;
+
+/* A reference on disk: where the target sits in this snapshot, and what
+ * following it is allowed to do. The rights travel with it, or the
+ * graph would come back more permissive than it went down. */
+typedef struct {
+    i64  index;                   /* -1 for an empty slot */
+    u32  rights;
+    u32  _pad;
+    char name[OBJ_NAME_MAX];      /* what the holder calls it */
+} snap_ref;
 
 static bool  have_snapshot;
 static u64   current_generation;
@@ -137,7 +148,7 @@ bool snap_save(object **roots, u32 root_count)
         object *o = collected[i];
         u64 payload = obj_size(o);
         u64 slots = obj_slots(o);
-        u64 need = sizeof(snap_record) + align8(payload) + slots * sizeof(i64);
+        u64 need = sizeof(snap_record) + align8(payload) + slots * sizeof(snap_ref);
 
         if (at + need > buffer_bytes) { clear_marks(); return false; }
 
@@ -145,6 +156,10 @@ bool snap_save(object **roots, u32 root_count)
         r->type = obj_type(o);
         r->slot_count = (u32)slots;
         r->size = payload;
+        for (u32 c = 0; c < OBJ_NAME_MAX; c++) r->name[c] = 0;
+        const char *self = obj_name(o);
+        if (self) for (u32 c = 0; c < OBJ_NAME_MAX - 1 && self[c]; c++)
+            r->name[c] = self[c];
         at += sizeof(snap_record);
 
         const u8 *src = (const u8 *)obj_data(o);
@@ -155,10 +170,17 @@ bool snap_save(object **roots, u32 root_count)
         /* References become positions in this snapshot. A pointer means
          * nothing once the memory is gone; a position is still true
          * when the graph is built somewhere else entirely. */
-        i64 *refs = (i64 *)(buffer + at);
-        for (u64 s = 0; s < slots; s++)
-            refs[s] = index_of(obj_get_slot(o, s));
-        at += slots * sizeof(i64);
+        snap_ref *refs = (snap_ref *)(buffer + at);
+        for (u64 s = 0; s < slots; s++) {
+            refs[s].index = index_of(obj_get_slot(o, s));
+            refs[s].rights = obj_slot_rights(o, s);
+            refs[s]._pad = 0;
+            for (u32 c = 0; c < OBJ_NAME_MAX; c++) refs[s].name[c] = 0;
+            const char *pn = obj_slot_name(o, s);
+            if (pn) for (u32 c = 0; c < OBJ_NAME_MAX - 1 && pn[c]; c++)
+                refs[s].name[c] = pn[c];
+        }
+        at += slots * sizeof(snap_ref);
     }
 
     clear_marks();
@@ -268,7 +290,9 @@ u32 snap_load(object **roots, u32 max_roots)
             for (u64 bcount = 0; bcount < r->size; bcount++)
                 dst[bcount] = buffer[at + bcount];
 
-            at += align8(r->size) + (u64)r->slot_count * sizeof(i64);
+            obj_set_name(o, r->name[0] ? r->name : NULL);
+
+            at += align8(r->size) + (u64)r->slot_count * sizeof(snap_ref);
             collected[collected_count++] = o;
         }
 
@@ -277,13 +301,17 @@ u32 snap_load(object **roots, u32 max_roots)
             const snap_record *r = (const snap_record *)(buffer + at);
             at += sizeof(snap_record) + align8(r->size);
 
-            const i64 *refs = (const i64 *)(buffer + at);
+            const snap_ref *refs = (const snap_ref *)(buffer + at);
             for (u32 s = 0; s < r->slot_count; s++) {
-                i64 target = refs[s];
-                if (target >= 0 && target < (i64)collected_count)
-                    obj_set_slot(collected[i], s, collected[target]);
+                i64 target = refs[s].index;
+                if (target >= 0 && target < (i64)collected_count) {
+                    obj_set_slot(collected[i], s, collected[target],
+                                 refs[s].rights);
+                    obj_set_slot_name(collected[i], s,
+                                      refs[s].name[0] ? refs[s].name : NULL);
+                }
             }
-            at += (u64)r->slot_count * sizeof(i64);
+            at += (u64)r->slot_count * sizeof(snap_ref);
         }
 
         u32 n = (u32)h->root_count;

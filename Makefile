@@ -76,7 +76,7 @@ KERN_C   := kernel/main.c \
             kernel/hw/pic.c \
             kernel/hw/time.c \
             kernel/gfx/fb.c \
-            kernel/gfx/wm.c \
+            kernel/gfx/shell.c \
             kernel/hw/ps2.c \
             kernel/hw/pci.c \
             kernel/hw/ahci.c \
@@ -107,7 +107,8 @@ KERNEL := $(BUILD)/kernel.elf
 IMAGE  := $(BUILD)/esp.img
 STORE  := $(BUILD)/store.img
 
-.PHONY: all run shot fault wx stack trace-stack desktop trace-input persist debug clean info
+.PHONY: all run shot fault wx stack trace-stack desktop trace-input persist \
+        look debug clean info
 all: $(IMAGE)
 
 # --- font -------------------------------------------------------------
@@ -289,6 +290,27 @@ persist: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 	@grep -ao 'snap:.*' $(BUILD)/serial-1.log | tail -3
 	@echo "--- second boot ---"
 	@grep -ao 'snap:.*' $(BUILD)/serial-2.log | tail -3
+
+# Photographs the shell after sending a few keys, so the different ways
+# of looking can actually be seen. KEYS is a list of QEMU key names and
+# OUT is where the picture goes.
+#
+#   make look KEYS="down right"   step into the first reference
+#   make look KEYS="tab"          the graph
+#   make look KEYS="tab tab"      the columns
+KEYS ?=
+OUT  ?= $(BUILD)/screen-look.png
+
+look: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
+	@rm -f $(BUILD)/screen.ppm
+	@{ sleep 9; \
+	   for k in $(KEYS); do echo "sendkey $$k"; sleep 0.3; done; \
+	   sleep 1; echo "screendump $(BUILD)/screen.ppm"; \
+	   sleep 2; echo quit; } | \
+	  $(QEMU) -display none -monitor stdio \
+	          -serial file:$(BUILD)/serial.log >/dev/null 2>&1 || true
+	@$(PY) tools/ppm2png.py $(BUILD)/screen.ppm $(OUT)
+	@echo "  DONE    $(OUT)"
 
 debug: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
 	$(QEMU) -serial stdio -s -S

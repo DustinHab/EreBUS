@@ -29,15 +29,83 @@
 #include <eb/pmm.h>
 #include <eb/ps2.h>
 #include <eb/serial.h>
+#include <eb/shell.h>
 #include <eb/snapshot.h>
 #include <eb/thread.h>
 #include <eb/time.h>
 #include <eb/trap.h>
 #include <eb/vmm.h>
-#include <eb/wm.h>
 #include <common/bootinfo.h>
 
 #define EREBUS_VERSION "0.1"
+
+/* The graph a fresh system starts with.
+ *
+ * Small on purpose, and shaped to show three things a tree of files
+ * cannot do. The same object appears twice under two different names,
+ * because a name belongs to the reference and not to the thing it
+ * points at. It appears with different rights each time, because
+ * following a reference narrows what one holds. And the graph contains
+ * a loop, which is an ordinary shape here and a broken filesystem
+ * anywhere else. */
+static object *seed_graph(void)
+{
+    object *root  = obj_create(TYPE_LIST, 0, 4);
+    object *notes = obj_create(TYPE_TEXT, 512, 0);
+    object *idea  = obj_create(TYPE_TEXT, 512, 0);
+    object *raw   = obj_create(TYPE_BYTES, 64, 0);
+    object *aside = obj_create(TYPE_LIST, 0, 2);
+    if (!root || !notes || !idea || !raw || !aside) return NULL;
+
+    obj_set_name(root, "everything you hold");
+
+    static const char notes_text[] =
+        "type here. this is an object, not a file.\n"
+        "nothing is saved, because nothing was ever\n"
+        "loaded. it simply stays.\n";
+    static const char idea_text[] =
+        "a name belongs to the reference, not to\n"
+        "the thing it points at. you wrote it down\n"
+        "about something you already held, so an\n"
+        "object handed to you cannot announce\n"
+        "itself as something it is not.\n"
+        "\n"
+        "this text is reachable twice, under two\n"
+        "names, with different rights each time.\n";
+
+    u8 *d = (u8 *)obj_data(notes);
+    for (u32 i = 0; i < sizeof(notes_text); i++) d[i] = (u8)notes_text[i];
+    d = (u8 *)obj_data(idea);
+    for (u32 i = 0; i < sizeof(idea_text); i++) d[i] = (u8)idea_text[i];
+    d = (u8 *)obj_data(raw);
+    for (u32 i = 0; i < 64; i++) d[i] = (u8)(i * 37 + 5);
+
+    obj_set_slot(root, 0, notes, CAP_READ | CAP_WRITE);
+    obj_set_slot_name(root, 0, "notes");
+
+    obj_set_slot(root, 1, idea, CAP_READ | CAP_WRITE);
+    obj_set_slot_name(root, 1, "the idea");
+
+    obj_set_slot(root, 2, raw, CAP_READ);
+    obj_set_slot_name(root, 2, "some bytes");
+
+    obj_set_slot(root, 3, aside, CAP_READ | CAP_WRITE);
+    obj_set_slot_name(root, 3, "another way round");
+
+    /* The same text again: a different name, and readable only. */
+    obj_set_slot(aside, 0, idea, CAP_READ);
+    obj_set_slot_name(aside, 0, "that text, read only");
+
+    /* And back where we began, which closes a loop. */
+    obj_set_slot(aside, 1, root, CAP_READ);
+    obj_set_slot_name(aside, 1, "back to the start");
+
+    obj_release(notes);
+    obj_release(idea);
+    obj_release(raw);
+    obj_release(aside);
+    return root;
+}
 
 /* The programs that run outside the kernel, from user/programs.S. */
 extern char user_hello[];
@@ -94,12 +162,12 @@ static void persist_thread(void *arg)
 {
     (void)arg;
 
-    u64 seen = wm_changes();
+    u64 seen = shell_changes();
     u64 written = seen;
     u64 quiet_since = time_ns();
 
     for (;;) {
-        u64 now = wm_changes();
+        u64 now = shell_changes();
         if (now != seen) {
             seen = now;
             quiet_since = time_ns();
@@ -632,57 +700,33 @@ void kmain(eb_boot_info *bi)
     /* Try the disk before making anything. If a graph is there, the
      * system picks up where it left off; there is no separate "open" to
      * perform and nothing for the user to remember the name of. */
-    object *note = NULL;
-    if (snap_load(&note, 1) == 1) {
+    object *root = NULL;
+    if (snap_load(&root, 1) == 1) {
         kprintf("snap: graph restored from generation %llu, %u objects\n",
                 snap_generation(), snap_object_count());
     } else {
-        note = obj_create(TYPE_TEXT, 256, 0);
         kprintf("snap: no snapshot on the disk, starting fresh\n");
-        if (note) {
-            static const char initial[] =
-                "a typed object, not a file.\n"
-                "three windows are looking at it.\n"
-                "type here and watch the others.\n";
-            u8 *d = (u8 *)obj_data(note);
-            for (u32 i = 0; i < sizeof(initial); i++) d[i] = (u8)initial[i];
-        }
+        root = seed_graph();
     }
 
-    if (note) {
-        cap_handle rw = cap_insert(kernel_domain, note, CAP_READ | CAP_WRITE);
-        cap_handle ro = cap_insert(kernel_domain, note, CAP_READ);
+    if (root) {
+        /* One capability, held by the shell, carrying everything we can
+         * do. Every step from here narrows it. */
+        cap_insert(kernel_domain, root, CAP_READ | CAP_WRITE | CAP_GRANT);
 
-        /* Opened back to front: the last one is on top and has the
-         * keyboard. The writable view goes last so that typing has
-         * somewhere to land. */
-        wm_init();
-        wm_open("note  --  as bytes", 600, 150, 470, 300,
-                kernel_domain, ro, VIEW_HEX);
-        wm_open("note  --  as an object", 330, 470, 420, 220,
-                kernel_domain, ro, VIEW_INSPECT);
-        wm_open("note  --  as text", 90, 90, 460, 300,
-                kernel_domain, rw, VIEW_TEXT);
-        /* Read the identity before letting go: after the release our
-         * own reference is gone, and only the capabilities keep the
-         * object alive. Reading through a pointer we no longer hold a
-         * reference for happens to work here and is still the wrong
-         * habit. */
-        u64 note_id = obj_id(note);
-
-        /* The persistence root keeps the reference we were holding,
-         * rather than borrowing one from the capabilities. A pointer
+        /* The persistence root keeps the reference we were holding
+         * rather than borrowing one from the capability table. A pointer
          * that stays valid only because somebody else has not let go is
          * a pointer that breaks the day they do. */
-        persistent_root = note;
+        persistent_root = root;
 
-        kprintf("wm:   desktop started, 3 views of object %llu\n", note_id);
+        shell_init(kernel_domain, root, CAP_READ | CAP_WRITE | CAP_GRANT);
+        kprintf("shell: three ways of looking at one navigation state\n");
 
-        /* The screen belongs to the desktop from here on. The log keeps
-         * going to the serial port, where it does not paint over
-         * anything. */
+        /* The screen belongs to the shell from here on. The log keeps
+         * going to the serial port, where it paints over nothing. */
         kout_detach_screen();
-        thread_create("desktop", wm_run, NULL, kernel_domain);
+        thread_create("shell", shell_run, NULL, kernel_domain);
         if (blk_present()) thread_create("persist", persist_thread, NULL,
                                          kernel_domain);
     }

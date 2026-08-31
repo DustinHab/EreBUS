@@ -133,7 +133,7 @@ bool ps2_poll_mouse(mouse_event *out)
  * shift does not simply change case: the number row and the punctuation
  * keys produce entirely different characters. */
 static const char plain[0x59] = {
-    0,   0,  '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
+    0,   27,  '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
     '\t','q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
     0,   'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',
     0,   '\\','z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/',
@@ -141,7 +141,7 @@ static const char plain[0x59] = {
 };
 
 static const char shifted[0x59] = {
-    0,   0,  '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b',
+    0,   27,  '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b',
     '\t','Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n',
     0,   'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"',  '~',
     0,   '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?',
@@ -156,16 +156,43 @@ static void on_keyboard(trap_frame *f)
     u8 code = inb(PS2_DATA);
 
     /* 0xE0 introduces a two-byte code for the keys that did not exist
-     * on the original keyboard: arrows, right control, and so on. They
-     * are read and dropped for now rather than misread as their
-     * one-byte namesakes. */
+     * on the original keyboard: the arrows, the right-hand modifiers,
+     * the navigation block. Their second byte repeats a code that also
+     * belongs to a key on the numeric pad, so the prefix is the only
+     * thing telling them apart. */
     static bool extended;
     if (code == 0xE0) { extended = true; return; }
 
     bool down = !(code & 0x80);
     u8 make = code & 0x7F;
 
-    if (extended) { extended = false; return; }
+    if (extended) {
+        extended = false;
+
+        u32 cp = 0;
+        switch (make) {
+        case 0x48: cp = KEY_UP;    break;
+        case 0x50: cp = KEY_DOWN;  break;
+        case 0x4B: cp = KEY_LEFT;  break;
+        case 0x4D: cp = KEY_RIGHT; break;
+        case 0x47: cp = KEY_HOME;  break;
+        case 0x4F: cp = KEY_END;   break;
+        case 0x49: cp = KEY_PGUP;  break;
+        case 0x51: cp = KEY_PGDN;  break;
+        case 0x53: cp = KEY_DELETE; break;
+        case 0x1D: ctrl_down = down; return;
+        case 0x38: alt_down = down; return;
+        default: return;
+        }
+
+        key_event ex = {
+            .scancode = make, .codepoint = cp, .down = down,
+            .shift = shift_down, .ctrl = ctrl_down, .alt = alt_down,
+        };
+        if (down) key_total++;
+        push_key(&ex);
+        return;
+    }
 
     switch (make) {
     case 0x2A: case 0x36: shift_down = down; return;

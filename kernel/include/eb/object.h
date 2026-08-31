@@ -23,6 +23,10 @@
  * layer will walk when it snapshots the system.
  */
 
+/* How long a name may be. Short on purpose: a name is a label, and a
+ * label that needs a paragraph is not doing its job. */
+#define OBJ_NAME_MAX 32
+
 typedef u32 type_id;
 typedef struct object object;
 
@@ -59,9 +63,24 @@ u64     obj_size(const object *o);
 u64     obj_slots(const object *o);
 
 /* Outgoing references. Setting a slot takes a reference on the target
- * and drops whatever was there before. */
-bool    obj_set_slot(object *o, u64 index, object *target);
+ * and drops whatever was there before.
+ *
+ * Each reference carries its own rights, so an object can point at
+ * something and still limit what following that reference gets you.
+ * Authority narrows on every step and never widens -- the same rule as
+ * for capabilities between domains, because it is the same idea. */
+bool    obj_set_slot(object *o, u64 index, object *target, u32 rights);
 object *obj_get_slot(object *o, u64 index);
+u32     obj_slot_rights(object *o, u64 index);
+
+/* Names. The one on a reference belongs to whoever holds the
+ * referencing object; the one on the object is the object's own claim
+ * and is only shown when nobody has supplied their own. Neither can be
+ * used to find anything -- there is no lookup, in either direction. */
+void        obj_set_name(object *o, const char *name);
+const char *obj_name(const object *o);
+bool        obj_set_slot_name(object *o, u64 index, const char *name);
+const char *obj_slot_name(object *o, u64 index);
 
 /* Type registry. */
 type_id     type_register(const char *name);

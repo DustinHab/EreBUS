@@ -12,6 +12,21 @@
  * is one file instead of a subsystem.
  */
 
+/* Keys with no character get a code point of their own, above anything
+ * a character could occupy. */
+#define KEY_UP     0x110000u
+#define KEY_DOWN   0x110001u
+#define KEY_LEFT   0x110002u
+#define KEY_RIGHT  0x110003u
+#define KEY_HOME   0x110004u
+#define KEY_END    0x110005u
+#define KEY_PGUP   0x110006u
+#define KEY_PGDN   0x110007u
+#define KEY_DELETE 0x110008u
+#define KEY_ESCAPE 27u
+#define KEY_TAB     9u
+#define KEY_ENTER  10u
+
 typedef struct {
     u8   scancode;
     u32  codepoint;   /* zero for keys with no character */
