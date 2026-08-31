@@ -303,6 +303,14 @@ built binary.
   blanks what it is given -- write-only if need be, since blanking
   needs no right to read -- and its parting words point at the past,
   where the generations still hold what stood before.
+* **The index.** The fourth way of looking, and the file manager's
+  replacement: every object reachable from home, one line each -- id,
+  kind, size, holders, the rights of the way in, the name, and for
+  programs whether they run -- with the totals on top. Clicking a row
+  walks there reference by reference through follow(), so the list is
+  an overview and not a side door. What only the kernel and the
+  programs hold is counted beneath the list, not shown: an overview of
+  what you hold is not a window into what you do not.
 * M10 — booting real hardware from a USB stick
 
 ## A note on Secure Boot

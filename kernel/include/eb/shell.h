@@ -29,6 +29,7 @@ typedef enum {
     SHELL_FOCUS,     /* one object large, the path beside it */
     SHELL_GRAPH,     /* the reachable graph as nodes and edges */
     SHELL_TILES,     /* the path as columns, side by side */
+    SHELL_INDEX,     /* everything reachable, one line each */
     SHELL_MODE_COUNT
 } shell_mode;
 

@@ -152,7 +152,8 @@ typedef enum {
     HOT_ADD,         /* make a new reference here */
     HOT_PALETTE,     /* one choice of what to add */
     HOT_JOURNAL,     /* the newest journal line: go to the journal */
-    HOT_TEXT         /* the text itself: put the caret there */
+    HOT_TEXT,        /* the text itself: put the caret there */
+    HOT_INDEX        /* a row of the index: walk there */
 } hot_kind;
 
 typedef struct {
@@ -1168,6 +1169,171 @@ static void draw_tiles_shell(i32 sw, i32 sh, i32 top, i32 bottom)
 /* ------------------------------------------------------------------ */
 /* Frame                                                               */
 /* ------------------------------------------------------------------ */
+/* Shell four: the index                                               */
+/* ------------------------------------------------------------------ */
+
+/* Every object reachable from home, one line each: what a file manager
+ * is for, without pretending there are files. The walk starts at the
+ * beginning of the path and follows references breadth first, so the
+ * list is ordered by distance from where one lives.
+ *
+ * What the list does NOT show is the point at which this system parts
+ * ways with a file manager: objects held only by the kernel and the
+ * programs -- letter boxes, the console, the session -- are counted at
+ * the bottom, not listed. They exist, but no reference of yours leads
+ * to them, and an overview of what you hold is not a window into what
+ * you do not. */
+#define INDEX_MAX 192
+
+typedef struct {
+    object *o;
+    i32     parent;    /* row of the discoverer, -1 for home */
+    u32     via;       /* the slot on the discoverer */
+} index_row;
+
+static index_row irows[INDEX_MAX];
+static u32       icount;
+
+static bool index_has(object *o)
+{
+    for (u32 i = 0; i < icount; i++) if (irows[i].o == o) return true;
+    return false;
+}
+
+static void build_index(void)
+{
+    icount = 0;
+    if (nav.depth == 0) return;
+
+    irows[icount].o = nav.node[0];
+    irows[icount].parent = -1;
+    irows[icount].via = 0;
+    icount++;
+
+    for (u32 i = 0; i < icount && icount < INDEX_MAX; i++) {
+        object *o = irows[i].o;
+        for (u64 s = 0; s < obj_slots(o) && icount < INDEX_MAX; s++) {
+            object *t = obj_get_slot(o, s);
+            if (!t || index_has(t)) continue;
+            irows[icount].o = t;
+            irows[icount].parent = (i32)i;
+            irows[icount].via = (u32)s;
+            icount++;
+        }
+    }
+}
+
+static void draw_index_shell(i32 sw, i32 sh, i32 top, i32 bottom)
+{
+    (void)sh;
+    build_index();
+
+    fb_rect(PAD, top, sw - 2 * PAD, bottom - top, C_PANEL);
+
+    i32 x = PAD * 2;
+    i32 ty = top + PAD;
+    char line[96];
+    u32 at;
+
+    /* The sum first: how much there is, and how much of what exists is
+     * yours to see at all. */
+    u64 bytes = 0;
+    for (u32 i = 0; i < icount; i++) bytes += obj_size(irows[i].o);
+    u64 unseen = obj_live_count() > icount ? obj_live_count() - icount : 0;
+
+    at = put(line, 0, "reachable from ");
+    char home_name[40];
+    label_of(NULL, 0, nav.node[0], home_name, sizeof(home_name));
+    at = put(line, at, home_name);
+    at = put(line, at, ":  ");
+    at = put_dec(line, at, icount);
+    at = put(line, at, " objects, ");
+    at = put_dec(line, at, bytes / 1024);
+    at = put(line, at, " KiB of payload");
+    line[at] = 0;
+    text_at(x, ty, sw - PAD, line, C_TEXT);
+    ty += ROW;
+
+    at = put(line, 0, "and ");
+    at = put_dec(line, at, unseen);
+    at = put(line, at, " more exist that no reference of yours reaches");
+    line[at] = 0;
+    text_at(x, ty, sw - PAD, line, C_FAINT);
+    ty += ROW + ROW / 2;
+
+    text_at(x, ty, sw - PAD,
+            "  id  kind       bytes   held  way   name", C_DIM);
+    fb_rect(x, ty + ROW - 4, sw - 4 * PAD, 1, C_EDGE);
+    ty += ROW + 4;
+
+    u32 shown = 0;
+    for (u32 i = 0; i < icount && ty < bottom - 2 * ROW; i++, shown++) {
+        object *o = irows[i].o;
+        index_row *r = &irows[i];
+
+        bool here = (o == focus());
+        bool hot = is_hovered(HOT_INDEX, i);
+        if (here || hot)
+            fb_rect(PAD, ty - 3, sw - 2 * PAD, ROW,
+                    here ? C_PANEL_HI : C_EDGE);
+
+        at = 0;
+        at = put_dec(line, at, obj_id(o));
+        line[at] = 0;
+        text_at(x + (4 - (i32)at) * GLYPH_W, ty, sw, line, C_FAINT);
+
+        text_at(x + 6 * GLYPH_W, ty, x + 16 * GLYPH_W,
+                type_name(obj_type(o)), type_color(obj_type(o)));
+
+        at = 0;
+        at = put_dec(line, at, obj_size(o));
+        line[at] = 0;
+        text_at(x + (22 - (i32)at) * GLYPH_W, ty, sw, line, C_DIM);
+
+        at = 0;
+        at = put_dec(line, at, obj_refs(o));
+        line[at] = 0;
+        text_at(x + (28 - (i32)at) * GLYPH_W, ty, sw, line, C_DIM);
+
+        /* The rights on the reference this row was found through: what
+         * the best-known way in actually grants. Home was not found
+         * through anything; it is simply held. */
+        char rt[4];
+        if (r->parent >= 0) {
+            rights_text(obj_slot_rights(irows[r->parent].o, r->via), rt);
+            text_at(x + 30 * GLYPH_W, ty, sw, rt, C_DIM);
+        } else {
+            text_at(x + 30 * GLYPH_W, ty, sw, "---", C_FAINT);
+        }
+
+        char what[48];
+        label_of(r->parent >= 0 ? irows[r->parent].o : NULL, r->via,
+                 o, what, sizeof(what));
+        text_at(x + 36 * GLYPH_W, ty, sw - PAD, what,
+                (here || hot) ? C_TEXT : C_DIM);
+
+        /* For a program, whether it runs, at the right edge. */
+        if (obj_type(o) == TYPE_PROGRAM) {
+            bool alive = proc_is_running(o);
+            text_at(sw - PAD * 2 - 8 * GLYPH_W, ty, sw - PAD,
+                    alive ? "running" : "ended",
+                    alive ? C_WRITE : C_READONLY);
+        }
+
+        hot_add(PAD, ty - 3, sw - 2 * PAD, ROW, HOT_INDEX, i);
+        ty += ROW;
+    }
+
+    if (shown < icount) {
+        at = put(line, 0, "  and ");
+        at = put_dec(line, at, icount - shown);
+        at = put(line, at, " more below the edge of the screen");
+        line[at] = 0;
+        text_at(x, ty, sw - PAD, line, C_FAINT);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 
 static const char *mode_name(shell_mode m)
 {
@@ -1175,6 +1341,7 @@ static const char *mode_name(shell_mode m)
     case SHELL_FOCUS: return "focus";
     case SHELL_GRAPH: return "graph";
     case SHELL_TILES: return "columns";
+    case SHELL_INDEX: return "index";
     default:          return "?";
     }
 }
@@ -1286,6 +1453,7 @@ static void draw_all(void)
     case SHELL_FOCUS: draw_focus_shell(sw, sh, top, bottom); break;
     case SHELL_GRAPH: draw_graph_shell(sw, sh, top, bottom); break;
     case SHELL_TILES: draw_tiles_shell(sw, sh, top, bottom); break;
+    case SHELL_INDEX: draw_index_shell(sw, sh, top, bottom); break;
     default: break;
     }
 
@@ -1610,6 +1778,28 @@ static void act_on(const hot_region *r)
     case HOT_TIME:
         go_to_generation(r->index);
         break;
+
+    case HOT_INDEX: {
+        /* Clicking a row walks there, the honest way: back to home,
+         * then reference by reference along the way the row was found.
+         * Every step passes through follow(), so what one arrives
+         * holding is what the path grants -- the list is an overview,
+         * not a side door. */
+        if (r->index >= icount) break;
+
+        u32 chain[64];
+        u32 n = 0;
+        for (i32 i = (i32)r->index;
+             irows[i].parent >= 0 && n < 64;
+             i = irows[i].parent)
+            chain[n++] = irows[i].via;
+
+        go_back_to(0);
+        while (n) follow(chain[--n]);
+        nav.mode = SHELL_FOCUS;
+        nav.redraw = true;
+        break;
+    }
 
     case HOT_TEXT: {
         /* A click into the writing puts the caret there. The pixel is
