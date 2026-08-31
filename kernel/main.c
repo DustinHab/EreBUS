@@ -25,11 +25,13 @@
 #include <eb/syscall.h>
 #include <eb/pic.h>
 #include <eb/pmm.h>
+#include <eb/ps2.h>
 #include <eb/serial.h>
 #include <eb/thread.h>
 #include <eb/time.h>
 #include <eb/trap.h>
 #include <eb/vmm.h>
+#include <eb/wm.h>
 #include <common/bootinfo.h>
 
 #define EREBUS_VERSION "0.1"
@@ -534,6 +536,70 @@ void kmain(eb_boot_info *bi)
 
     kprintf("proc: %llu processes started, %llu ended by a fault\n",
             proc_count(), proc_faults());
+
+    /* --- the desktop ------------------------------------------------- */
+
+    ps2_init();
+    kprintf("ps2:  keyboard %s, mouse %s\n",
+            ps2_keyboard_present() ? "ready" : "absent",
+            ps2_mouse_present() ? "ready" : "absent");
+
+    u64 back_bytes = fb_backbuffer_bytes();
+    phys_addr back = pmm_alloc_contig(PAGE_UP(back_bytes) / PAGE_SIZE);
+    if (back != PMM_NO_FRAME) {
+        fb_enable_backbuffer(phys_to_virt(back));
+        kprintf("fb0:  double buffered, ");
+        print_size(back_bytes);
+        kprintf(" back buffer\n");
+    } else {
+        kprintf("fb0:  not enough contiguous memory for a back buffer\n");
+    }
+
+    /* One object, and three windows onto it.
+     *
+     * There is no file here and no name. The windows hold capabilities,
+     * two of them read-only, and every one of them resolves its own
+     * every time it draws. Typing into the writable one changes the
+     * object, and the other two show the change because they were never
+     * looking at anything else. */
+    object *note = obj_create(TYPE_TEXT, 256, 0);
+    if (note) {
+        static const char initial[] =
+            "a typed object, not a file.\n"
+            "three windows are looking at it.\n"
+            "type here and watch the others.\n";
+        u8 *d = (u8 *)obj_data(note);
+        for (u32 i = 0; i < sizeof(initial); i++) d[i] = (u8)initial[i];
+
+        cap_handle rw = cap_insert(kernel_domain, note, CAP_READ | CAP_WRITE);
+        cap_handle ro = cap_insert(kernel_domain, note, CAP_READ);
+
+        /* Opened back to front: the last one is on top and has the
+         * keyboard. The writable view goes last so that typing has
+         * somewhere to land. */
+        wm_init();
+        wm_open("note  --  as bytes", 600, 150, 470, 300,
+                kernel_domain, ro, VIEW_HEX);
+        wm_open("note  --  as an object", 330, 470, 420, 220,
+                kernel_domain, ro, VIEW_INSPECT);
+        wm_open("note  --  as text", 90, 90, 460, 300,
+                kernel_domain, rw, VIEW_TEXT);
+        /* Read the identity before letting go: after the release our
+         * own reference is gone, and only the capabilities keep the
+         * object alive. Reading through a pointer we no longer hold a
+         * reference for happens to work here and is still the wrong
+         * habit. */
+        u64 note_id = obj_id(note);
+        obj_release(note);
+
+        kprintf("wm:   desktop started, 3 views of object %llu\n", note_id);
+
+        /* The screen belongs to the desktop from here on. The log keeps
+         * going to the serial port, where it does not paint over
+         * anything. */
+        kout_detach_screen();
+        thread_create("desktop", wm_run, NULL, kernel_domain);
+    }
 
     dump_ranges(bi);
 

@@ -76,6 +76,8 @@ KERN_C   := kernel/main.c \
             kernel/hw/pic.c \
             kernel/hw/time.c \
             kernel/gfx/fb.c \
+            kernel/gfx/wm.c \
+            kernel/hw/ps2.c \
             kernel/mm/pmm.c \
             kernel/mm/vmm.c \
             kernel/mm/kheap.c \
@@ -101,7 +103,7 @@ LOADER := $(BUILD)/BOOTX64.EFI
 KERNEL := $(BUILD)/kernel.elf
 IMAGE  := $(BUILD)/esp.img
 
-.PHONY: all run shot fault wx stack trace-stack debug clean info
+.PHONY: all run shot fault wx stack trace-stack desktop trace-input debug clean info
 all: $(IMAGE)
 
 # --- font -------------------------------------------------------------
@@ -223,6 +225,33 @@ trace-stack:
 	    -d int,cpu_reset -D $(BUILD)/qemu.log >/dev/null 2>&1 || true
 	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
 	@echo "  DONE    $(BUILD)/qemu.log"
+
+# Boots, waits for the desktop, types into the focused window through
+# QEMU's monitor, and photographs the result. Typing is the only way to
+# show that input reaches a window and that the other views of the same
+# object follow along.
+desktop: $(IMAGE) $(BUILD)/OVMF_VARS.fd
+	@rm -f $(BUILD)/screen.ppm
+	@{ sleep 8; \
+	   for k in t y p e d spc l i v e; do \
+	     echo "sendkey $$k"; sleep 0.2; done; \
+	   sleep 1; echo "screendump $(BUILD)/screen.ppm"; \
+	   sleep 2; echo quit; } | \
+	  $(QEMU) -display none -monitor stdio \
+	          -serial file:$(BUILD)/serial.log >/dev/null 2>&1 || true
+	@$(PY) tools/ppm2png.py $(BUILD)/screen.ppm $(BUILD)/screen-desktop.png
+	@echo "  DONE    $(BUILD)/screen-desktop.png"
+
+# Which interrupt vectors actually reach the processor while keys are
+# being sent. 0x21 is line 1 (keyboard), 0x2c is line 12 (mouse).
+trace-input: $(IMAGE) $(BUILD)/OVMF_VARS.fd
+	@rm -f $(BUILD)/qemu.log
+	@{ sleep 8; echo "sendkey a"; echo "sendkey b"; echo "sendkey c"; \
+	   sleep 2; echo quit; } | \
+	  $(QEMU) -display none -monitor stdio -serial file:$(BUILD)/serial.log \
+	          -d int -D $(BUILD)/qemu.log >/dev/null 2>&1 || true
+	@echo "vectors seen after the keys were sent:"
+	@grep -oE 'v=[0-9a-f]+' $(BUILD)/qemu.log | sort | uniq -c | sort -rn | head
 
 debug: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 	$(QEMU) -serial stdio -s -S

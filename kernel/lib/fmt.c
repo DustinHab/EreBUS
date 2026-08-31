@@ -20,6 +20,14 @@ void kout_add_sink(kout_sink sink)
 /* Sink 0 is always the serial port. */
 void kout_mute_screen(bool mute) { screen_muted = mute; }
 
+/* Hands the screen over for good. Muting is temporary by design -- the
+ * long diagnostics turn it on and off again -- so something that must
+ * never come back needs its own door. */
+void kout_detach_screen(void)
+{
+    if (sink_count > 1) sink_count = 1;
+}
+
 void kout_set_clock(u64 (*nanoseconds)(void)) { clock_ns = nanoseconds; }
 
 static void raw_putc(char c)

@@ -15,6 +15,17 @@ void fb_init(const eb_boot_info *bi);
 u32  fb_width(void);
 u32  fb_height(void);
 
+/* Double buffering. Until a back buffer is handed over, drawing goes
+ * straight to the screen. */
+u64  fb_backbuffer_bytes(void);
+void fb_enable_backbuffer(void *memory);
+bool fb_is_buffered(void);
+
+/* Marks a region as changed, and copies everything marked since the
+ * last call to the screen. */
+void fb_damage(i32 x, i32 y, i32 w, i32 h);
+void fb_present(void);
+
 void fb_clear(color c);
 void fb_pixel(i32 x, i32 y, color c);
 void fb_rect(i32 x, i32 y, i32 w, i32 h, color c);

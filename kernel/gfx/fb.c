@@ -12,24 +12,104 @@
 #include "font8x16.h"
 
 static struct {
-    u32 *base;
+    u32 *base;       /* where drawing goes: the back buffer once there is one */
+    u32 *front;      /* the real framebuffer */
     u32  width, height;
     u32  stride;     /* pixels per scanline, may exceed width */
     bool rgb;        /* true: RGBX instead of the usual BGRX */
     bool ready;
+    bool buffered;
 } fb;
+
+/* The region changed since the last present, as one bounding box.
+ *
+ * One box rather than a list of rectangles: a list tracks damage more
+ * precisely, but every drawing operation then has to merge into it, and
+ * the merging costs more than the pixels saved unless the changes are
+ * genuinely far apart. A single box is wrong only in the sense of
+ * copying some untouched pixels, which is cheap and never incorrect. */
+static struct { i32 x0, y0, x1, y1; bool any; } dirty;
+
+void fb_damage(i32 x, i32 y, i32 w, i32 h)
+{
+    if (!fb.buffered || w <= 0 || h <= 0) return;
+
+    if (!dirty.any) {
+        dirty.x0 = x; dirty.y0 = y;
+        dirty.x1 = x + w; dirty.y1 = y + h;
+        dirty.any = true;
+        return;
+    }
+    if (x < dirty.x0) dirty.x0 = x;
+    if (y < dirty.y0) dirty.y0 = y;
+    if (x + w > dirty.x1) dirty.x1 = x + w;
+    if (y + h > dirty.y1) dirty.y1 = y + h;
+}
+
+void fb_present(void)
+{
+    if (!fb.buffered || !dirty.any) return;
+
+    i32 x0 = dirty.x0 < 0 ? 0 : dirty.x0;
+    i32 y0 = dirty.y0 < 0 ? 0 : dirty.y0;
+    i32 x1 = dirty.x1 > (i32)fb.width  ? (i32)fb.width  : dirty.x1;
+    i32 y1 = dirty.y1 > (i32)fb.height ? (i32)fb.height : dirty.y1;
+    dirty.any = false;
+
+    for (i32 y = y0; y < y1; y++) {
+        const u32 *src = fb.base  + (u32)y * fb.stride + (u32)x0;
+        u32 *dst       = fb.front + (u32)y * fb.stride + (u32)x0;
+        for (i32 x = 0; x < x1 - x0; x++) dst[x] = src[x];
+    }
+}
 
 void fb_init(const eb_boot_info *bi)
 {
     /* The framebuffer address from the firmware is physical; reach it
      * through the direct map like any other physical memory. */
-    fb.base   = (u32 *)phys_to_virt(bi->fb_base);
+    fb.front  = (u32 *)phys_to_virt(bi->fb_base);
+    fb.base   = fb.front;          /* draw straight to the screen for now */
     fb.width  = bi->fb_width;
     fb.height = bi->fb_height;
     fb.stride = bi->fb_stride;
     fb.rgb    = (bi->fb_format == EB_FB_RGBX8888);
     fb.ready  = (fb.base != NULL && fb.width > 0 && fb.height > 0);
+    fb.buffered = false;
 }
+
+u64 fb_backbuffer_bytes(void)
+{
+    return (u64)fb.stride * fb.height * sizeof(u32);
+}
+
+/* Moves drawing off the screen and into memory.
+ *
+ * The framebuffer is not ordinary memory: it lives across a bus, is
+ * uncached, and a read from it is far slower than a write. Anything
+ * that reads back -- scrolling a console, moving a window, drawing
+ * something translucent -- pays for that on every pixel. Drawing into
+ * plain RAM and copying the changed part across once turns all of it
+ * into cache-speed work plus one linear write.
+ *
+ * It also removes tearing: the screen never shows a half-finished
+ * frame, because a frame only reaches it when it is finished. */
+void fb_enable_backbuffer(void *memory)
+{
+    if (!memory || !fb.ready) return;
+
+    u32 *back = (u32 *)memory;
+    const u32 *front = fb.front;
+
+    /* Start from what is already on screen, so enabling this does not
+     * blank whatever has been logged so far. */
+    for (u32 i = 0; i < fb.stride * fb.height; i++) back[i] = front[i];
+
+    fb.base = back;
+    fb.buffered = true;
+    dirty.any = false;
+}
+
+bool fb_is_buffered(void) { return fb.buffered; }
 
 u32 fb_width(void)  { return fb.width; }
 u32 fb_height(void) { return fb.height; }
@@ -48,6 +128,7 @@ void fb_pixel(i32 x, i32 y, color c)
     if (!fb.ready) return;
     if (x < 0 || y < 0 || (u32)x >= fb.width || (u32)y >= fb.height) return;
     fb.base[(u32)y * fb.stride + (u32)x] = to_native(c);
+    fb_damage(x, y, 1, 1);
 }
 
 void fb_rect(i32 x, i32 y, i32 w, i32 h, color c)
@@ -62,6 +143,8 @@ void fb_rect(i32 x, i32 y, i32 w, i32 h, color c)
     if (x1 > (i32)fb.width)  x1 = (i32)fb.width;
     if (y1 > (i32)fb.height) y1 = (i32)fb.height;
     if (x0 >= x1 || y0 >= y1) return;
+
+    fb_damage(x0, y0, x1 - x0, y1 - y0);
 
     u32 native = to_native(c);
     for (i32 yy = y0; yy < y1; yy++) {
@@ -157,6 +240,8 @@ static void draw_glyph_cp(i32 x, i32 y, u32 cp, color fg, color bg,
     }
 
     u32 fgn = to_native(fg), bgn = to_native(bg);
+    fb_damage(x, y, w, h);
+
 
     for (i32 row = 0; row < GLYPH_H; row++) {
         u8 bits = g[row];
@@ -288,6 +373,7 @@ static void scroll(void)
         for (i32 xx = 0; xx < con.w; xx++) dst[xx] = src[xx];
     }
     fb_rect(con.x, con.y + con.h - line, con.w, line, con.bg);
+    fb_damage(con.x, con.y, con.w, con.h);
     con.row--;
 }
 
@@ -319,6 +405,10 @@ void fbcon_putc(char c)
         con.col = 0;
         con.row++;
         while (con.row >= con.rows) scroll();
+        /* Push the finished line to the screen. Presenting per line
+         * rather than per character keeps the log appearing live while
+         * still doing one copy instead of eight per glyph. */
+        fb_present();
         return;
     }
     if (b == '\r') { con.col = 0; return; }

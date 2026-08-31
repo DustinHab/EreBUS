@@ -15,6 +15,9 @@ void kout_add_sink(kout_sink sink);
  * would otherwise bury the screen. */
 void kout_mute_screen(bool mute);
 
+/* Removes the screen sink permanently, for when the desktop takes over. */
+void kout_detach_screen(void);
+
 /* Once a time source is available, every log line is prefixed with the
  * uptime, the way dmesg does it. Pass NULL to turn it off again. */
 void kout_set_clock(u64 (*nanoseconds)(void));

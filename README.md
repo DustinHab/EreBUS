@@ -160,7 +160,14 @@ built binary.
   only because it was handed a send-only capability to that server's
   port. A second program reaches for kernel memory on purpose: it is
   ended, and the machine carries on.
-* M7 — compositor, windows, PS/2 input
+* **M7 — done.** Double buffering with a damage rectangle, PS/2
+  keyboard and mouse, and a desktop whose windows are views onto
+  objects. Three windows open on one object -- as text, as bytes, as the
+  object itself -- and typing into the writable one changes what the
+  other two show. There is nothing to save, no format to agree on, and
+  the read-only windows cannot alter a byte because their capability
+  does not resolve for a write. make desktop types into it through
+  QEMU's monitor and photographs the result.
 * M8 — desktop: object browser and type viewers
 * M9 — persistence: NVMe/AHCI, snapshot and restore
 * M10 — booting real hardware from a USB stick
