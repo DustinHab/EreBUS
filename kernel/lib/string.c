@@ -1,0 +1,61 @@
+/*
+ * string.c -- die Speicherfunktionen, die der Übersetzer voraussetzt.
+ *
+ * clang erzeugt Aufrufe auf memset/memcpy/memmove/memcmp auch dann,
+ * wenn man sie nie hinschreibt (Strukturzuweisungen, Initialisierer).
+ * Ohne diese Datei bleibt der Binder mit undefinierten Symbolen stehen.
+ */
+#include <eb/types.h>
+
+void *memset(void *dst, int c, usize n)
+{
+    u8 *d = (u8 *)dst;
+    while (n--) *d++ = (u8)c;
+    return dst;
+}
+
+void *memcpy(void *dst, const void *src, usize n)
+{
+    u8 *d = (u8 *)dst;
+    const u8 *s = (const u8 *)src;
+    while (n--) *d++ = *s++;
+    return dst;
+}
+
+/* Wie memcpy, aber korrekt bei sich überlappenden Bereichen. */
+void *memmove(void *dst, const void *src, usize n)
+{
+    u8 *d = (u8 *)dst;
+    const u8 *s = (const u8 *)src;
+    if (d == s || n == 0) return dst;
+    if (d < s) {
+        while (n--) *d++ = *s++;
+    } else {
+        d += n; s += n;
+        while (n--) *--d = *--s;
+    }
+    return dst;
+}
+
+int memcmp(const void *a, const void *b, usize n)
+{
+    const u8 *x = (const u8 *)a, *y = (const u8 *)b;
+    while (n--) {
+        if (*x != *y) return (int)*x - (int)*y;
+        x++; y++;
+    }
+    return 0;
+}
+
+usize strlen(const char *s)
+{
+    usize n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+int strcmp(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return (int)(u8)*a - (int)(u8)*b;
+}
