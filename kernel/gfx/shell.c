@@ -1360,11 +1360,23 @@ static void draw_all(void)
     i32 sw = (i32)fb_width(), sh = (i32)fb_height();
     i32 top = 66, bottom = sh - 34;
 
-    /* The newest journal line gets a quiet row above the footer. What
-     * programs and the system do would otherwise be invisible until
-     * somebody thought to go and look. */
+    /* The newest journal line gets a quiet row above the footer -- and
+     * only while it is news. What programs and the system do would
+     * otherwise be invisible until somebody thought to go and look; but
+     * a line that stays for hours stops reading as an event and starts
+     * reading as a status, which it is not. Half a minute, then the row
+     * retires and the log keeps it. The age comes from the line itself:
+     * every entry begins with the second it happened in. */
     char newest[104];
     bool have_news = journal_latest(newest, sizeof(newest));
+    if (have_news) {
+        u64 said_at = 0, p = 0;
+        while (newest[p] == ' ') p++;
+        while (newest[p] >= '0' && newest[p] <= '9')
+            said_at = said_at * 10 + (u64)(newest[p++] - '0');
+        u64 now_s = time_ns() / 1000000000ULL;
+        if (now_s > said_at + 30) have_news = false;
+    }
     if (have_news) bottom -= ROW + 6;
 
     pal = settings_light() ? pal_light : pal_dark;
