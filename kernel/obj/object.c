@@ -12,14 +12,15 @@
  *
  * Reference counting cannot collect a cycle: two objects pointing at
  * each other keep each other alive after everything else has let go.
- * That is a known and accepted gap here. The answer is not a cleverer
- * count but a collector that walks the graph from its roots, and this
- * system will need one anyway -- persistence works by walking exactly
- * that graph. A cycle leaks memory until then; it cannot leak
- * authority, which is the property that actually matters.
+ * The counts stay -- they free almost everything, immediately and
+ * predictably -- and obj_collect() below walks the graph now and then
+ * to catch the rest. Between runs a cycle costs memory; it never costs
+ * authority, which is the property that actually matters here.
  */
 #include <eb/object.h>
 #include <eb/cap.h>
+#include <eb/msg.h>
+#include <eb/io.h>
 #include <eb/kheap.h>
 #include <eb/fmt.h>
 #include <eb/panic.h>
@@ -53,6 +54,17 @@ struct object {
     u32     _mark_pad;
     char    name[OBJ_NAME_MAX];   /* what the object calls itself */
     obj_slot *slots;              /* its own allocation, so it can grow */
+
+    /* Every object that exists, on one list.
+     *
+     * Nothing may use this to find anything: it is not reachable from
+     * outside this file and there is no call that turns it into a
+     * lookup. It exists for one purpose, which is that a collector has
+     * to be able to sweep what the roots did not reach, and there is no
+     * way to sweep a set one cannot enumerate. The security argument is
+     * unchanged -- an enumeration only the allocator can see is not a
+     * namespace. */
+    object *all_prev, *all_next;
     /* the payload follows this header */
 };
 
@@ -74,6 +86,8 @@ static inline obj_slot *slots_of(object *o)
 {
     return o->slots;
 }
+
+static object *all_objects;
 
 static u64 next_id = 1;
 static u64 live_objects;
@@ -101,6 +115,7 @@ void obj_store_init(void)
     type_names[TYPE_PROGRAM] = "program";
     types_registered = TYPE_BUILTIN_COUNT;
 
+    all_objects = NULL;
     next_id = 1;
     live_objects = 0;
     created_objects = 0;
@@ -150,6 +165,10 @@ object *obj_create(type_id type, u64 payload_size, u64 slot_count)
     o->size   = payload_size;
     o->nslots = slot_count;
 
+    o->all_next = all_objects;
+    if (all_objects) all_objects->all_prev = o;
+    all_objects = o;
+
     live_objects++;
     created_objects++;
     return o;
@@ -170,6 +189,15 @@ void obj_release(object *o)
 
     if (--o->refs > 0) return;
 
+    /* A port dying with messages still queued is holding their cargo,
+     * and those holds live in the payload where the generic teardown
+     * below cannot see them. The type comparison is guarded because
+     * before the port type is registered, port_type() answers zero --
+     * which is TYPE_NULL, and matching that would hand arbitrary
+     * payloads to the queue walker. */
+    if (o->type >= TYPE_BUILTIN_COUNT && o->type == port_type())
+        port_drop_queued(o);
+
     /* Let go of everything this object was holding, which may in turn
      * be the last reference to those. */
     obj_slot *slots = slots_of(o);
@@ -185,6 +213,10 @@ void obj_release(object *o)
     o->type = TYPE_NULL;
     o->nslots = 0;
     o->size = 0;
+
+    if (o->all_prev) o->all_prev->all_next = o->all_next;
+    else             all_objects = o->all_next;
+    if (o->all_next) o->all_next->all_prev = o->all_prev;
 
     live_objects--;
     if (o->slots) kfree(o->slots);
@@ -320,6 +352,170 @@ u64 obj_live_count(void)    { return live_objects; }
 u64 obj_total_created(void) { return created_objects; }
 
 /* ------------------------------------------------------------------ */
+/* Collecting what counting cannot                                     */
+/* ------------------------------------------------------------------ */
+
+/* Reference counting frees an object the moment nobody holds it, which
+ * is most of the work and all of the predictability. What it cannot do
+ * is a cycle: two objects pointing at each other hold each other up
+ * after everything else has let go, and no count will ever reach zero.
+ *
+ * So the counts stay, and this runs occasionally to catch what they
+ * miss. It is the same walk persistence already does -- from the roots,
+ * following every reference, marking what it reaches -- with the
+ * addition that whatever the walk did not reach is not merely absent
+ * from the snapshot but is genuinely gone, and is freed.
+ *
+ * The roots are not a list anybody keeps. They are computed, from the
+ * one invariant this file has always enforced: every reference is
+ * counted. Some of an object's count comes from inside the graph --
+ * slots in other objects, messages waiting in ports -- and that part
+ * can be recomputed by looking. Whatever is left over is a holder the
+ * graph cannot see: a capability table, a kernel pointer, a message
+ * being composed. Those holders can still reach the object, so it is a
+ * root, and so is everything a root can reach. An object whose entire
+ * count is accounted for from inside is held by nothing but the graph
+ * itself -- and if no root reaches it either, the things holding it up
+ * are exactly as dead as it is. */
+
+#define COLLECT_REACHED 0x80000000u
+#define COLLECT_COUNT   0x7FFFFFFFu
+
+static object **grey;         /* what has been marked but not walked */
+static u64      grey_count;
+
+/* Guarded the same way as in obj_release, and for the same reason:
+ * before the port type is registered, port_type() answers TYPE_NULL. */
+static bool is_port(const object *o)
+{
+    return o->type >= TYPE_BUILTIN_COUNT && o->type == port_type();
+}
+
+static void count_inward(object *o)
+{
+    if (o) o->mark++;         /* counts stay far below the flag bit */
+}
+
+static void grey_push(object *o)
+{
+    if (!o || (o->mark & COLLECT_REACHED)) return;
+    o->mark |= COLLECT_REACHED;
+    grey[grey_count++] = o;      /* bounded by live_objects, pushed once */
+}
+
+static void trace_from_roots(void)
+{
+    /* Roots first: more count than the graph explains means an outside
+     * holder. The flag bit is masked off because earlier roots have
+     * already been stamped by the time later ones are tested. */
+    for (object *o = all_objects; o; o = o->all_next)
+        if (o->refs > (o->mark & COLLECT_COUNT)) grey_push(o);
+
+    while (grey_count > 0) {
+        object *o = grey[--grey_count];
+
+        obj_slot *slots = slots_of(o);
+        for (u64 i = 0; i < o->nslots; i++) grey_push(slots[i].target);
+
+        /* A port's queue holds objects that are between two tables and
+         * so belong to no table at all. */
+        if (is_port(o)) port_visit_queued(o, grey_push);
+    }
+}
+
+u64 obj_collect(void)
+{
+    /* An explicit worklist rather than recursion. A graph deep enough
+     * to be worth collecting is a graph deep enough to run the kernel
+     * stack into its guard page, and a collector that crashes on a big
+     * heap is worse than no collector. Every object is pushed at most
+     * once, because it is stamped before it is pushed, so live_objects
+     * entries is not an estimate -- it is the exact bound. */
+    /* Nothing may move underneath the walk. The graph is mutated from
+     * kernel threads that the timer can switch between, and a count
+     * taken before a mutation paired with a walk taken after it would
+     * free live memory. The heap here is small enough that holding the
+     * machine for one walk is cheaper than being clever about it.
+     *
+     * The worklist is sized inside the same stillness, for the same
+     * reason: a count taken before the world stops is a count something
+     * may have outgrown by the time it matters. */
+    u64 flags = irq_save();
+
+    u64 room = live_objects;
+    if (room == 0) { irq_restore(flags); return 0; }
+
+    grey = (object **)kzalloc(room * sizeof(object *));
+    if (!grey) { irq_restore(flags); return 0; }
+    grey_count = 0;
+
+    /* How much of each count the graph itself explains. */
+    for (object *o = all_objects; o; o = o->all_next) o->mark = 0;
+    for (object *o = all_objects; o; o = o->all_next) {
+        obj_slot *slots = slots_of(o);
+        for (u64 i = 0; i < o->nslots; i++) count_inward(slots[i].target);
+        if (is_port(o)) port_visit_queued(o, count_inward);
+    }
+
+    trace_from_roots();
+
+    /* Hold on to the unreachable ones first.
+     *
+     * Everything about to be freed is pointing at other things about to
+     * be freed, and letting go in the wrong order would free an object
+     * while the next step still has to read its links. Holding all of
+     * them for the length of the sweep makes the order stop mattering. */
+    u64 doomed = 0;
+    for (object *o = all_objects; o; o = o->all_next)
+        if (!(o->mark & COLLECT_REACHED)) { o->refs++; doomed++; }
+
+    if (doomed == 0) {
+        for (object *o = all_objects; o; o = o->all_next) o->mark = 0;
+        irq_restore(flags);
+        kfree(grey);
+        grey = NULL;
+        return 0;
+    }
+
+    /* Break the cycles. After this every unreachable object is held by
+     * exactly the reference taken above: not by each other, because
+     * those are now cleared, and not by anything reachable, because
+     * anything reachable would have marked it. A dead port's undelivered
+     * messages count as references it was holding, so they are let go of
+     * here with everything else. */
+    for (object *o = all_objects; o; o = o->all_next) {
+        if (o->mark & COLLECT_REACHED) continue;
+        obj_slot *slots = slots_of(o);
+        for (u64 i = 0; i < o->nslots; i++) {
+            if (!slots[i].target) continue;
+            obj_release(slots[i].target);
+            slots[i].target = NULL;
+            slots[i].rights = 0;
+        }
+        if (is_port(o)) port_drop_queued(o);
+    }
+
+    /* And let go. Each release is now the last one, and frees exactly
+     * the object it was called on, which is what makes walking the list
+     * while it shortens safe. */
+    object *o = all_objects;
+    while (o) {
+        object *next = o->all_next;
+        if (!(o->mark & COLLECT_REACHED)) obj_release(o);
+        o = next;
+    }
+
+    /* The mark field goes back to meaning nothing, which is what the
+     * snapshot walk expects to find. */
+    for (object *s = all_objects; s; s = s->all_next) s->mark = 0;
+
+    irq_restore(flags);
+    kfree(grey);
+    grey = NULL;
+    return doomed;
+}
+
+/* ------------------------------------------------------------------ */
 
 bool obj_selftest(void)
 {
@@ -387,4 +583,55 @@ bool obj_selftest(void)
     obj_release(holder);
 
     return obj_live_count() == live_before;
+}
+
+bool obj_collect_selftest(void)
+{
+    u64 before = obj_live_count();
+
+    /* Two objects pointing at each other and held by nothing else. The
+     * counts alone cannot free them, and the test first proves that the
+     * problem is real: after both releases they are still here. */
+    object *a = obj_create(TYPE_LIST, 0, 1);
+    object *b = obj_create(TYPE_LIST, 0, 1);
+    if (!a || !b) return false;
+    obj_set_slot(a, 0, b, CAP_READ);
+    obj_set_slot(b, 0, a, CAP_READ);
+    obj_release(a);
+    obj_release(b);
+
+    if (obj_live_count() != before + 2) {
+        kprintf("obj:  the cycle did not leak, which this test relies on\n");
+        return false;
+    }
+
+    /* A second cycle, this one still held: our reference to c is the
+     * kind of hold the graph cannot see, and it must be enough. */
+    object *c = obj_create(TYPE_LIST, 0, 1);
+    object *d = obj_create(TYPE_LIST, 0, 1);
+    if (!c || !d) return false;
+    obj_set_slot(c, 0, d, CAP_READ);
+    obj_set_slot(d, 0, c, CAP_READ);
+    obj_release(d);                       /* now held only through c */
+
+    /* Exactly two: the loose cycle and not one object more. Everything
+     * else alive right now -- ports, sessions, the graph -- is held by
+     * somebody, and a collector that cannot tell would show up here as
+     * a count greater than two. */
+    u64 swept = obj_collect();
+    if (swept != 2) {
+        kprintf("obj:  collector swept %llu, the loose cycle was 2\n", swept);
+        return false;
+    }
+    if (obj_live_count() != before + 2) return false;   /* c and d remain */
+
+    /* Let go of the held cycle and it is next. */
+    obj_release(c);
+    swept = obj_collect();
+    if (swept != 2) {
+        kprintf("obj:  released cycle not swept, got %llu\n", swept);
+        return false;
+    }
+
+    return obj_live_count() == before;
 }

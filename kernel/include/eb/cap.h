@@ -75,6 +75,7 @@ bool cap_revoke(domain *d, cap_handle h);
  * stops naming anything. */
 u32 cap_revoke_object(domain *d, object *o);
 
+
 bool cap_selftest(void);
 
 #endif /* EB_CAP_H */

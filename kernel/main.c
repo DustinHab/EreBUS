@@ -187,6 +187,15 @@ static void persist_thread(void *arg)
                 kprintf("snap: could not write the graph\n");
                 written = seen;      /* do not spin on a failing disk */
             }
+
+            /* The same quiet moment is the right one to sweep in.
+             * Cutting a reference out of the graph is the only way a
+             * cycle ever comes loose, the write above has just recorded
+             * the cut, and a walk here is one nobody is waiting on. */
+            u64 swept = obj_collect();
+            if (swept)
+                kprintf("obj:  %llu unreachable object(s) collected\n",
+                        swept);
         }
         sched_yield();
     }
@@ -601,6 +610,14 @@ void kmain(eb_boot_info *bi)
                 "with the rights they were sent with\n");
     else
         panic("message passing failed its own test");
+
+    /* After the port test, so the collector's walk has real ports to
+     * step around: a bystander swept here would fail the exact count. */
+    if (obj_collect_selftest())
+        kprintf("obj:  collector reclaims loose cycles; held cycles and "
+                "everything reachable stay\n");
+    else
+        panic("the cycle collector failed its own test");
 
     kprintf("sched: %llu threads, %llu context switches so far\n",
             sched_threads(), sched_switches());

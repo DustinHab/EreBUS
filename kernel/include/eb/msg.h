@@ -71,6 +71,16 @@ u64 port_pending(object *port);
 bool port_post(object *port, const message *m,
                object **carried, const u32 *rights, u32 ncaps);
 
+/* Empties a port's queue, releasing whatever the messages carried. Part
+ * of tearing a port down; a queue that outlives its port would hold its
+ * cargo forever. */
+void port_drop_queued(object *port);
+
+/* Calls visit for every object sitting in this port's queue. Messages
+ * in flight are held by the queue and by nothing else, so a graph walk
+ * that skipped them would be walking an incomplete graph. */
+void port_visit_queued(object *port, void (*visit)(object *o));
+
 bool msg_selftest(void);
 
 #endif /* EB_MSG_H */

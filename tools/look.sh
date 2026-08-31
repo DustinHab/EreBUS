@@ -60,8 +60,15 @@ cp /usr/share/OVMF/OVMF_VARS_4M.fd "$BUILD/OVMF_VARS.fd"
                 # the controller and are simply lost, which leaves the
                 # pointer somewhere unpredictable -- and a test whose
                 # starting point is unpredictable proves nothing.
+                # Twenty steps, not a guess: the framebuffer is
+                # 1920x1200 (the loader takes the largest mode the
+                # firmware offers, whatever the EDID hint said), so
+                # driving home from the far corner needs the full
+                # twenty. Fourteen was enough for the smaller screen
+                # this was first written against, and left every later
+                # "home" short by whatever the last position was.
                 i=0
-                while [ $i -lt 14 ]; do
+                while [ $i -lt 20 ]; do
                     echo "mouse_move -100 -100"
                     sleep 0.1
                     i=$((i + 1))

@@ -278,7 +278,7 @@ persist: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 	@$(MAKE) --no-print-directory $(STORE)
 	@echo "  RUN 1   typing, then leaving it alone"
 	@{ sleep 9; \
-	   for k in i t spc j u s t spc s t a y s; do \
+	   for k in right i t spc j u s t spc s t a y s; do \
 	     echo "sendkey $$k"; sleep 0.2; done; \
 	   sleep 3; echo quit; } | \
 	  $(QEMU) -display none -monitor stdio \

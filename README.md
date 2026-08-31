@@ -189,6 +189,24 @@ built binary.
   shell's own position is an object in the graph, which means it is
   written out with everything else -- so going back in time returns you
   to where you were standing then, not merely to the data.
+* **The second party.** A running program is an object in the graph,
+  and handing it a capability is the same gesture as making any other
+  reference: point the program at the thing. The agent starts holding a
+  console and its own letter box, cannot name anything else, and finds
+  out what it may do by trying -- read yes, write no, then nothing at
+  all, as the reference above it is narrowed and withdrawn. Two system
+  calls were added for it (read and write on a held capability), making
+  six. `make agent` walks the whole arc and prints what the program
+  said at each step.
+* **The cycle collector.** Reference counts free almost everything the
+  moment it is let go, but a cycle holds itself up. `obj_collect()`
+  finds the roots by arithmetic rather than by list: every reference is
+  counted, the graph's own share of each count can be recomputed by
+  looking, and whatever remains is a holder outside the graph -- a
+  capability table, a kernel pointer. What no root reaches is freed,
+  undelivered messages included. It runs in the same quiet moment as
+  the snapshot, and the self test at boot proves the exact count: a
+  loose cycle goes, a held one stays, and nothing else is touched.
 * M10 — booting real hardware from a USB stick
 
 ## A note on Secure Boot

@@ -68,6 +68,51 @@ u64 port_pending(object *p)
     return state_of(p)->count;
 }
 
+void port_drop_queued(object *p)
+{
+    /* Empties the queue and lets go of everything it was carrying.
+     *
+     * A message in flight holds its capabilities the way a slot holds
+     * its target, and a port that dies with messages inside would
+     * otherwise take those holds to the grave: never released, never
+     * again releasable. Called when a port is torn down, however the
+     * teardown came about. */
+    if (!p || obj_type(p) != TYPE_PORT) return;
+
+    u64 flags = irq_save();
+    port_state *s = state_of(p);
+    queued *ring = ring_of(s);
+    while (s->count > 0) {
+        queued *q = &ring[s->head];
+        for (u32 i = 0; i < q->ncaps; i++) {
+            if (q->caps[i]) obj_release(q->caps[i]);
+            q->caps[i] = NULL;
+        }
+        q->ncaps = 0;
+        s->head = (s->head + 1) % s->capacity;
+        s->count--;
+    }
+    irq_restore(flags);
+}
+
+void port_visit_queued(object *p, void (*visit)(object *o))
+{
+    /* A capability in flight is held by nobody: it has left the
+     * sender's table and has not yet reached the receiver's. Without
+     * this the collector would see a message's contents as unreachable
+     * and free them out from under a message that is about to be
+     * delivered. */
+    if (!p || obj_type(p) != TYPE_PORT || !visit) return;
+
+    port_state *s = state_of(p);
+    queued *ring = ring_of(s);
+    for (u64 n = 0; n < s->count; n++) {
+        queued *q = &ring[(s->head + n) % s->capacity];
+        for (u32 i = 0; i < q->ncaps; i++)
+            if (q->caps[i]) visit(q->caps[i]);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 
 bool port_post(object *p, const message *m,
