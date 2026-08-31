@@ -42,6 +42,10 @@ void sched_block(void);
 
 /* Gives a thread its own address space. Zero means the kernel's. */
 void thread_set_pml4(thread *t, phys_addr pml4);
+
+/* Runs fn(arg) after the thread has finished and left its stack, from
+ * whoever reaps it. Where a process hangs its teardown. */
+void thread_on_reap(thread *t, void (*fn)(void *), void *arg);
 void sched_wake(thread *t);
 
 /* Called from the timer interrupt. Marks the slice as spent; the switch

@@ -38,6 +38,11 @@ bool vmm_map(phys_addr pml4, virt_addr va, phys_addr pa, u64 size, u64 flags);
  * if nothing is mapped there. */
 bool vmm_resolve(virt_addr va, phys_addr *out_pa, u64 *out_flags);
 
+/* Removes one 4 KiB leaf and returns the frame it mapped. Freeing that
+ * frame is the caller's decision -- only the caller knows whether the
+ * page was owned or shared. */
+bool vmm_unmap_page(phys_addr pml4, virt_addr va, phys_addr *out_frame);
+
 phys_addr vmm_kernel_pml4(void);
 
 /* Gives the loader's now-unused page tables back to the frame

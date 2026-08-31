@@ -27,6 +27,7 @@
 #include <eb/vmm.h>
 #include <eb/pmm.h>
 #include <eb/mm.h>
+#include <eb/io.h>
 #include <eb/fmt.h>
 #include <eb/panic.h>
 
@@ -167,6 +168,14 @@ void *kmalloc(u64 size)
     size = (size + ALIGN_TO - 1) & ~(ALIGN_TO - 1);
     if (size < MIN_PAYLOAD) size = MIN_PAYLOAD;
 
+    /* The list walk and the split have to happen in one piece. Threads
+     * are preempted by the timer, and two of them inside this loop at
+     * once would both find the same free block and both take it. The
+     * heap carried an unspoken single-thread assumption from the days
+     * when only the boot path allocated; threads that create and tear
+     * things down made it a lie. */
+    u64 flags = irq_save();
+
     for (u32 attempt = 0; attempt < 2; attempt++) {
         for (block *b = first; b; b = b->next) {
             check(b, "allocation");
@@ -176,10 +185,12 @@ void *kmalloc(u64 size)
             b->free = 0;
             used_bytes += b->size;
             free_bytes -= b->size;
+            irq_restore(flags);
             return (u8 *)b + sizeof(block);
         }
         if (attempt == 0 && !grow(size)) break;
     }
+    irq_restore(flags);
     return NULL;
 }
 
@@ -218,6 +229,7 @@ void kfree(void *p)
     if (b->free)
         panic("heap block at %p released twice", p);
 
+    u64 flags = irq_save();           /* same reason as in kmalloc */
     b->free = 1;
     used_bytes -= b->size;
     free_bytes += b->size;
@@ -230,6 +242,7 @@ void kfree(void *p)
 
     merge_forward(b);
     if (b->prev && b->prev->free) merge_forward(b->prev);
+    irq_restore(flags);
 }
 
 u64 kheap_bytes_used(void) { return used_bytes; }

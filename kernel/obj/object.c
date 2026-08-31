@@ -165,19 +165,29 @@ object *obj_create(type_id type, u64 payload_size, u64 slot_count)
     o->size   = payload_size;
     o->nslots = slot_count;
 
+    /* The list link, the counts, and every reference count change below
+     * happen with interrupts off. Threads mutate the graph and the
+     * timer switches between them mid-operation; a release preempted
+     * between the decrement and the unlink would leave a half-dead
+     * object on the list for anything else -- another release, the
+     * collector -- to trip over. */
+    u64 flags = irq_save();
     o->all_next = all_objects;
     if (all_objects) all_objects->all_prev = o;
     all_objects = o;
 
     live_objects++;
     created_objects++;
+    irq_restore(flags);
     return o;
 }
 
 void obj_retain(object *o)
 {
     check(o, "retain");
+    u64 flags = irq_save();
     o->refs++;
+    irq_restore(flags);
 }
 
 void obj_release(object *o)
@@ -187,7 +197,8 @@ void obj_release(object *o)
     if (o->refs == 0)
         panic("object %llu released more often than it was held", o->id);
 
-    if (--o->refs > 0) return;
+    u64 flags = irq_save();
+    if (--o->refs > 0) { irq_restore(flags); return; }
 
     /* A port dying with messages still queued is holding their cargo,
      * and those holds live in the payload where the generic teardown
@@ -221,6 +232,7 @@ void obj_release(object *o)
     live_objects--;
     if (o->slots) kfree(o->slots);
     kfree(o);
+    irq_restore(flags);
 }
 
 type_id obj_type(const object *o)  { check(o, "type"); return o->type; }
@@ -293,6 +305,7 @@ bool obj_set_slot(object *o, u64 index, object *target, u32 rights)
     if (index >= o->nslots) return false;
     if (target) check(target, "set slot target");
 
+    u64 flags = irq_save();           /* swap and counts in one piece */
     obj_slot *slots = slots_of(o);
     object *old = slots[index].target;
 
@@ -300,6 +313,7 @@ bool obj_set_slot(object *o, u64 index, object *target, u32 rights)
     slots[index].target = target;
     slots[index].rights = target ? rights : 0;
     if (old) obj_release(old);
+    irq_restore(flags);
     return true;
 }
 
@@ -317,11 +331,14 @@ bool obj_grow_slots(object *o, u64 count)
     obj_slot *bigger = (obj_slot *)kzalloc(count * sizeof(obj_slot));
     if (!bigger) return false;
 
+    u64 flags = irq_save();           /* the array swap must be whole */
     for (u64 i = 0; i < o->nslots; i++) bigger[i] = o->slots[i];
-    if (o->slots) kfree(o->slots);
-
+    obj_slot *old = o->slots;
     o->slots = bigger;
     o->nslots = count;
+    irq_restore(flags);
+
+    if (old) kfree(old);
     return true;
 }
 

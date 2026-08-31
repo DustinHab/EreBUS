@@ -58,6 +58,14 @@ struct thread {
     phys_addr    pml4;         /* zero means the kernel's own space */
     u64          kstack_top;   /* where an interrupt from ring 3 lands */
 
+    /* Called after the thread is truly gone -- off the run queue, off
+     * its stack -- by whoever reaps it. This is where a process hangs
+     * its own teardown, which cannot run any earlier: the exiting
+     * thread still stands on the stack and still runs in the address
+     * space that the teardown is going to free. */
+    void       (*on_reap)(void *);
+    void        *on_reap_arg;
+
     struct thread *next;       /* run queue, circular */
     struct thread *prev;
     struct thread *wait_next;  /* whatever wait list holds us */
@@ -73,6 +81,8 @@ void thread_set_pml4(thread *t, phys_addr pml4)
 
 static thread *current;
 static thread *run_queue;      /* circular; points at some ready thread */
+
+static void reap_finished(void);   /* defined beside thread_exit below */
 static u64 next_id = 1;
 static u64 switches;
 static u64 thread_count;
@@ -262,6 +272,11 @@ static void switch_to_next(void)
 
 void sched_yield(void)
 {
+    /* Yielding is the one moment every thread reliably passes through
+     * in a calm state, which makes it the right place to sweep up after
+     * the ones that have finished. */
+    reap_finished();
+
     u64 flags = irq_save();
     switch_to_next();
     irq_restore(flags);
@@ -301,6 +316,11 @@ void sched_preempt_if_due(void)
     switch_to_next();
 }
 
+/* Finished threads, waiting to be reaped. The exiting thread puts
+ * itself here with interrupts off and switches away in the same breath,
+ * so nothing can free the stack it is still standing on. */
+static thread *finished_list;
+
 void thread_exit(void)
 {
     u64 flags = irq_save();
@@ -310,14 +330,53 @@ void thread_exit(void)
     queue_remove(t);
     thread_count--;
 
-    /* The stack cannot be released here: we are standing on it. It is
-     * reclaimed by whoever notices the thread has finished. For now
-     * that is nobody, and a finished thread keeps its 16 KiB -- honest,
-     * and cheap to fix once there is something to reap it. */
+    t->wait_next = finished_list;
+    finished_list = t;
+
+    /* The stack cannot be released here: we are standing on it. The
+     * next thread that passes through sched_yield picks it up. */
     switch_to_next();
 
     irq_restore(flags);
     panic("a finished thread was scheduled again");
+}
+
+void thread_on_reap(thread *t, void (*fn)(void *), void *arg)
+{
+    if (!t || t->magic != THREAD_MAGIC) return;
+    t->on_reap = fn;
+    t->on_reap_arg = arg;
+}
+
+/* Frees what a finished thread could not free itself: its kernel stack,
+ * its struct, and -- through the hook -- whatever the thread was the
+ * last living part of. Runs in an ordinary thread context, never from
+ * an interrupt: the teardown allocates and frees, and doing that on top
+ * of somebody's half-finished allocation is how heaps die. */
+static void reap_finished(void)
+{
+    for (;;) {
+        u64 flags = irq_save();
+        thread *t = finished_list;
+        if (t) finished_list = t->wait_next;
+        irq_restore(flags);
+        if (!t) return;
+
+        if (t->on_reap) t->on_reap(t->on_reap_arg);
+
+        if (t->slot != 0xFFFFFFFFu) {
+            for (u64 off = 0; off < TSTACK_SIZE; off += PAGE_SIZE) {
+                phys_addr frame;
+                if (vmm_unmap_page(vmm_kernel_pml4(),
+                                   t->stack_low + off, &frame))
+                    pmm_free(frame);
+            }
+            release_slot(t->slot);
+        }
+
+        t->magic = 0;
+        kfree(t);
+    }
 }
 
 thread     *sched_current(void)              { return current; }

@@ -94,6 +94,44 @@ static phys_addr addrspace_create(void)
     return root;
 }
 
+/* Whether a frame belongs to the shared user code -- the kernel image's
+ * own pages, mapped a second time into every process. Freeing one of
+ * those on a process's way out would free a piece of the running
+ * kernel, for every process that ever exits. */
+static bool frame_is_shared_code(phys_addr frame)
+{
+    phys_addr lo = kernel_virt_to_phys(__user_start);
+    phys_addr hi = kernel_virt_to_phys(__user_end);
+    return frame >= PAGE_DOWN(lo) && frame < PAGE_UP(hi);
+}
+
+/* Frees the lower half of an address space: the program's own frames,
+ * then the table pages that mapped them, then the top table itself.
+ *
+ * Only the lower 256 entries are walked. The upper half points at the
+ * kernel's shared tables -- the same physical pages in every process --
+ * and following those down would dismantle the kernel's own mapping.
+ * Never called for a space that is still loaded anywhere. */
+static void free_table_level(phys_addr table, u32 level, u64 top_limit)
+{
+    u64 *e = (u64 *)phys_to_virt(table);
+    for (u64 i = 0; i < top_limit; i++) {
+        if (!(e[i] & PTE_PRESENT)) continue;
+        phys_addr down = e[i] & 0x000FFFFFFFFFF000ULL;
+
+        if (level > 1)
+            free_table_level(down, level - 1, 512);
+        else if (!frame_is_shared_code(down))
+            pmm_free(down);
+    }
+    pmm_free(table);
+}
+
+static void addrspace_destroy(phys_addr pml4)
+{
+    if (pml4) free_table_level(pml4, 4, 256);
+}
+
 /* ------------------------------------------------------------------ */
 /* Processes                                                           */
 /* ------------------------------------------------------------------ */
@@ -108,7 +146,7 @@ process *proc_create(const char *name, const void *entry_point,
     if (!p->pml4) { kfree(p); return NULL; }
 
     p->dom = domain_create(name, 64);
-    if (!p->dom) { kfree(p); return NULL; }
+    if (!p->dom) { addrspace_destroy(p->pml4); kfree(p); return NULL; }
 
     p->magic = PROC_MAGIC;
     p->id = next_pid++;
@@ -130,10 +168,8 @@ process *proc_create(const char *name, const void *entry_point,
     for (u64 off = 0; off < size; off += PAGE_SIZE) {
         phys_addr phys = kernel_virt_to_phys(__user_start + off);
         if (!vmm_map(p->pml4, USER_CODE_BASE + off, phys, PAGE_SIZE,
-                     PTE_PRESENT | PTE_USER)) {
-            kfree(p);
-            return NULL;
-        }
+                     PTE_PRESENT | PTE_USER))
+            goto fail;
     }
 
     /* The stack: writable, and emphatically not executable. This is
@@ -141,12 +177,12 @@ process *proc_create(const char *name, const void *entry_point,
      * an attacker would like to put code. */
     for (u64 off = 0; off < USER_STACK_SIZE; off += PAGE_SIZE) {
         phys_addr frame = pmm_alloc();
-        if (frame == PMM_NO_FRAME) return NULL;
+        if (frame == PMM_NO_FRAME) goto fail;
         virt_addr at = USER_STACK_TOP - USER_STACK_SIZE + off;
         if (!vmm_map(p->pml4, at, frame, PAGE_SIZE,
                      PTE_PRESENT | PTE_WRITE | PTE_USER | PTE_NX)) {
             pmm_free(frame);
-            return NULL;
+            goto fail;
         }
     }
 
@@ -154,7 +190,7 @@ process *proc_create(const char *name, const void *entry_point,
      * its own letter box. Two capabilities, and nothing else in the
      * world. */
     p->inbox = port_create(8);
-    if (!p->inbox) return NULL;
+    if (!p->inbox) goto fail;
 
     p->console_cap = console ? cap_insert(p->dom, console, CAP_CALL) : 0;
     p->inbox_cap = cap_insert(p->dom, p->inbox, CAP_READ);
@@ -164,13 +200,22 @@ process *proc_create(const char *name, const void *entry_point,
      * gesture as pointing anything at anything, with the difference
      * that this particular holder is alive. */
     p->self = obj_create(TYPE_PROGRAM, sizeof(process *), 8);
-    if (!p->self) return NULL;
+    if (!p->self) goto fail;
     *(process **)obj_data(p->self) = p;
     obj_set_name(p->self, name);
 
     if (live_count < MAX_PROCESSES) live[live_count++] = p;
     process_count++;
     return p;
+
+fail:
+    /* A half-built process must not leave half its parts behind. The
+     * same teardown the reaper uses, minus what was never made. */
+    if (p->inbox) obj_release(p->inbox);
+    domain_destroy(p->dom);
+    addrspace_destroy(p->pml4);
+    kfree(p);
+    return NULL;
 }
 
 object *proc_object(process *p) { return p ? p->self : NULL; }
@@ -244,6 +289,52 @@ static void user_launch(void *arg)
                (u64)p->console_cap, (u64)p->inbox_cap);
 }
 
+/* Everything a process was, given back.
+ *
+ * Runs from the reaper, after the process's thread has finished and
+ * left both its stack and this address space. Order matters twice: the
+ * program object's payload is cleared before anything else goes, so a
+ * stale pointer read through the graph finds nothing rather than freed
+ * memory; and the domain goes before the inbox, so the inbox's last
+ * reference is dropped after the capabilities into it are gone. */
+static void proc_reap(void *arg)
+{
+    process *p = (process *)arg;
+    if (!p || p->magic != PROC_MAGIC) return;
+
+    u64 flags = irq_save();
+    for (u32 i = 0; i < live_count; i++) {
+        if (live[i] != p) continue;
+        live[i] = live[live_count - 1];
+        live_count--;
+        break;
+    }
+    irq_restore(flags);
+
+    /* The program object stays as long as the graph points at it -- it
+     * is the record that a program was here. What must not stay is the
+     * pointer to a process that no longer exists. */
+    if (p->self) {
+        *(process **)obj_data(p->self) = NULL;
+        obj_release(p->self);
+    }
+
+    /* The domain releases every capability the program held: console,
+     * inbox, and anything it was granted along the way. Then the
+     * inbox's own reference goes, and if nothing else holds the port it
+     * dies -- letting go of any undelivered mail with it. */
+    domain_destroy(p->dom);
+    if (p->inbox) obj_release(p->inbox);
+
+    addrspace_destroy(p->pml4);
+
+    kprintf("proc: %llu (%s) ended; everything it held has been let go\n",
+            p->id, p->name);
+
+    p->magic = 0;
+    kfree(p);
+}
+
 bool proc_start(process *p)
 {
     if (!p || p->magic != PROC_MAGIC) return false;
@@ -252,6 +343,7 @@ bool proc_start(process *p)
     if (!p->first) return false;
 
     thread_set_pml4(p->first, p->pml4);
+    thread_on_reap(p->first, proc_reap, p);
     return true;
 }
 

@@ -125,6 +125,40 @@ bool vmm_map(phys_addr pml4, virt_addr va, phys_addr pa, u64 size, u64 flags)
     return true;
 }
 
+bool vmm_unmap_page(phys_addr pml4, virt_addr va, phys_addr *out_frame)
+{
+    /* Takes one 4 KiB leaf out of a mapping and hands back the frame it
+     * pointed at. Deliberately nothing more: whether that frame should
+     * be freed is the caller's knowledge -- a stack page is owned, a
+     * shared code page emphatically is not -- and the table pages
+     * themselves stay for whoever tears down the whole space. */
+    u64 *t = table_at(pml4);
+
+    u64 e = t[(va >> 39) & 0x1FF];
+    if (!(e & PTE_PRESENT)) return false;
+    t = table_at(e);
+
+    e = t[(va >> 30) & 0x1FF];
+    if (!(e & PTE_PRESENT) || (e & PTE_HUGE)) return false;
+    t = table_at(e);
+
+    e = t[(va >> 21) & 0x1FF];
+    if (!(e & PTE_PRESENT) || (e & PTE_HUGE)) return false;
+    t = table_at(e);
+
+    u64 *leaf = &t[(va >> 12) & 0x1FF];
+    if (!(*leaf & PTE_PRESENT)) return false;
+
+    if (out_frame) *out_frame = *leaf & ADDR_MASK;
+    *leaf = 0;
+
+    /* The processor may still hold the old translation. Flushing it
+     * here rather than trusting the next CR3 write means the moment
+     * this returns, the page really is gone. */
+    __asm__ volatile ("invlpg (%0)" :: "r"(va) : "memory");
+    return true;
+}
+
 bool vmm_resolve(virt_addr va, phys_addr *out_pa, u64 *out_flags)
 {
     u64 *t = table_at(read_cr3());

@@ -18,6 +18,7 @@
  */
 #include <eb/pmm.h>
 #include <eb/mm.h>
+#include <eb/io.h>
 #include <eb/fmt.h>
 
 static u8  *bitmap;          /* direct-map pointer, not physical */
@@ -133,7 +134,13 @@ static void zero_frame(phys_addr frame)
 
 phys_addr pmm_alloc(void)
 {
-    if (free_frames == 0) return PMM_NO_FRAME;
+    /* Finding a clear bit and setting it must be one step. Two threads
+     * scanning at once would find the same bit, and the frame would be
+     * handed out twice -- the exact corruption the bitmap exists to
+     * make impossible. */
+    u64 flags = irq_save();
+
+    if (free_frames == 0) { irq_restore(flags); return PMM_NO_FRAME; }
 
     /* Two passes: from the hint to the end, then from the start. The
      * hint keeps the common case from rescanning ground that is known
@@ -151,9 +158,11 @@ phys_addr pmm_alloc(void)
             free_frames--;
             hint = f + 1;
             zero_frame(f * PAGE_SIZE);
+            irq_restore(flags);
             return f * PAGE_SIZE;
         }
     }
+    irq_restore(flags);
     return PMM_NO_FRAME;
 }
 
@@ -184,15 +193,18 @@ void pmm_free(phys_addr frame)
     u64 f = frame / PAGE_SIZE;
     if (f == 0 || f >= total_frames) return;
 
+    u64 flags = irq_save();           /* same reason as in pmm_alloc */
+
     /* Releasing a frame that is already free means somebody freed it
      * twice, and the second owner is about to be handed memory that a
      * third party still believes is theirs. Refuse quietly rather than
      * corrupt the count. */
-    if (!is_used(f)) return;
-
-    mark_free(f);
-    free_frames++;
-    if (f < hint) hint = f;
+    if (is_used(f)) {
+        mark_free(f);
+        free_frames++;
+        if (f < hint) hint = f;
+    }
+    irq_restore(flags);
 }
 
 void pmm_free_contig(phys_addr first, u64 count)

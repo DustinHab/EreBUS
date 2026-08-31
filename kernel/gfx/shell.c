@@ -467,7 +467,16 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
     at = put(line, at, " bytes");
     line[at] = 0;
     text_at(x, ty, x + w, line, C_DIM);
-    ty += ROW + ROW / 2;
+    ty += ROW;
+
+    /* For a program, the one fact that changes everything about it. */
+    if (obj_type(o) == TYPE_PROGRAM) {
+        bool alive = proc_is_running(o);
+        text_at(x, ty, x + w, alive ? "state    running" : "state    ended",
+                alive ? C_WRITE : C_READONLY);
+        ty += ROW;
+    }
+    ty += ROW / 2;
 
     if (obj_slots(o) == 0) {
         text_at(x, ty, x + w, "points at nothing", C_FAINT);
@@ -1033,9 +1042,12 @@ static void draw_all(void)
     at = put(line, at, r);
     /* What can be done here, said plainly. A running program is the one
      * case where the answer is neither of the usual two: its contents
-     * are not for editing, but what it holds is for giving. */
+     * are not for editing, but what it holds is for giving. And a
+     * program that has ended is a record, not a recipient. */
     if (obj_type(focus()) == TYPE_PROGRAM)
-        at = put(line, at, (focus_rights() & CAP_GRANT)
+        at = put(line, at, !proc_is_running(focus())
+                           ? "  it has ended"
+                           : (focus_rights() & CAP_GRANT)
                            ? "  you may hand it things"
                            : "  you may only watch it");
     else
