@@ -25,6 +25,7 @@
 #include <eb/pci.h>
 #include <eb/proc.h>
 #include <eb/journal.h>
+#include <eb/settings.h>
 #include <eb/string.h>
 #include <eb/syscall.h>
 #include <eb/pic.h>
@@ -117,6 +118,9 @@ extern char user_courier[];
 extern char user_clock[];
 extern char user_cipher[];
 extern char user_tally[];
+extern char user_sums[];
+extern char user_watch[];
+extern char user_wipe[];
 
 /* What the system ships with. hello and trespass make their point at
  * start-up and end; these stay, each doing one thing to whatever it is
@@ -133,6 +137,9 @@ static const struct {
     { "clock",   user_clock,   "clock" },
     { "cipher",  user_cipher,  "cipher" },
     { "tally",   user_tally,   "tally" },
+    { "sums",    user_sums,    "sums" },
+    { "watch",   user_watch,   "watch" },
+    { "wipe",    user_wipe,    "wipe" },
 };
 #define STANDARD_COUNT ((u32)ARRAY_LEN(standard))
 
@@ -211,7 +218,7 @@ static void persist_thread(void *arg)
             seen = now;
             quiet_since = time_ns();
         } else if (seen != written &&
-                   time_ns() - quiet_since > 500000000ULL) {
+                   time_ns() - quiet_since > settings_save_quiet_ns()) {
             object *roots[2] = { persistent_root, shell_session() };
             if (snap_save(roots, roots[1] ? 2 : 1)) {
                 written = seen;
@@ -1001,6 +1008,30 @@ void kmain(eb_boot_info *bi)
                 obj_set_slot_name(root, at, "log");
             }
         }
+        /* The settings, found the same way as the journal or made
+         * fresh. The reference the person holds is read AND write: how
+         * the system is set is theirs to say, by writing sentences. */
+        for (u64 i = 0; i < obj_slots(root); i++) {
+            object *s = obj_get_slot(root, i);
+            const char *nm = obj_slot_name(root, i);
+            if (s && nm && strcmp(nm, "settings") == 0 &&
+                obj_type(s) == TYPE_TEXT) {
+                settings_adopt(s);
+                break;
+            }
+        }
+        if (!settings_object() && settings_create()) {
+            u64 n = obj_slots(root), at = n;
+            for (u64 i = 0; i < n; i++)
+                if (!obj_get_slot(root, i)) { at = i; break; }
+            if (at < n || obj_grow_slots(root, n + 1)) {
+                obj_set_slot(root, at, settings_object(),
+                             CAP_READ | CAP_WRITE);
+                obj_set_slot_name(root, at, "settings");
+            }
+        }
+        settings_apply();
+
         journal_says("system", session ? "started; everything is as it was left"
                                        : "started fresh");
 

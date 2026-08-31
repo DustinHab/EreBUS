@@ -9,6 +9,7 @@
 #include <eb/fmt.h>
 #include <eb/io.h>
 #include <eb/time.h>
+#include <eb/settings.h>
 
 /* Per-processor data. syscall.S reads gs:0 and gs:8 directly, so the
  * layout is not free to change. */
@@ -215,10 +216,15 @@ u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4)
     case SYS_CLOCK: {
         /* The one call that needs no capability. The time of day is a
          * fact about the world, not about any object; answering it
-         * grants nothing and names nothing. */
+         * grants nothing and names nothing. The settings may shift it
+         * -- the hardware clock keeps its own time, and where the
+         * machine actually stands is the person's to say. */
         u32 hh, mm, ss;
         time_wall(&hh, &mm, &ss);
-        return (u64)hh * 3600 + (u64)mm * 60 + ss;
+        i64 s = (i64)hh * 3600 + (i64)mm * 60 + ss +
+                settings_clock_offset_min() * 60;
+        s = ((s % 86400) + 86400) % 86400;
+        return (u64)s;
     }
 
     default:

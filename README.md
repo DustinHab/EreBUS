@@ -272,6 +272,27 @@ built binary.
   five survive reboots with their delegations replayed, which has a
   visible consequence: the cipher turns its text again on every boot,
   because being handed something again means doing the job again.
+* **Settings are a text object.** A table, one matter per row, the
+  value in the right column: theme, save quiet, clock offset, pointer
+  speed, hints. Click into the value, edit it, and the system obeys as
+  the letters land -- the moment "light" is complete the shell is
+  light, and the journal says so. No dialogue, no apply button, no
+  registry: the kernel holds the only reader, the person holds the
+  text read-write, and handing someone the reference read-only shows
+  them how the system is set without letting them set it. The settings
+  ride the snapshot like everything else, so they survive reboots and
+  appear in time travel as they stood.
+* **The editor grew a caret.** Clicking into a text puts the caret
+  there; typing inserts, backspace deletes before it. What made the
+  settings table editable makes every text editable in the middle.
+* **Three more standard programs.** sums fingerprints what it is shown
+  -- the same object answers the same, anything changed answers
+  differently, so a pair of journal lines settles whether a journey
+  through other hands altered the cargo. watch keeps looking at what
+  it holds and says, at most once a second, that it changed. wipe
+  blanks what it is given -- write-only if need be, since blanking
+  needs no right to read -- and its parting words point at the past,
+  where the generations still hold what stood before.
 * M10 — booting real hardware from a USB stick
 
 ## A note on Secure Boot

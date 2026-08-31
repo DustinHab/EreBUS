@@ -10,6 +10,7 @@
 #include <eb/fmt.h>
 #include <eb/proc.h>
 #include <eb/journal.h>
+#include <eb/settings.h>
 #include <eb/time.h>
 
 #define SNAP_HISTORY_MAX 32
@@ -20,17 +21,49 @@
 #define PAD    10
 #define ROW    (GLYPH_H + 6)
 
-#define C_BACK      RGB( 12,  14,  19)
-#define C_PANEL     RGB( 22,  26,  34)
-#define C_PANEL_HI  RGB( 30,  36,  48)
-#define C_EDGE      RGB( 48,  56,  72)
-#define C_TEXT      RGB(214, 219, 230)
-#define C_DIM       RGB(120, 130, 150)
-#define C_FAINT     RGB( 74,  82,  98)
-#define C_ACCENT    RGB(122, 172, 255)
-#define C_WRITE     RGB(126, 200, 140)
-#define C_READONLY  RGB(206, 158,  92)
-#define C_BAR       RGB(  8,  10,  14)
+/* The colours live in a palette rather than in the constants, because
+ * "colors are light" in the settings has to mean something. Every use
+ * below goes through the palette, so switching it re-dresses the whole
+ * shell at the next paint. */
+typedef struct {
+    color back, panel, panel_hi, edge, text, dim, faint,
+          accent, write, readonly, bar;
+} palette;
+
+static const palette pal_dark = {
+    RGB( 12,  14,  19), RGB( 22,  26,  34), RGB( 30,  36,  48),
+    RGB( 48,  56,  72), RGB(214, 219, 230), RGB(120, 130, 150),
+    RGB( 74,  82,  98), RGB(122, 172, 255), RGB(126, 200, 140),
+    RGB(206, 158,  92), RGB(  8,  10,  14),
+};
+
+/* Paper, not a photograph negative: the light palette is chosen by
+ * hand, since inverting the dark one produces glare, not light. */
+static const palette pal_light = {
+    RGB(232, 230, 224), RGB(219, 216, 208), RGB(205, 201, 191),
+    RGB(178, 174, 164), RGB( 34,  37,  43), RGB( 92,  97, 106),
+    RGB(150, 152, 155), RGB( 38,  86, 168), RGB( 26, 112,  53),
+    RGB(158,  90,  18), RGB(210, 206, 197),
+};
+
+static palette pal = {
+    RGB( 12,  14,  19), RGB( 22,  26,  34), RGB( 30,  36,  48),
+    RGB( 48,  56,  72), RGB(214, 219, 230), RGB(120, 130, 150),
+    RGB( 74,  82,  98), RGB(122, 172, 255), RGB(126, 200, 140),
+    RGB(206, 158,  92), RGB(  8,  10,  14),
+};
+
+#define C_BACK      (pal.back)
+#define C_PANEL     (pal.panel)
+#define C_PANEL_HI  (pal.panel_hi)
+#define C_EDGE      (pal.edge)
+#define C_TEXT      (pal.text)
+#define C_DIM       (pal.dim)
+#define C_FAINT     (pal.faint)
+#define C_ACCENT    (pal.accent)
+#define C_WRITE     (pal.write)
+#define C_READONLY  (pal.readonly)
+#define C_BAR       (pal.bar)
 
 /* ------------------------------------------------------------------ */
 /* Where we are                                                        */
@@ -52,6 +85,12 @@ static struct {
 
     u32        selected;           /* which outgoing reference is picked */
     shell_mode mode;
+
+    /* Where typing lands in the focused text. Clicking into the text
+     * puts it there; following a reference puts it at the end, which is
+     * where appending minds expect it. Clamped to the text on every
+     * use, so it survives the text shrinking under it. */
+    u64 caret;
 
     u64  changes;
     bool redraw;
@@ -112,7 +151,8 @@ typedef enum {
     HOT_CLEAR,       /* drop a reference */
     HOT_ADD,         /* make a new reference here */
     HOT_PALETTE,     /* one choice of what to add */
-    HOT_JOURNAL      /* the newest journal line: go to the journal */
+    HOT_JOURNAL,     /* the newest journal line: go to the journal */
+    HOT_TEXT         /* the text itself: put the caret there */
 } hot_kind;
 
 typedef struct {
@@ -176,7 +216,7 @@ static struct {
  * rest are objects already in hand, so pointing at something that
  * exists needs no dragging and no second window. */
 #define PALETTE_FIXED 3
-#define CARRY_MAX 16
+#define CARRY_MAX 24
 
 /* What is being carried.
  *
@@ -398,6 +438,13 @@ static void rights_text(u32 r, char *out)
 /* Lenses                                                              */
 /* ------------------------------------------------------------------ */
 
+/* Where the text lens was last drawn, so a click into it can be turned
+ * back into a place in the text. One text lens is on screen at a time;
+ * when none is, the width is zero and no region is offered. */
+static struct {
+    i32 x, y, cols, rows;
+} text_area;
+
 static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
 {
     const u8 *d = (const u8 *)obj_data(o);
@@ -407,18 +454,75 @@ static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
     i32 cols = w / GLYPH_W;
     i32 cx = 0, cy = 0;
 
-    for (u64 i = 0; i < len && cy * GLYPH_H < h; i++) {
-        u8 ch = d[i];
+    if (nav.caret > len) nav.caret = len;
+
+    if (caret) {
+        text_area.x = x;
+        text_area.y = y;
+        text_area.cols = cols;
+        text_area.rows = h / GLYPH_H;
+        hot_add(x, y, cols * GLYPH_W, h, HOT_TEXT, 0);
+    }
+
+    /* The settings read as a table, and they are drawn as one: the
+     * matter column dimmed, the bar fainter still, the value in full
+     * ink -- the eye goes to what can be changed. The characters stay
+     * exactly where plain drawing would put them, so the caret and the
+     * click arithmetic need no special case. */
+    bool table = (o == settings_object());
+    bool past_bar = false;
+
+    for (u64 i = 0; i <= len && cy * GLYPH_H < h; i++) {
+        u8 ch = (i < len) ? d[i] : 0;
+
+        if (caret && i == nav.caret)
+            fb_rect(x + cx * GLYPH_W - 1, y + cy * GLYPH_H, 2, GLYPH_H,
+                    C_ACCENT);
+        if (i == len) break;
+
         if (ch == '\n' || cx >= cols) {
             cx = 0; cy++;
+            past_bar = false;
             if (ch == '\n') continue;
         }
         if (cy * GLYPH_H >= h) break;
-        fb_glyph(x + cx * GLYPH_W, y + cy * GLYPH_H, ch, C_TEXT, 0, false);
+
+        color c = C_TEXT;
+        if (table) {
+            if (ch == '|') { c = C_FAINT; past_bar = true; }
+            else if (!past_bar) c = C_DIM;
+        }
+        fb_glyph(x + cx * GLYPH_W, y + cy * GLYPH_H, ch, c, 0, false);
         cx++;
     }
-    if (caret && cy * GLYPH_H < h)
-        fb_rect(x + cx * GLYPH_W, y + cy * GLYPH_H, 2, GLYPH_H, C_ACCENT);
+}
+
+/* The walk above, run backwards: which place in the text sits at this
+ * row and column. A click past the end of a line lands at the end of
+ * that line; a click below the text lands at the end of the text. */
+static u64 text_index_at(object *o, i32 row, i32 col)
+{
+    const u8 *d = (const u8 *)obj_data(o);
+    if (!d) return 0;
+
+    u64 len = text_len(d, obj_size(o));
+    i32 cx = 0, cy = 0;
+
+    for (u64 i = 0; i < len; i++) {
+        u8 ch = d[i];
+
+        if (ch == '\n') {
+            if (cy == row && col >= cx) return i;   /* right of the line */
+            cx = 0; cy++;
+            continue;
+        }
+        if (cx >= text_area.cols) { cx = 0; cy++; }
+
+        if (cy == row && cx == col) return i;
+        if (cy > row) return i;
+        cx++;
+    }
+    return len;
 }
 
 static void lens_bytes(object *o, i32 x, i32 y, i32 w, i32 h)
@@ -1096,6 +1200,8 @@ static void draw_all(void)
     bool have_news = journal_latest(newest, sizeof(newest));
     if (have_news) bottom -= ROW + 6;
 
+    pal = settings_light() ? pal_light : pal_dark;
+
     hot_reset();
     fb_rect(0, 0, sw, sh, C_BACK);
 
@@ -1239,18 +1345,21 @@ static void draw_all(void)
     /* Footer: the mode, and what the keys do. No menu bar -- there is
      * nothing to put in one that is not already visible. The last hint
      * follows the focus, because what typing does depends on what is
-     * under it. */
+     * under it. Whoever knows their way around turns the hints off in
+     * the settings, and the line keeps only the mode. */
     fb_rect(0, sh - 28, sw, 28, C_BAR);
     at = put(line, 0, mode_name(nav.mode));
-    at = put(line, at, "   click anything you can see.   "
-                       "tab: switch view.   arrows also move.   ");
-    if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
-        at = put(line, at, "point it at something to hand it over.");
-    else if (obj_type(focus()) == TYPE_TEXT &&
-             (focus_rights() & CAP_WRITE) && nav.at_generation == 0)
-        at = put(line, at, "typing goes where the caret is.");
-    else
-        at = put(line, at, "typing changes the object.");
+    if (settings_hints()) {
+        at = put(line, at, "   click anything you can see.   "
+                           "tab: switch view.   arrows also move.   ");
+        if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
+            at = put(line, at, "point it at something to hand it over.");
+        else if (obj_type(focus()) == TYPE_TEXT &&
+                 (focus_rights() & CAP_WRITE) && nav.at_generation == 0)
+            at = put(line, at, "typing goes where the caret is.");
+        else
+            at = put(line, at, "typing changes the object.");
+    }
     line[at] = 0;
     text_at(PAD * 2, sh - 28 + 6, sw - PAD, line, C_FAINT);
 
@@ -1288,6 +1397,7 @@ static void follow(u64 slot)
     nav.rights[nav.depth] = gained;
     nav.depth++;
     nav.selected = 0;
+    nav.caret = (u64)-1;                 /* the end, once clamped */
     set_lenses_for(t);
     nav.changes++;
     nav.redraw = true;
@@ -1298,6 +1408,7 @@ static void go_back(void)
     if (nav.depth <= 1) return;
     nav.depth--;
     nav.selected = nav.via[nav.depth];
+    nav.caret = (u64)-1;
     set_lenses_for(focus());
     nav.changes++;
     nav.redraw = true;
@@ -1328,12 +1439,20 @@ static void type_into_focus(u32 codepoint)
     if (!d) return;
     u64 size = obj_size(f);
     u64 len = text_len(d, size);
+    if (nav.caret > len) nav.caret = len;
 
+    /* Typing happens at the caret, and the caret goes where it is
+     * clicked -- so a line in the middle can be reworked in place,
+     * which is what makes a text of one-line facts editable at all. */
     if (codepoint == '\b') {
-        if (len > 0) d[len - 1] = 0;
+        if (nav.caret == 0) return;
+        for (u64 i = nav.caret - 1; i < len; i++) d[i] = d[i + 1];
+        d[len - 1] = 0;
+        nav.caret--;
     } else if (len + 1 < size) {
-        d[len] = (u8)codepoint;
-        d[len + 1] = 0;
+        for (u64 i = len + 1; i > nav.caret; i--) d[i] = d[i - 1];
+        d[nav.caret] = (u8)codepoint;
+        nav.caret++;
     } else {
         return;
     }
@@ -1482,6 +1601,20 @@ static void act_on(const hot_region *r)
     case HOT_TIME:
         go_to_generation(r->index);
         break;
+
+    case HOT_TEXT: {
+        /* A click into the writing puts the caret there. The pixel is
+         * turned back into a row and a column, and the column walk
+         * finds which letter that is. */
+        if (!(focus_rights() & CAP_WRITE)) break;
+        i32 row = (nav.mouse_y - text_area.y) / GLYPH_H;
+        i32 col = (nav.mouse_x - text_area.x + GLYPH_W / 2) / GLYPH_W;
+        if (row < 0) row = 0;
+        if (col < 0) col = 0;
+        nav.caret = text_index_at(focus(), row, col);
+        nav.redraw = true;
+        break;
+    }
 
     case HOT_JOURNAL: {
         /* The line leads to the record. The walk is a real walk -- back
@@ -1654,9 +1787,12 @@ static void handle_mouse(void)
     mouse_event m;
     bool moved = false;
 
+    i32 num = 1, den = 1;
+    settings_pointer_scale(&num, &den);
+
     while (ps2_poll_mouse(&m)) {
-        nav.mouse_x += m.dx;
-        nav.mouse_y += m.dy;
+        nav.mouse_x += (i32)m.dx * num / den;
+        nav.mouse_y += (i32)m.dy * num / den;
         if (nav.mouse_x < 0) nav.mouse_x = 0;
         if (nav.mouse_y < 0) nav.mouse_y = 0;
         if (nav.mouse_x > (i32)fb_width() - 2)  nav.mouse_x = (i32)fb_width() - 2;
@@ -1875,6 +2011,7 @@ void shell_run(void *arg)
 {
     (void)arg;
     u64 seen_journal = journal_sequence();
+    u64 settings_seen = (u64)-1;       /* apply once on the way in */
     u64 last_tick = time_ns();
 
     for (;;) {
@@ -1887,6 +2024,14 @@ void shell_run(void *arg)
          * is doing something, which is exactly when nobody looks). */
         u64 seq = journal_sequence();
         if (seq != seen_journal) { seen_journal = seq; nav.redraw = true; }
+
+        /* The settings apply as they are typed: the moment a line comes
+         * to mean something, it takes effect. Reading a page of text is
+         * cheap enough to do on every change. */
+        if (nav.changes != settings_seen) {
+            settings_seen = nav.changes;
+            settings_apply();
+        }
 
         u64 now = time_ns();
         if (now - last_tick >= 1000000000ULL) {
