@@ -12,6 +12,7 @@
 #include <eb/types.h>
 #include <eb/io.h>
 #include <eb/mm.h>
+#include <eb/msg.h>
 #include <eb/object.h>
 #include <eb/cap.h>
 #include <eb/cpu.h>
@@ -23,6 +24,7 @@
 #include <eb/pic.h>
 #include <eb/pmm.h>
 #include <eb/serial.h>
+#include <eb/thread.h>
 #include <eb/time.h>
 #include <eb/trap.h>
 #include <eb/vmm.h>
@@ -223,6 +225,33 @@ static void check_clocks(void)
         kprintf(" -- clocks agree\n");
 }
 
+#if defined(EREBUS_TEST_FAULT) && EREBUS_TEST_FAULT == 3
+/* Eats stack as fast as it can.
+ *
+ * optnone is not decoration. Written the obvious way with volatile
+ * locals and a running sum, clang recognised the accumulator pattern
+ * and turned the recursion into a loop reusing a single frame -- the
+ * function ran forever without consuming a byte of stack, and the test
+ * quietly proved nothing. Switching optimisation off for this one
+ * function is the only way to be sure the frames are really stacked. */
+__attribute__((noinline, optnone))
+static u64 devour(u64 depth, volatile u8 *previous)
+{
+    volatile u8 pad[512];
+    pad[0] = (u8)depth;
+    pad[511] = previous ? previous[0] : 0;
+    return devour(depth + 1, pad);
+}
+
+static void devour_stack_thread(void *arg)
+{
+    (void)arg;
+    kprintf("kern: descending...\n");
+    kprintf("kern: returned from depth %llu, which should not happen\n",
+            devour(0, NULL));
+}
+#endif
+
 void kmain(eb_boot_info *bi)
 {
     /* The serial port comes first: it works even when something is
@@ -392,9 +421,47 @@ void kmain(eb_boot_info *bi)
     kprintf("obj:  %llu objects created during start-up, %llu still live\n",
             obj_total_created(), obj_live_count());
 
+    /* --- threads and messages -------------------------------------- */
+
+    domain *kernel_domain = domain_create("kernel", 256);
+    if (!kernel_domain) panic("no memory for the kernel domain");
+
+    sched_init(kernel_domain);
+    port_init();
+    kprintf("sched: round robin, %u ms slice, boot thread adopted\n", 50u);
+
+    if (sched_selftest())
+        kprintf("sched: self test passed -- threads interleave and a "
+                "spinning thread is preempted\n");
+    else
+        panic("the scheduler failed its own test");
+
+    if (msg_selftest())
+        kprintf("msg:  self test passed -- capabilities survive transit "
+                "with the rights they were sent with\n");
+    else
+        panic("message passing failed its own test");
+
+    kprintf("sched: %llu threads, %llu context switches so far\n",
+            sched_threads(), sched_switches());
+
     dump_ranges(bi);
 
-#if defined(EREBUS_TEST_FAULT) && EREBUS_TEST_FAULT == 2
+#if defined(EREBUS_TEST_FAULT) && EREBUS_TEST_FAULT == 3
+    /* Built by "make stack". Runs a thread off the bottom of its own
+     * stack, which is where the guard page is waiting.
+     *
+     * Two milestones meet here. The guard page turns a silent overwrite
+     * of neighbouring memory into a fault at the instruction that did
+     * it. And the fault arrives with no stack left to handle it on,
+     * which is exactly what the separate interrupt stacks in the TSS
+     * are for -- without them this would be a triple fault and a
+     * wordless reboot. */
+    kprintf("kern: stack test, running a thread off the end of its stack\n");
+    thread_create("devour", devour_stack_thread, NULL, kernel_domain);
+    for (;;) sched_yield();
+
+#elif defined(EREBUS_TEST_FAULT) && EREBUS_TEST_FAULT == 2
     /* Built by "make wx". Writes into the kernel's own code.
      *
      * This is the test that says whether W^X is real. The page is

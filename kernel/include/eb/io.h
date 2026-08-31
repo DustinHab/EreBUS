@@ -77,6 +77,22 @@ static inline void cpu_halt(void) { __asm__ volatile ("hlt"); }
 static inline void cpu_cli(void)  { __asm__ volatile ("cli"); }
 static inline void cpu_sti(void)  { __asm__ volatile ("sti"); }
 
+/* Turns interrupts off and reports whether they were on, so the caller
+ * can put things back exactly as they were. Nesting these is safe;
+ * plain cli/sti pairs are not, because the inner sti would re-enable
+ * interrupts in the middle of the outer critical section. */
+static inline u64 irq_save(void)
+{
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    return flags;
+}
+
+static inline void irq_restore(u64 flags)
+{
+    if (flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
+}
+
 static inline bool interrupts_enabled(void)
 {
     u64 flags;

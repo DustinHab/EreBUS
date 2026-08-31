@@ -14,6 +14,8 @@
 #include <eb/trap.h>
 #include <eb/gdt.h>
 #include <eb/pic.h>
+#include <eb/thread.h>
+#include <eb/vmm.h>
 #include <eb/fmt.h>
 #include <eb/io.h>
 
@@ -138,26 +140,44 @@ static void explain_selector(u64 err)
             (err & 1) ? ", raised outside the kernel" : "");
 }
 
+/* Is this address actually backed by something, so that reading it will
+ * not fault? Asking the page tables is the only honest answer, and in a
+ * fault handler it is the difference between a report and a reboot. */
+static bool readable(u64 addr)
+{
+    return vmm_resolve(addr, NULL, NULL);
+}
+
 /* Walks the saved frame pointer chain. We compile with frame pointers
  * kept, so every frame stores the caller's RBP followed by the return
  * address.
  *
- * This deliberately reads memory that may already be damaged. It is
- * guarded as far as it can be without page tables: the pointer must be
- * aligned, above the first page, and the return address must land
- * inside the kernel image. If it still faults, the double fault handler
- * runs on its own stack and reports that instead of rebooting. */
+ * Every read here is checked against the page tables first. That is not
+ * caution for its own sake: the most valuable time to have a backtrace
+ * is after a stack overflow, and that is exactly when the frame pointer
+ * points at an unmapped guard page. Dereferencing it would fault inside
+ * the fault handler, and a fault inside a double fault handler is a
+ * triple fault -- the machine reboots without a word, which is the one
+ * outcome this whole file exists to prevent. */
 static void backtrace(u64 rbp)
 {
     kprintf("kern: call trace:");
+
+    u32 printed = 0;
     for (u32 depth = 0; depth < 12; depth++) {
         if (rbp < 0x10000 || (rbp & 7)) break;
+        if (!readable(rbp) || !readable(rbp + 8)) {
+            kprintf(" <%p not mapped>", (void *)rbp);
+            break;
+        }
         const u64 *frame = (const u64 *)rbp;
         u64 ret = frame[1];
         if (ret < (u64)__kernel_start || ret >= (u64)__kernel_end) break;
         kprintf(" %p", (void *)ret);
+        printed++;
         rbp = frame[0];
     }
+    if (printed == 0) kprintf(" (nothing readable)");
     kprintf("\n");
 }
 
@@ -177,6 +197,12 @@ static void report(trap_frame *f)
         break;
     case 8:
         kprintf("kern: a fault occurred while handling another fault\n");
+        /* By far the most common cause: the stack ran out, so the
+         * processor could not even push the frame for the first fault.
+         * Saying so turns a baffling error into an obvious one. */
+        if (!readable(f->rsp))
+            kprintf("kern: the stack pointer %p is in unmapped memory -- "
+                    "this is a stack overflow\n", (void *)f->rsp);
         break;
     default:
         if (f->error) kprintf("kern: error 0x%llx\n", f->error);
@@ -224,6 +250,14 @@ void trap_dispatch(trap_frame *f)
         irq_total++;
         if (handlers[irq]) handlers[irq](f);
         pic_eoi(irq);
+
+        /* The one place a thread switch can happen behind a thread's
+         * back. It is safe here and nowhere else in the handler: the
+         * interrupted state is already complete on this thread's stack,
+         * so leaving now and coming back later resumes it exactly.
+         * After the controller has been told, so an interrupt is not
+         * left unacknowledged while another thread runs. */
+        sched_preempt_if_due();
         return;
     }
 

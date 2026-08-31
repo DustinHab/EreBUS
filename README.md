@@ -59,7 +59,10 @@ From Windows, out of the project directory:
       gfx/           framebuffer, font, screen console
       lib/           kprintf, memory routines, panic, hardening
       include/eb/    headers
-    tools/           mkfont.py, ppm2png.py, check-isr.sh
+      obj/           object store, capabilities, message ports
+      sched/         threads and the scheduler
+      mm/            frame allocator, page tables, kernel heap
+    tools/           mkfont.py, ppm2png.py, check-isr.py
 
 ## Decisions, and why
 
@@ -141,7 +144,14 @@ built binary.
   ever narrow on delegation. The self test checks all of that, including
   that guessed handles resolve to nothing in a domain that was given
   nothing.
-* M5 — threads, scheduling, message passing
+* **M5 — done.** Preemptive round-robin threads, each with a guard page
+  under its stack. Message ports carrying typed messages: a tag, a few
+  values, and capabilities that arrive in the receiver's table with the
+  rights the sender let go of. Send and receive are separate rights, so
+  a send-only capability lets someone call a service without reading its
+  mail. `make stack` runs a thread off the end of its stack and shows
+  the whole chain hold: guard page, page fault, no stack left, double
+  fault onto the TSS stack, readable report.
 * M6 — user mode (ring 3), processes, separate address spaces
 * M7 — compositor, windows, PS/2 input
 * M8 — desktop: object browser and type viewers

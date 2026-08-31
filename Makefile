@@ -81,10 +81,13 @@ KERN_C   := kernel/main.c \
             kernel/mm/kheap.c \
             kernel/obj/object.c \
             kernel/obj/cap.c \
+            kernel/obj/port.c \
+            kernel/sched/thread.c \
             kernel/arch/x86_64/gdt.c \
             kernel/arch/x86_64/trap.c
 KERN_S   := kernel/arch/x86_64/start.S \
-            kernel/arch/x86_64/isr.S
+            kernel/arch/x86_64/isr.S \
+            kernel/arch/x86_64/switch.S
 
 KERN_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(KERN_C)) \
             $(patsubst %.S,$(BUILD)/%.o,$(KERN_S))
@@ -94,7 +97,7 @@ LOADER := $(BUILD)/BOOTX64.EFI
 KERNEL := $(BUILD)/kernel.elf
 IMAGE  := $(BUILD)/esp.img
 
-.PHONY: all run shot fault wx debug clean info
+.PHONY: all run shot fault wx stack trace-stack debug clean info
 all: $(IMAGE)
 
 # --- font -------------------------------------------------------------
@@ -192,6 +195,30 @@ wx:
 	@mv $(BUILD)/screen.png $(BUILD)/screen-wx.png
 	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
 	@echo "  DONE    $(BUILD)/screen-wx.png"
+
+# Runs a thread off the bottom of its stack. The guard page turns that
+# into a fault at the offending instruction instead of a silent
+# overwrite of whatever sits below, and the separate interrupt stacks in
+# the TSS are what let the fault be reported at all.
+stack:
+	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
+	@$(MAKE) --no-print-directory EXTRA=-DEREBUS_TEST_FAULT=3 shot
+	@mv $(BUILD)/screen.png $(BUILD)/screen-stack.png
+	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
+	@echo "  DONE    $(BUILD)/screen-stack.png"
+
+# Same as "stack", but with QEMU logging every exception it delivers and
+# refusing to reset. When a fault produces no report at all, this is the
+# only way to see what the processor actually did.
+trace-stack:
+	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
+	@$(MAKE) --no-print-directory EXTRA=-DEREBUS_TEST_FAULT=3 $(IMAGE)
+	@rm -f $(BUILD)/qemu.log
+	@{ sleep 9; echo quit; } | $(QEMU) -display none -monitor stdio \
+	    -serial file:$(BUILD)/serial.log -no-reboot -no-shutdown \
+	    -d int,cpu_reset -D $(BUILD)/qemu.log >/dev/null 2>&1 || true
+	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
+	@echo "  DONE    $(BUILD)/qemu.log"
 
 debug: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 	$(QEMU) -serial stdio -s -S

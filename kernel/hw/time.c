@@ -19,6 +19,7 @@
  * free for the actual tick.
  */
 #include <eb/time.h>
+#include <eb/thread.h>
 #include <eb/trap.h>
 #include <eb/pic.h>
 #include <eb/io.h>
@@ -131,6 +132,10 @@ static void on_tick(trap_frame *f)
 {
     (void)f;
     ticks++;
+
+    /* Only accounting here. The switch itself happens on the way out of
+     * the interrupt, where changing stacks is safe. */
+    sched_tick();
 }
 
 void pit_init(u32 hz)
