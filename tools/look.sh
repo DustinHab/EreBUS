@@ -31,10 +31,54 @@ rm -f "$BUILD/screen.ppm"
 [ -f "$BUILD/store.img" ] || dd if=/dev/zero of="$BUILD/store.img" \
     bs=1M count=32 status=none
 
+# The firmware's own variable store is scratch space: it remembers boot
+# entries between runs and can end up pointing at an image that has
+# since been rebuilt, at which case nothing boots and the log is empty.
+# Nothing of ours lives in it, so it starts fresh every time.
+cp /usr/share/OVMF/OVMF_VARS_4M.fd "$BUILD/OVMF_VARS.fd"
+
 {
     sleep 9
+    # Each argument is either a mouse instruction or a key name. The
+    # mouse ones are written without spaces so they survive being passed
+    # through several shells, which the quoted form does not.
+    #
+    #   m<dx>,<dy>   move the pointer by that much
+    #   click        press and release the left button
+    #   anything else is a QEMU key name
     for k in "$@"; do
-        echo "sendkey $k"
+        case "$k" in
+            home)
+                # A PS/2 mouse only reports how far it moved, and the
+                # monitor clamps a single report to about a hundred
+                # steps, so there is no way to say "go to this point".
+                # Driving it hard into the corner gives a known origin
+                # to count from; the shell stops the pointer at the
+                # edge, which is what makes it work.
+                # With a pause between each. Sent back to back, some of
+                # them arrive faster than the interrupt handler drains
+                # the controller and are simply lost, which leaves the
+                # pointer somewhere unpredictable -- and a test whose
+                # starting point is unpredictable proves nothing.
+                i=0
+                while [ $i -lt 14 ]; do
+                    echo "mouse_move -100 -100"
+                    sleep 0.1
+                    i=$((i + 1))
+                done
+                ;;
+            m*,*)
+                echo "mouse_move ${k#m}" | tr ',' ' '
+                ;;
+            click)
+                echo "mouse_button 1"
+                sleep 0.2
+                echo "mouse_button 0"
+                ;;
+            *)
+                echo "sendkey $k"
+                ;;
+        esac
         sleep 0.3
     done
     sleep 1

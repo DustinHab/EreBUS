@@ -7,6 +7,7 @@
 #include <eb/thread.h>
 #include <eb/snapshot.h>
 #include <eb/msg.h>
+#include <eb/fmt.h>
 
 #define SNAP_HISTORY_MAX 32
 #define TRAIL_MAX 12
@@ -103,7 +104,11 @@ typedef enum {
     HOT_LENS,        /* a lens tab: turn it on or off */
     HOT_NODE,        /* a node in the graph */
     HOT_TIME,        /* a mark in the history */
-    HOT_MODE         /* the name of the current shell */
+    HOT_RIGHT,       /* one letter of a reference's rights */
+    HOT_NAME,        /* a reference's name: rename it */
+    HOT_CLEAR,       /* drop a reference */
+    HOT_ADD,         /* make a new reference here */
+    HOT_PALETTE      /* one choice of what to add */
 } hot_kind;
 
 typedef struct {
@@ -142,6 +147,37 @@ static bool is_hovered(hot_kind k, u32 index)
 {
     if (hovered < 0 || (u32)hovered >= hot_count) return false;
     return hots[hovered].kind == k && hots[hovered].index == index;
+}
+
+/* ------------------------------------------------------------------ */
+/* Making and shaping                                                  */
+/* ------------------------------------------------------------------ */
+
+/* Two small states where a keystroke means something other than
+ * "change the object I am looking at".
+ *
+ * Modes are worth avoiding, and there are only these two: typing a
+ * name, and choosing what to add. Both are entered by clicking the
+ * thing they concern, both show a caret or a highlight exactly where
+ * they apply, and both end on escape. Anything more elaborate would be
+ * a mode nobody asked to be in. */
+static struct {
+    enum { EDIT_NONE, EDIT_NAME, EDIT_PICK } kind;
+    u64  slot;
+    char buf[OBJ_NAME_MAX];
+    u32  len;
+} edit;
+
+/* What the palette offers. The fixed entries make something new; the
+ * rest are objects already on the path, so pointing at something that
+ * exists needs no dragging and no second window. */
+#define PALETTE_FIXED 3
+
+static void edit_cancel(void)
+{
+    edit.kind = EDIT_NONE;
+    edit.len = 0;
+    nav.redraw = true;
 }
 
 u64        shell_changes(void)      { return nav.changes; }
@@ -495,31 +531,138 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     text_at(rx + PAD, top + PAD, sw - PAD, "where it leads", C_FAINT);
 
     ty = top + PAD + ROW + 4;
+    bool may_shape = (focus_rights() & CAP_WRITE) != 0 &&
+                     nav.at_generation == 0;
+
     u64 slots = obj_slots(f);
-    if (slots == 0) {
+    u64 used = 0;
+    for (u64 i = 0; i < slots; i++) if (obj_get_slot(f, i)) used++;
+
+    if (used == 0 && !may_shape)
         text_at(rx + PAD, ty, sw - PAD, "nowhere -- this is a leaf", C_FAINT);
-    }
-    for (u64 i = 0; i < slots && ty < bottom - ROW; i++) {
+
+    i32 col_rights = rx + PAD + 2 * GLYPH_W;
+    i32 col_name   = rx + PAD + 7 * GLYPH_W;
+    i32 col_clear  = rx + right_w - PAD - 2 * GLYPH_W;
+
+    for (u64 i = 0; i < slots && ty < bottom - 2 * ROW; i++) {
         object *t = obj_get_slot(f, i);
-        char what[40], line[80], r[4];
+        if (!t) continue;                     /* empty slots are not shown */
+
+        char what[40], r[4];
         label_of(f, i, t, what, sizeof(what));
-        rights_text(focus_rights() & obj_slot_rights(f, i), r);
+        u32 slot_rights = obj_slot_rights(f, i);
+        rights_text(slot_rights, r);
 
         bool picked = (i == nav.selected);
         bool hot = is_hovered(HOT_REFERENCE, (u32)i);
         if (picked || hot)
             fb_rect(rx, ty - 3, right_w, ROW, picked ? C_PANEL_HI : C_EDGE);
-        if (t) hot_add(rx, ty - 3, right_w, ROW, HOT_REFERENCE, (u32)i);
+        hot_add(rx, ty - 3, right_w, ROW, HOT_REFERENCE, (u32)i);
 
-        u32 at = put(line, 0, picked ? "> " : "  ");
-        at = put(line, at, r);
-        at = put(line, at, "  ");
-        at = put(line, at, what);
-        line[at] = 0;
+        text_at(rx + PAD, ty, sw, picked ? ">" : " ", C_ACCENT);
 
-        text_at(rx + PAD, ty, sw - PAD, line,
-                !t ? C_FAINT : ((picked || hot) ? C_TEXT : C_DIM));
+        /* The three rights, one letter each, each its own target.
+         *
+         * This is where authority is actually handed on: whoever
+         * follows this reference gets these and nothing more. Putting
+         * it here rather than behind a dialogue is deliberate -- it is
+         * the same row as the thing it governs, and it is never more
+         * than one click from being seen to being changed. */
+        for (u32 b = 0; b < 3; b++) {
+            static const u32 bit[3] = { CAP_READ, CAP_WRITE, CAP_GRANT };
+            static const char letter[3] = { 'r', 'w', 'g' };
+
+            bool on = (slot_rights & bit[b]) != 0;
+            bool can = may_shape && (focus_rights() & bit[b]);
+            bool lit = is_hovered(HOT_RIGHT, (u32)(i * 8 + b));
+
+            char one[2] = { on ? letter[b] : '-', 0 };
+            i32 lx = col_rights + (i32)b * GLYPH_W;
+
+            if (lit && can) fb_rect(lx - 1, ty - 2, GLYPH_W + 2, ROW - 2,
+                                    C_EDGE);
+            text_at(lx, ty, lx + GLYPH_W, one,
+                    on ? (b == 1 ? C_WRITE : C_DIM)
+                       : (can && lit ? C_TEXT : C_FAINT));
+            if (can) hot_add(lx - 1, ty - 2, GLYPH_W + 2, ROW - 2,
+                             HOT_RIGHT, (u32)(i * 8 + b));
+        }
+
+        /* The name, which is ours to write and nothing else's. */
+        if (edit.kind == EDIT_NAME && edit.slot == i) {
+            fb_rect(col_name - 3, ty - 3, col_clear - col_name, ROW, C_EDGE);
+            edit.buf[edit.len] = 0;
+            text_at(col_name, ty, col_clear, edit.buf, C_TEXT);
+            fb_rect(col_name + (i32)edit.len * GLYPH_W, ty, 2, GLYPH_H,
+                    C_ACCENT);
+        } else {
+            bool lit = is_hovered(HOT_NAME, (u32)i);
+            if (lit && may_shape)
+                fb_rect(col_name - 3, ty - 3, col_clear - col_name, ROW,
+                        C_EDGE);
+            text_at(col_name, ty, col_clear, what,
+                    !t ? C_FAINT : ((picked || hot || lit) ? C_TEXT : C_DIM));
+            if (may_shape)
+                hot_add(col_name - 3, ty - 3, col_clear - col_name, ROW,
+                        HOT_NAME, (u32)i);
+        }
+
+        if (may_shape) {
+            bool lit = is_hovered(HOT_CLEAR, (u32)i);
+            text_at(col_clear, ty, sw, "x", lit ? C_READONLY : C_FAINT);
+            hot_add(col_clear - 2, ty - 2, 2 * GLYPH_W, ROW - 2,
+                    HOT_CLEAR, (u32)i);
+        }
+
         ty += ROW;
+    }
+
+    /* Adding. There is no separate command for making an object,
+     * because making one without pointing at it from somewhere would
+     * produce something unreachable that vanishes immediately. The two
+     * are one act, and this is where it happens. */
+    if (may_shape && ty < bottom - ROW) {
+        ty += 4;
+        bool lit = is_hovered(HOT_ADD, 0);
+        if (lit) fb_rect(rx, ty - 3, right_w, ROW, C_EDGE);
+        text_at(rx + PAD, ty, sw - PAD, "+  point at something new",
+                lit ? C_TEXT : C_FAINT);
+        hot_add(rx, ty - 3, right_w, ROW, HOT_ADD, 0);
+        ty += ROW;
+
+        if (edit.kind == EDIT_PICK) {
+            static const char *fixed[PALETTE_FIXED] = {
+                "  a text", "  some bytes", "  a list"
+            };
+            for (u32 p = 0; p < PALETTE_FIXED && ty < bottom - ROW; p++) {
+                bool on = is_hovered(HOT_PALETTE, p);
+                if (on) fb_rect(rx, ty - 3, right_w, ROW, C_PANEL_HI);
+                text_at(rx + PAD, ty, sw - PAD, fixed[p],
+                        on ? C_TEXT : C_DIM);
+                hot_add(rx, ty - 3, right_w, ROW, HOT_PALETTE, p);
+                ty += ROW;
+            }
+
+            if (nav.depth > 0 && ty < bottom - ROW) {
+                text_at(rx + PAD, ty, sw - PAD,
+                        "  or something you already hold:", C_FAINT);
+                ty += ROW;
+            }
+            for (u32 d = 0; d < nav.depth && ty < bottom - ROW; d++) {
+                char nm[40];
+                label_of(d ? nav.node[d - 1] : NULL, d ? nav.via[d] : 0,
+                         nav.node[d], nm, sizeof(nm));
+
+                bool on = is_hovered(HOT_PALETTE, PALETTE_FIXED + d);
+                if (on) fb_rect(rx, ty - 3, right_w, ROW, C_PANEL_HI);
+                text_at(rx + PAD + 2 * GLYPH_W, ty, sw - PAD, nm,
+                        on ? C_TEXT : C_DIM);
+                hot_add(rx, ty - 3, right_w, ROW, HOT_PALETTE,
+                        PALETTE_FIXED + d);
+                ty += ROW;
+            }
+        }
     }
 }
 
@@ -963,6 +1106,37 @@ static void handle_keys(void)
     while (ps2_poll_key(&k)) {
         if (!k.down || k.codepoint == 0) continue;
 
+        /* While a name is being written, the keys belong to the name.
+         * The row shows a caret exactly where the letters are going, so
+         * there is no question about where typing lands. */
+        if (edit.kind == EDIT_NAME) {
+            if (k.codepoint == KEY_ESCAPE) { edit_cancel(); continue; }
+            if (k.codepoint == KEY_ENTER) {
+                edit.buf[edit.len] = 0;
+                obj_set_slot_name(focus(), edit.slot,
+                                  edit.len ? edit.buf : NULL);
+                edit_cancel();
+                nav.changes++;
+                continue;
+            }
+            if (k.codepoint == '\b') {
+                if (edit.len) edit.len--;
+                nav.redraw = true;
+                continue;
+            }
+            if (k.codepoint >= 0x20 && k.codepoint < 0x7F &&
+                edit.len < OBJ_NAME_MAX - 1) {
+                edit.buf[edit.len++] = (char)k.codepoint;
+                nav.redraw = true;
+            }
+            continue;
+        }
+
+        if (edit.kind == EDIT_PICK && k.codepoint == KEY_ESCAPE) {
+            edit_cancel();
+            continue;
+        }
+
         switch (k.codepoint) {
         case KEY_TAB:
             nav.mode = (shell_mode)((nav.mode + 1) % SHELL_MODE_COUNT);
@@ -1067,6 +1241,108 @@ static void act_on(const hot_region *r)
     case HOT_TIME:
         go_to_generation(r->index);
         break;
+
+    case HOT_RIGHT: {
+        /* One letter, one right. Turning it off narrows what anyone
+         * following this reference will get; turning it on can only
+         * reach as far as what we hold ourselves, which is why the
+         * letters one cannot grant are not clickable at all rather
+         * than clickable and refused. */
+        static const u32 bit[3] = { CAP_READ, CAP_WRITE, CAP_GRANT };
+        u64 slot = r->index / 8;
+        u32 which = r->index % 8;
+        if (which > 2 || slot >= obj_slots(focus())) break;
+        if (!(focus_rights() & CAP_WRITE)) break;
+
+        u32 now = obj_slot_rights(focus(), slot);
+        u32 next = (now & bit[which]) ? (now & ~bit[which])
+                                      : (now | (bit[which] & focus_rights()));
+        obj_set_slot(focus(), slot, obj_get_slot(focus(), slot), next);
+        nav.changes++;
+        nav.redraw = true;
+        break;
+    }
+
+    case HOT_NAME: {
+        if (!(focus_rights() & CAP_WRITE)) break;
+        edit.kind = EDIT_NAME;
+        edit.slot = r->index;
+        edit.len = 0;
+        const char *had = obj_slot_name(focus(), r->index);
+        if (had) while (had[edit.len] && edit.len < OBJ_NAME_MAX - 1) {
+            edit.buf[edit.len] = had[edit.len];
+            edit.len++;
+        }
+        nav.redraw = true;
+        break;
+    }
+
+    case HOT_CLEAR:
+        if (!(focus_rights() & CAP_WRITE)) break;
+        /* Letting go of a reference. If it was the last one the object
+         * is gone, and if it was not, the object is still perfectly
+         * reachable by whoever else points at it. Nothing here has to
+         * ask whether it is "in use" -- the count already knows. */
+        obj_set_slot(focus(), r->index, NULL, 0);
+        obj_set_slot_name(focus(), r->index, NULL);
+        edit_cancel();
+        nav.changes++;
+        nav.redraw = true;
+        break;
+
+    case HOT_ADD:
+        edit.kind = (edit.kind == EDIT_PICK) ? EDIT_NONE : EDIT_PICK;
+        nav.redraw = true;
+        break;
+
+    case HOT_PALETTE: {
+        if (!(focus_rights() & CAP_WRITE)) break;
+
+        object *f = focus();
+        u64 slot = 0;
+        bool found = false;
+        for (u64 i = 0; i < obj_slots(f); i++)
+            if (!obj_get_slot(f, i)) { slot = i; found = true; break; }
+        if (!found) {
+            slot = obj_slots(f);
+            if (!obj_grow_slots(f, slot + 1)) break;
+        }
+
+        object *made = NULL;
+        const char *suggest = "";
+        bool created = false;
+
+        if (r->index == 0)      { made = obj_create(TYPE_TEXT, 512, 0);
+                                  suggest = "a note"; created = true; }
+        else if (r->index == 1) { made = obj_create(TYPE_BYTES, 64, 0);
+                                  suggest = "some bytes"; created = true; }
+        else if (r->index == 2) { made = obj_create(TYPE_LIST, 0, 4);
+                                  suggest = "a list"; created = true; }
+        else {
+            u32 d = r->index - PALETTE_FIXED;
+            if (d >= nav.depth) break;
+            made = nav.node[d];
+            suggest = "the same thing";
+        }
+        if (!made) break;
+
+        /* What the new reference permits cannot exceed what we hold.
+         * A reference is only worth what the holder could pass on. */
+        obj_set_slot(f, slot, made, focus_rights());
+        if (created) obj_release(made);      /* the slot holds it now */
+
+        edit.kind = EDIT_NAME;
+        edit.slot = slot;
+        edit.len = 0;
+        while (suggest[edit.len] && edit.len < OBJ_NAME_MAX - 1) {
+            edit.buf[edit.len] = suggest[edit.len];
+            edit.len++;
+        }
+        nav.selected = slot;
+        nav.changes++;
+        nav.redraw = true;
+        break;
+    }
 
     default:
         break;

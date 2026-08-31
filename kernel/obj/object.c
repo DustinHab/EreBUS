@@ -26,26 +26,6 @@
 
 #define OBJ_MAGIC 0x4F424A454354ULL   /* "OBJECT" */
 
-struct object {
-    u64     magic;
-    u64     id;
-    type_id type;
-    u32     _pad;
-    u64     refs;
-    u64     size;      /* payload bytes */
-    u64     nslots;    /* outgoing references */
-    u32     mark;      /* used by graph walks; not part of the object */
-    u32     _mark_pad;
-    char    name[OBJ_NAME_MAX];   /* what the object calls itself */
-    /* payload follows, then the slot array */
-};
-
-/* Where the two variable parts sit inside the allocation. */
-static inline u8 *payload_of(object *o)
-{
-    return (u8 *)o + sizeof(object);
-}
-
 /* An outgoing reference carries its own rights.
  *
  * Without them a reference would be a bare pointer and every step
@@ -61,12 +41,38 @@ typedef struct {
     char    name[OBJ_NAME_MAX];   /* what the holder calls it */
 } obj_slot;
 
+struct object {
+    u64     magic;
+    u64     id;
+    type_id type;
+    u32     _pad;
+    u64     refs;
+    u64     size;      /* payload bytes */
+    u64     nslots;    /* outgoing references */
+    u32     mark;      /* used by graph walks; not part of the object */
+    u32     _mark_pad;
+    char    name[OBJ_NAME_MAX];   /* what the object calls itself */
+    obj_slot *slots;              /* its own allocation, so it can grow */
+    /* the payload follows this header */
+};
+
+static inline u8 *payload_of(object *o)
+{
+    return (u8 *)o + sizeof(object);
+}
+
+/* The slots live in their own allocation rather than behind the
+ * payload.
+ *
+ * One allocation for the whole object is tidier and was the original
+ * arrangement, but it makes an object's shape permanent: adding a
+ * reference means moving the object, and everything pointing at it --
+ * capabilities, other objects' slots -- would be left pointing at the
+ * old address. With the header staying put, growing is a matter of
+ * replacing one array, and every reference to the object survives it. */
 static inline obj_slot *slots_of(object *o)
 {
-    /* The slot array is pointer-aligned; the payload is rounded up so
-     * it stays that way whatever length was asked for. */
-    u64 aligned = (o->size + 7) & ~7ULL;
-    return (obj_slot *)(payload_of(o) + aligned);
+    return o->slots;
 }
 
 static u64 next_id = 1;
@@ -128,11 +134,13 @@ object *obj_create(type_id type, u64 payload_size, u64 slot_count)
 {
     if (type >= types_registered) return NULL;
 
-    u64 aligned = (payload_size + 7) & ~7ULL;
-    u64 total = sizeof(object) + aligned + slot_count * sizeof(obj_slot);
-
-    object *o = (object *)kzalloc(total);
+    object *o = (object *)kzalloc(sizeof(object) + payload_size);
     if (!o) return NULL;
+
+    if (slot_count) {
+        o->slots = (obj_slot *)kzalloc(slot_count * sizeof(obj_slot));
+        if (!o->slots) { kfree(o); return NULL; }
+    }
 
     o->magic  = OBJ_MAGIC;
     o->id     = next_id++;
@@ -178,6 +186,7 @@ void obj_release(object *o)
     o->size = 0;
 
     live_objects--;
+    if (o->slots) kfree(o->slots);
     kfree(o);
 }
 
@@ -258,6 +267,28 @@ bool obj_set_slot(object *o, u64 index, object *target, u32 rights)
     slots[index].target = target;
     slots[index].rights = target ? rights : 0;
     if (old) obj_release(old);
+    return true;
+}
+
+/* Makes room for more references.
+ *
+ * Creating something in this system means pointing at it: an object
+ * nobody references is unreachable and gone the moment it is made. So
+ * anywhere a person can add something, the holder needs a slot free --
+ * and running out of them is not a reason to refuse. */
+bool obj_grow_slots(object *o, u64 count)
+{
+    check(o, "grow");
+    if (count <= o->nslots) return true;
+
+    obj_slot *bigger = (obj_slot *)kzalloc(count * sizeof(obj_slot));
+    if (!bigger) return false;
+
+    for (u64 i = 0; i < o->nslots; i++) bigger[i] = o->slots[i];
+    if (o->slots) kfree(o->slots);
+
+    o->slots = bigger;
+    o->nslots = count;
     return true;
 }
 

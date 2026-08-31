@@ -74,6 +74,10 @@ bool    obj_set_slot(object *o, u64 index, object *target, u32 rights);
 object *obj_get_slot(object *o, u64 index);
 u32     obj_slot_rights(object *o, u64 index);
 
+/* Widens the reference table. The object keeps its address, so
+ * everything already pointing at it stays valid. */
+bool    obj_grow_slots(object *o, u64 count);
+
 /* Names. The one on a reference belongs to whoever holds the
  * referencing object; the one on the object is the object's own claim
  * and is only shown when nobody has supplied their own. Neither can be
