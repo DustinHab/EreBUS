@@ -24,6 +24,8 @@
 #include <eb/panic.h>
 #include <eb/pci.h>
 #include <eb/proc.h>
+#include <eb/journal.h>
+#include <eb/string.h>
 #include <eb/syscall.h>
 #include <eb/pic.h>
 #include <eb/pmm.h>
@@ -140,19 +142,31 @@ static void print_message_text(const message *m)
 
 /* A kernel thread that serves the console port. Programs cannot print;
  * they can only ask this to, through a capability, and only if they
- * were given one. */
+ * were given one. What they say also goes into the journal, attributed
+ * to what the kernel knows the sender to be -- a program does not get
+ * to sign its lines with somebody else's name. */
 static void console_server(void *arg)
 {
     (void)arg;
     for (;;) {
         message m;
-        if (!port_receive(kernel_domain, console_receive, &m)) {
+        const char *from = NULL;
+        if (!port_receive_labelled(kernel_domain, console_receive,
+                                   &m, &from)) {
             sched_yield();
             continue;
         }
         kprintf("user: ");
         print_message_text(&m);
         kprintf("\n");
+
+        char said[3 * 8 + 1];
+        u32 n = 0;
+        for (u32 i = 0; i < m.nwords && i < 3; i++)
+            for (u32 b = 0; b < 8; b++)
+                said[n++] = (char)((m.words[i] >> (b * 8)) & 0xFF);
+        said[n] = 0;
+        journal_says(from ? from : "someone", said);
     }
 }
 
@@ -196,9 +210,13 @@ static void persist_thread(void *arg)
              * cycle ever comes loose, the write above has just recorded
              * the cut, and a walk here is one nobody is waiting on. */
             u64 swept = obj_collect();
-            if (swept)
+            if (swept) {
                 kprintf("obj:  %llu unreachable object(s) collected\n",
                         swept);
+                journal_says("system", swept == 1
+                             ? "one unreachable object was collected"
+                             : "unreachable objects were collected");
+            }
         }
         sched_yield();
     }
@@ -468,6 +486,7 @@ void kmain(eb_boot_info *bi)
      * timestamp instead of the log starting halfway through. */
     bool clock_ok = time_init();
     if (clock_ok) kout_set_clock(time_ns);
+    time_read_rtc();
 
     kprintf("\n\nErebus %s (x86_64)\n", EREBUS_VERSION);
     kprintf("boot: handover verified, version %u\n", bi->version);
@@ -821,37 +840,116 @@ void kmain(eb_boot_info *bi)
     }
 
     if (root) {
-        /* Put the running programs where they can be reached.
+        /* Reconnecting the records.
          *
-         * A snapshot from an earlier boot brings back the program
-         * objects of processes that no longer exist. Those slots are
-         * cleared first and refilled: the graph should hold exactly the
-         * programs that are running, not one dead record per boot. */
+         * A restored graph names programs that were running when it was
+         * written. Those processes are gone; their successors started a
+         * moment ago, holding a console and a letter box and nothing
+         * else. If the world is to come back as it was left -- and that
+         * is the whole promise -- then what the graph says a program
+         * held must be handed to its successor again, not merely shown.
+         * The record is matched to a successor by the program's own
+         * name, its references are replayed onto it grant by grant, and
+         * the record's place and petname in the graph are taken over.
+         * A record with no successor is cleared: what happened is kept
+         * by the journal, not by dead ends in the graph. */
+        object *heirs[2] = { agent_program, courier_program };
+        object *records[2] = { NULL, NULL };
+        bool placed[2] = { false, false };
+
         for (u64 i = 0; i < obj_slots(root); i++) {
             object *s = obj_get_slot(root, i);
-            if (s && obj_type(s) == TYPE_PROGRAM && !proc_is_running(s)) {
+            if (!s || obj_type(s) != TYPE_PROGRAM || proc_is_running(s))
+                continue;
+            for (u32 k = 0; k < 2; k++)
+                if (heirs[k] && obj_name(s) && obj_name(heirs[k]) &&
+                    strcmp(obj_name(s), obj_name(heirs[k])) == 0)
+                    records[k] = s;
+        }
+
+        /* Replay. A reference from one record to another is re-pointed
+         * at the other's successor: the courier knew the agent, so it
+         * knows the new agent. Every replayed reference is also granted
+         * again -- the slot is the record of the giving, and the giving
+         * is done anew. */
+        for (u32 k = 0; k < 2; k++) {
+            if (!records[k] || !heirs[k]) continue;
+            for (u64 j = 0; j < obj_slots(records[k]); j++) {
+                object *t = obj_get_slot(records[k], j);
+                if (!t) continue;
+                for (u32 k2 = 0; k2 < 2; k2++)
+                    if (t == records[k2] && heirs[k2]) t = heirs[k2];
+
+                u32 rr = obj_slot_rights(records[k], j);
+                if (j >= obj_slots(heirs[k]) &&
+                    !obj_grow_slots(heirs[k], j + 1)) break;
+                obj_set_slot(heirs[k], j, t, rr);
+                obj_set_slot_name(heirs[k], j,
+                                  obj_slot_name(records[k], j));
+                proc_grant(heirs[k], t, rr);
+            }
+        }
+
+        /* The successors take the records' places, petnames included;
+         * unmatched records go; anything still unplaced gets a fresh
+         * slot with a plain name. Read and grant, never write: nobody
+         * edits a running program by typing into it. */
+        for (u64 i = 0; i < obj_slots(root); i++) {
+            object *s = obj_get_slot(root, i);
+            if (!s || obj_type(s) != TYPE_PROGRAM || proc_is_running(s))
+                continue;
+            bool matched = false;
+            for (u32 k = 0; k < 2; k++) {
+                if (s != records[k] || !heirs[k]) continue;
+                obj_set_slot(root, i, heirs[k], obj_slot_rights(root, i));
+                placed[k] = true;
+                matched = true;
+            }
+            if (!matched) {
                 obj_set_slot(root, i, NULL, 0);
                 obj_set_slot_name(root, i, NULL);
             }
         }
 
-        object *progs[2] = { agent_program, courier_program };
         const char *what_for[2] = { "a program, waiting",
                                     "a courier, waiting" };
-        for (u32 pi = 0; pi < 2; pi++) {
-            if (!progs[pi]) continue;
+        for (u32 k = 0; k < 2; k++) {
+            if (!heirs[k] || placed[k]) continue;
 
+            u64 n = obj_slots(root), spot = n;
+            for (u64 i = 0; i < n; i++)
+                if (!obj_get_slot(root, i)) { spot = i; break; }
+            if (spot == n && !obj_grow_slots(root, n + 1)) continue;
+
+            obj_set_slot(root, spot, heirs[k], CAP_READ | CAP_GRANT);
+            obj_set_slot_name(root, spot, what_for[k]);
+        }
+
+        /* The journal. A restored graph brings its own back, found by
+         * the name this code gave the reference; appending continues
+         * into it rather than starting a second history. The reference
+         * is read-only on purpose: history can be read by anyone who
+         * holds it and rewritten by nobody. */
+        for (u64 i = 0; i < obj_slots(root); i++) {
+            object *s = obj_get_slot(root, i);
+            const char *nm = obj_slot_name(root, i);
+            if (s && nm && strcmp(nm, "what has happened") == 0 &&
+                obj_type(s) == TYPE_TEXT) {
+                journal_adopt(s);
+                break;
+            }
+        }
+        if (!journal_object() && journal_create()) {
             u64 n = obj_slots(root), at = n;
             for (u64 i = 0; i < n; i++)
                 if (!obj_get_slot(root, i)) { at = i; break; }
-            if (at == n && !obj_grow_slots(root, n + 1)) continue;
-
-            /* Read and grant, not write. Nobody edits a running program
-             * by typing into it; what these references are for is being
-             * pointed at things. */
-            obj_set_slot(root, at, progs[pi], CAP_READ | CAP_GRANT);
-            obj_set_slot_name(root, at, what_for[pi]);
+            if (at < n || obj_grow_slots(root, n + 1)) {
+                obj_set_slot(root, at, journal_object(), CAP_READ);
+                obj_set_slot_name(root, at, "what has happened");
+            }
         }
+        journal_says("system", session ? "started; everything is as it was left"
+                                       : "started fresh");
 
         /* One capability, held by the shell, carrying everything we can
          * do. Every step from here narrows it. */

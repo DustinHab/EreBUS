@@ -75,6 +75,11 @@ bool cap_revoke(domain *d, cap_handle h);
  * stops naming anything. */
 u32 cap_revoke_object(domain *d, object *o);
 
+/* One slot of the table, for showing what a domain holds. Slots run
+ * from 1 to domain_capacity(); empty ones answer NULL. Kernel-side
+ * only -- no system call leads here. */
+object *domain_cap_at(const domain *d, u64 slot, u32 *rights);
+
 
 bool cap_selftest(void);
 

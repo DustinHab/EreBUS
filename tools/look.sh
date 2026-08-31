@@ -15,6 +15,15 @@ OUT=$1
 shift
 
 BUILD=build
+
+# The stress and fault targets delete the image on their way out, and
+# QEMU without a disk exits before the serial log is even opened -- at
+# which point yesterday's log answers every question wrongly. Refuse
+# loudly instead.
+if [ ! -f "$BUILD/esp.img" ]; then
+    echo "look.sh: $BUILD/esp.img is missing -- run make first" >&2
+    exit 1
+fi
 QEMU="qemu-system-x86_64 -machine q35 -m 512M -cpu max \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
   -drive if=pflash,format=raw,file=$BUILD/OVMF_VARS.fd \

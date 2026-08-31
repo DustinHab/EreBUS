@@ -234,6 +234,30 @@ built binary.
   holds. `make relay` shows the whole arc: the courier is introduced to
   the agent, is handed a note read-write, and passes it on read-only by
   its own decision -- which the agent then runs into, enforced.
+* **The journal.** What has happened is a text object in the graph:
+  program utterances (attributed by the kernel, never self-signed),
+  processes ending, generations written, collections. The reference to
+  it is read-only, so history can be read by anyone who holds it and
+  rewritten by nobody. The newest line sits above the footer and leads
+  to the record; the snapshot carries the journal like everything else,
+  so it survives reboots and appears in time travel as it stood then.
+* **Programs are transparent to whoever holds them.** Focusing a
+  running program shows two lists that are deliberately not the same:
+  "points at" is your record of the giving, "it holds" is the kernel's
+  record of what the program can actually reach -- narrowings,
+  withdrawals and program-to-program passes included. Delegated
+  authority that cannot be inspected by the one who delegated it is
+  authority handed out and forgotten.
+* **Reboot keeps the delegations.** The machine reads the wall clock at
+  start-up (CMOS RTC), and a program object's payload carries a stamp
+  tying it to one process in one boot -- identity no longer rests on
+  where the allocator happened to put a struct. On restore, each
+  program record is matched to its successor by name, its references
+  are replayed onto it grant by grant (records pointing at records are
+  re-pointed at successors), and the record's place and petname in the
+  graph are taken over. The world comes back as it was left, including
+  what programs held: after a reboot the courier passes its cargo on
+  again, unprompted, and the journal shows it happening.
 * M10 — booting real hardware from a USB stick
 
 ## A note on Secure Boot

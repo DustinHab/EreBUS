@@ -107,6 +107,70 @@ bool time_init(void)
 
 u64 time_tsc_hz(void) { return tsc_hz; }
 
+/* ------------------------------------------------------------------ */
+/* The clock on the wall                                               */
+/* ------------------------------------------------------------------ */
+
+/* The CMOS real-time clock: the one piece of the machine that knows
+ * what time it is rather than how long it has been running. Read once
+ * at start-up; from then on the TSC carries it forward, which spares
+ * the two-port dance on every glance at the corner of the screen. */
+static u64 boot_wall;         /* seconds into the day when we started */
+static u64 boot_date;         /* y*10000 + m*100 + d, for the stamp */
+
+static u8 cmos_read(u8 reg)
+{
+    outb(0x70, reg);
+    return inb(0x71);
+}
+
+static u8 from_bcd(u8 v, bool bcd)
+{
+    return bcd ? (u8)((v >> 4) * 10 + (v & 0x0F)) : v;
+}
+
+void time_read_rtc(void)
+{
+    /* Wait out an update in progress, then read twice until both reads
+     * agree -- the clock ticks on its own schedule, not ours. */
+    u8 s1, m1, h1, s2, m2, h2, day, mon, yr;
+    bool bcd;
+
+    for (u32 tries = 0; tries < 8; tries++) {
+        while (cmos_read(0x0A) & 0x80) { }
+        s1 = cmos_read(0x00); m1 = cmos_read(0x02); h1 = cmos_read(0x04);
+        day = cmos_read(0x07); mon = cmos_read(0x08); yr = cmos_read(0x09);
+        s2 = cmos_read(0x00); m2 = cmos_read(0x02); h2 = cmos_read(0x04);
+        if (s1 == s2 && m1 == m2 && h1 == h2) break;
+    }
+
+    bcd = !(cmos_read(0x0B) & 0x04);
+    u64 hh = from_bcd((u8)(h1 & 0x7F), bcd);
+    u64 mm = from_bcd(m1, bcd);
+    u64 ss = from_bcd(s1, bcd);
+
+    boot_wall = hh * 3600 + mm * 60 + ss;
+    boot_date = (u64)from_bcd(yr, bcd) * 10000 +
+                (u64)from_bcd(mon, bcd) * 100 +
+                (u64)from_bcd(day, bcd);
+}
+
+void time_wall(u32 *h, u32 *m, u32 *s)
+{
+    u64 now = (boot_wall + time_ns() / 1000000000ULL) % 86400;
+    if (h) *h = (u32)(now / 3600);
+    if (m) *m = (u32)((now / 60) % 60);
+    if (s) *s = (u32)(now % 60);
+}
+
+u64 time_boot_stamp(void)
+{
+    /* Something that tells this boot apart from the last one. Date and
+     * time of day to the second: two boots inside the same second would
+     * collide, and nothing else on this machine changes faster. */
+    return (boot_date << 20) | boot_wall;
+}
+
 u64 time_ns(void)
 {
     if (!tsc_hz) return 0;

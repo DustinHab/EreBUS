@@ -20,6 +20,12 @@ typedef struct {
     u64     words[MSG_MAX_WORDS];
     object *caps[MSG_MAX_CAPS];
     u32     rights[MSG_MAX_CAPS];
+
+    /* Who sent it, stamped by the kernel on the way in. Not part of the
+     * message a program receives -- a sender cannot claim to be
+     * somebody, and a receiver in ring 3 is not handed kernel pointers.
+     * The console server reads it to attribute what programs say. */
+    const char *from;
 } queued;
 
 typedef struct {
@@ -116,7 +122,8 @@ void port_visit_queued(object *p, void (*visit)(object *o))
 /* ------------------------------------------------------------------ */
 
 bool port_post(object *p, const message *m,
-               object **carried, const u32 *rights, u32 ncaps)
+               object **carried, const u32 *rights, u32 ncaps,
+               const char *from)
 {
     if (!p || obj_type(p) != TYPE_PORT || !m) return false;
     if (ncaps > MSG_MAX_CAPS) return false;
@@ -133,6 +140,7 @@ bool port_post(object *p, const message *m,
     q->tag    = m->tag;
     q->nwords = m->nwords;
     q->ncaps  = ncaps;
+    q->from   = from;
     for (u32 i = 0; i < m->nwords; i++) q->words[i] = m->words[i];
     for (u32 i = 0; i < ncaps; i++) {
         q->caps[i] = carried[i];
@@ -183,12 +191,15 @@ bool port_send(domain *from, cap_handle h, const message *m)
         rights[i] = pass;
     }
 
-    /* The checks are done; the rest is the same work for everyone. */
-    return port_post(p, m, attach, rights, m->ncaps);
+    /* The checks are done; the rest is the same work for everyone. The
+     * label is the sender's domain label -- what the kernel knows the
+     * sender to be, not what the sender says. */
+    return port_post(p, m, attach, rights, m->ncaps, domain_label(from));
 }
 
 /* Takes the next message out. Interrupts must be off. */
-static bool dequeue(domain *to, port_state *s, message *out)
+static bool dequeue(domain *to, port_state *s, message *out,
+                    const char **from)
 {
     if (s->count == 0) return false;
 
@@ -196,6 +207,7 @@ static bool dequeue(domain *to, port_state *s, message *out)
     s->head = (s->head + 1) % s->capacity;
     s->count--;
 
+    if (from) *from = q->from;
     out->tag    = q->tag;
     out->nwords = q->nwords;
     out->ncaps  = 0;
@@ -226,12 +238,13 @@ bool port_try_receive(domain *to, cap_handle h, message *out)
     if (!p || obj_type(p) != TYPE_PORT || !out) return false;
 
     u64 flags = irq_save();
-    bool got = dequeue(to, state_of(p), out);
+    bool got = dequeue(to, state_of(p), out, NULL);
     irq_restore(flags);
     return got;
 }
 
-bool port_receive(domain *to, cap_handle h, message *out)
+bool port_receive_labelled(domain *to, cap_handle h, message *out,
+                           const char **from)
 {
     object *p = cap_lookup(to, h, CAP_READ);
     if (!p || obj_type(p) != TYPE_PORT || !out) return false;
@@ -240,7 +253,7 @@ bool port_receive(domain *to, cap_handle h, message *out)
         u64 flags = irq_save();
         port_state *s = state_of(p);
 
-        if (dequeue(to, s, out)) {
+        if (dequeue(to, s, out, from)) {
             irq_restore(flags);
             return true;
         }
@@ -256,6 +269,11 @@ bool port_receive(domain *to, cap_handle h, message *out)
         sched_block();
         irq_restore(flags);
     }
+}
+
+bool port_receive(domain *to, cap_handle h, message *out)
+{
+    return port_receive_labelled(to, h, out, NULL);
 }
 
 /* ------------------------------------------------------------------ */

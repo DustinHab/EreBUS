@@ -11,6 +11,8 @@
 #include <eb/mm.h>
 #include <eb/fmt.h>
 #include <eb/io.h>
+#include <eb/journal.h>
+#include <eb/time.h>
 #include <eb/panic.h>
 
 /* The user section of the kernel image, from the linker script. */
@@ -22,6 +24,7 @@ extern char __user_end[];
 struct process {
     u64         magic;
     u64         id;
+    u64         stamp;    /* this boot, this process -- see proc_is_running */
     const char *name;
     domain     *dom;
     phys_addr   pml4;
@@ -59,11 +62,25 @@ static bool is_live(const process *p)
     return false;
 }
 
+/* The payload of a program object: the pointer, and a stamp that ties
+ * it to one process in one boot. The pointer alone once decided this,
+ * and a restored object's stale pointer happened to land on the reborn
+ * process's freshly allocated struct -- same allocation order, same
+ * address -- making a record from the last boot pass for alive by
+ * coincidence. Identity that rests on where the allocator put things
+ * is not identity. */
+typedef struct {
+    process *p;
+    u64      stamp;
+} program_ref;
+
 bool proc_is_running(object *program)
 {
     if (!program || obj_type(program) != TYPE_PROGRAM) return false;
-    if (obj_size(program) < sizeof(process *)) return false;
-    return is_live(*(process **)obj_data(program));
+    if (obj_size(program) < sizeof(program_ref)) return false;
+
+    const program_ref *ref = (const program_ref *)obj_data(program);
+    return is_live(ref->p) && ref->p->stamp == ref->stamp;
 }
 static u64 process_count;
 static u64 fault_count;
@@ -199,9 +216,13 @@ process *proc_create(const char *name, const void *entry_point,
      * at something is how the program comes to hold it -- the same
      * gesture as pointing anything at anything, with the difference
      * that this particular holder is alive. */
-    p->self = obj_create(TYPE_PROGRAM, sizeof(process *), 8);
+    p->stamp = time_boot_stamp() ^ (p->id << 40) ^ p->id;
+
+    p->self = obj_create(TYPE_PROGRAM, sizeof(program_ref), 8);
     if (!p->self) goto fail;
-    *(process **)obj_data(p->self) = p;
+    program_ref *ref = (program_ref *)obj_data(p->self);
+    ref->p = p;
+    ref->stamp = p->stamp;
     obj_set_name(p->self, name);
 
     if (live_count < MAX_PROCESSES) live[live_count++] = p;
@@ -219,6 +240,15 @@ fail:
 }
 
 object *proc_object(process *p) { return p ? p->self : NULL; }
+
+domain *proc_domain_of(object *program)
+{
+    /* The domain behind a program object, for the shell's inspection.
+     * Only for a program that is actually running; a restored record
+     * has no domain, and its stale pointer is never followed. */
+    if (!proc_is_running(program)) return NULL;
+    return ((program_ref *)obj_data(program))->p->dom;
+}
 
 /* Hands a running program a reference.
  *
@@ -245,8 +275,9 @@ static bool grant_translate(object **what, u32 *rights)
      * hand around. */
     if (!(*rights & CAP_GRANT)) return false;
 
-    process *q = *(process **)obj_data(*what);
-    if (!is_live(q) || !q->inbox) return false;
+    if (!proc_is_running(*what)) return false;
+    process *q = ((program_ref *)obj_data(*what))->p;
+    if (!q->inbox) return false;
 
     *what = q->inbox;
     *rights = CAP_CALL;
@@ -257,8 +288,9 @@ bool proc_grant(object *program, object *what, u32 rights)
 {
     if (!program || obj_type(program) != TYPE_PROGRAM || !what) return false;
 
-    process *p = *(process **)obj_data(program);
-    if (!is_live(p) || !p->inbox) return false;
+    if (!proc_is_running(program)) return false;
+    process *p = ((program_ref *)obj_data(program))->p;
+    if (!p->inbox) return false;
 
     if (!grant_translate(&what, &rights)) return false;
 
@@ -276,15 +308,16 @@ bool proc_grant(object *program, object *what, u32 rights)
     m.nwords = 1;
     m.words[0] = rights;
 
-    return port_post(p->inbox, &m, &what, &rights, 1);
+    return port_post(p->inbox, &m, &what, &rights, 1, "you");
 }
 
 bool proc_revoke(object *program, object *what)
 {
     if (!program || obj_type(program) != TYPE_PROGRAM || !what) return false;
 
-    process *p = *(process **)obj_data(program);
-    if (!is_live(p) || !p->inbox) return false;
+    if (!proc_is_running(program)) return false;
+    process *p = ((program_ref *)obj_data(program))->p;
+    if (!p->inbox) return false;
 
     /* Withdrawing needs no right that giving needed: taking back what
      * one handed out is always allowed, so the translation runs with
@@ -300,7 +333,7 @@ bool proc_revoke(object *program, object *what)
      * nothing at all. */
     message m = { 0 };
     m.tag = 0x4E49414741ULL;      /* "AGAIN" */
-    return port_post(p->inbox, &m, NULL, NULL, 0);
+    return port_post(p->inbox, &m, NULL, NULL, 0, "you");
 }
 
 domain     *proc_domain(process *p)       { return p ? p->dom : NULL; }
@@ -350,7 +383,9 @@ static void proc_reap(void *arg)
      * is the record that a program was here. What must not stay is the
      * pointer to a process that no longer exists. */
     if (p->self) {
-        *(process **)obj_data(p->self) = NULL;
+        program_ref *gone = (program_ref *)obj_data(p->self);
+        gone->p = NULL;
+        gone->stamp = 0;
         obj_release(p->self);
     }
 
@@ -365,6 +400,7 @@ static void proc_reap(void *arg)
 
     kprintf("proc: %llu (%s) ended; everything it held has been let go\n",
             p->id, p->name);
+    journal_says(p->name, "ended; everything it held has been let go");
 
     p->magic = 0;
     kfree(p);
@@ -450,6 +486,7 @@ void proc_fault(const char *what, virt_addr where)
     kprintf("proc: thread %llu (%s) faulted in ring 3: %s at %p\n",
             thread_id(t), thread_name(t), what, (void *)where);
     kprintf("proc: ending that thread; the rest of the system continues\n");
+    journal_says(thread_name(t), "reached where it may not; it was ended");
 
     /* This is the difference the address space buys. A program reaching
      * where it should not is one program's problem, reported and over

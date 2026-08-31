@@ -9,6 +9,8 @@
 #include <eb/msg.h>
 #include <eb/fmt.h>
 #include <eb/proc.h>
+#include <eb/journal.h>
+#include <eb/time.h>
 
 #define SNAP_HISTORY_MAX 32
 #define TRAIL_MAX 12
@@ -109,7 +111,8 @@ typedef enum {
     HOT_NAME,        /* a reference's name: rename it */
     HOT_CLEAR,       /* drop a reference */
     HOT_ADD,         /* make a new reference here */
-    HOT_PALETTE      /* one choice of what to add */
+    HOT_PALETTE,     /* one choice of what to add */
+    HOT_JOURNAL      /* the newest journal line: go to the journal */
 } hot_kind;
 
 typedef struct {
@@ -272,6 +275,19 @@ static void text_at(i32 x, i32 y, i32 limit, const char *s, color c)
     while (*s && x + GLYPH_W <= limit) {
         fb_glyph(x, y, (u8)*s++, c, 0, false);
         x += GLYPH_W;
+    }
+}
+
+/* One muted colour per kind of thing, used wherever a type is named.
+ * The eye learns them without being told: green things run, amber
+ * things are raw, blue things are for reading and writing. */
+static color type_color(type_id t)
+{
+    switch (t) {
+    case TYPE_TEXT:    return C_ACCENT;
+    case TYPE_BYTES:   return C_READONLY;
+    case TYPE_PROGRAM: return C_WRITE;
+    default:           return C_DIM;
     }
 }
 
@@ -442,11 +458,11 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
 {
     char line[96];
     i32 ty = y;
+    u32 at;
 
-    u32 at = put(line, 0, "type    ");
-    at = put(line, at, type_name(obj_type(o)));
-    line[at] = 0;
-    text_at(x, ty, x + w, line, C_TEXT);
+    text_at(x, ty, x + w, "type", C_DIM);
+    text_at(x + 9 * GLYPH_W, ty, x + w, type_name(obj_type(o)),
+            type_color(obj_type(o)));
     ty += ROW;
 
     at = put(line, 0, "identity ");
@@ -472,34 +488,92 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
     /* For a program, the one fact that changes everything about it. */
     if (obj_type(o) == TYPE_PROGRAM) {
         bool alive = proc_is_running(o);
-        text_at(x, ty, x + w, alive ? "state    running" : "state    ended",
+        text_at(x, ty, x + w, "state", C_DIM);
+        text_at(x + 9 * GLYPH_W, ty, x + w, alive ? "running" : "ended",
                 alive ? C_WRITE : C_READONLY);
         ty += ROW;
     }
     ty += ROW / 2;
 
-    if (obj_slots(o) == 0) {
+    /* What it points at. Empty slots are counted, not listed: eight
+     * lines of "empty" say nothing that one quiet line does not. */
+    u64 filled = 0, vacant = 0;
+    for (u64 i = 0; i < obj_slots(o); i++)
+        if (obj_get_slot(o, i)) filled++; else vacant++;
+
+    if (filled == 0) {
         text_at(x, ty, x + w, "points at nothing", C_FAINT);
-        return;
+        ty += ROW;
+    } else {
+        text_at(x, ty, x + w, "points at", C_DIM);
+        ty += ROW;
+        for (u64 i = 0; i < obj_slots(o) && ty < y + h; i++) {
+            object *t = obj_get_slot(o, i);
+            if (!t) continue;
+            char what[48], r[4];
+            label_of(o, i, t, what, sizeof(what));
+            rights_text(obj_slot_rights(o, i), r);
+
+            at = put(line, 0, "  ");
+            at = put_dec(line, at, i);
+            at = put(line, at, "  ");
+            at = put(line, at, r);
+            at = put(line, at, "  ");
+            at = put(line, at, what);
+            line[at] = 0;
+            text_at(x, ty, x + w, line, C_DIM);
+            ty += ROW;
+        }
+    }
+    if (vacant > 0 && ty < y + h) {
+        at = put(line, 0, "  ");
+        at = put_dec(line, at, vacant);
+        at = put(line, at, filled ? " more slots, empty" : " slots, all empty");
+        line[at] = 0;
+        text_at(x, ty, x + w, line, C_FAINT);
+        ty += ROW;
     }
 
-    text_at(x, ty, x + w, "points at", C_DIM);
-    ty += ROW;
-    for (u64 i = 0; i < obj_slots(o) && ty < y + h; i++) {
-        object *t = obj_get_slot(o, i);
-        char what[48], r[4];
-        label_of(o, i, t, what, sizeof(what));
-        rights_text(obj_slot_rights(o, i), r);
-
-        at = put(line, 0, "  ");
-        at = put_dec(line, at, i);
-        at = put(line, at, "  ");
-        at = put(line, at, r);
-        at = put(line, at, "  ");
-        at = put(line, at, what);
-        line[at] = 0;
-        text_at(x, ty, x + w, line, t ? C_DIM : C_FAINT);
+    /* For a running program: what it actually holds.
+     *
+     * Not the same list as "points at". The slots above are what YOU
+     * pointed it at -- your record of the giving. This is the program's
+     * capability table -- the kernel's record of what it can reach,
+     * narrowings and withdrawals included. Whoever delegates can see
+     * what came of it; authority handed out and forgotten is how every
+     * other system rots. */
+    domain *pd = proc_domain_of(o);
+    if (pd) {
+        ty += ROW / 2;
+        text_at(x, ty, x + w, "it holds", C_DIM);
         ty += ROW;
+
+        u64 held = 0;
+        for (u64 i = 1; i <= domain_capacity(pd) && ty < y + h; i++) {
+            u32 hr = 0;
+            object *t = domain_cap_at(pd, i, &hr);
+            if (!t) continue;
+            held++;
+
+            char r[4];
+            rights_text(hr, r);
+            const char *claim = obj_name(t);
+
+            at = put(line, 0, "  ");
+            at = put(line, at, r);
+            if (hr & CAP_CALL) { line[at - 1] = 'c'; }
+            at = put(line, at, "  ");
+            at = put(line, at, type_name(obj_type(t)));
+            if (claim) {
+                at = put(line, at, "  ");
+                at = put(line, at, claim);
+            }
+            line[at] = 0;
+            text_at(x, ty, x + w, line, C_DIM);
+            ty += ROW;
+        }
+        if (held == 0 && ty < y + h)
+            text_at(x, ty, x + w, "  nothing at all", C_FAINT);
     }
 }
 
@@ -552,6 +626,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     /* --- the path we took --------------------------------------- */
     fb_rect(PAD, top, left_w, bottom - top, C_PANEL);
     text_at(PAD + PAD, top + PAD, PAD + left_w, "how you got here", C_FAINT);
+    fb_rect(PAD + PAD, top + PAD + ROW - 2, left_w - 2 * PAD, 1, C_EDGE);
 
     i32 ty = top + PAD + ROW + 4;
     for (u32 i = 0; i < nav.depth; i++) {
@@ -617,6 +692,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     i32 rx = sw - PAD - right_w;
     fb_rect(rx, top, right_w, bottom - top, C_PANEL);
     text_at(rx + PAD, top + PAD, sw - PAD, "where it leads", C_FAINT);
+    fb_rect(rx + PAD, top + PAD + ROW - 2, right_w - 2 * PAD, 1, C_EDGE);
 
     ty = top + PAD + ROW + 4;
     bool may_shape = can_shape();
@@ -1013,6 +1089,13 @@ static void draw_all(void)
     i32 sw = (i32)fb_width(), sh = (i32)fb_height();
     i32 top = 66, bottom = sh - 34;
 
+    /* The newest journal line gets a quiet row above the footer. What
+     * programs and the system do would otherwise be invisible until
+     * somebody thought to go and look. */
+    char newest[104];
+    bool have_news = journal_latest(newest, sizeof(newest));
+    if (have_news) bottom -= ROW + 6;
+
     hot_reset();
     fb_rect(0, 0, sw, sh, C_BACK);
 
@@ -1036,10 +1119,20 @@ static void draw_all(void)
                     : "you named this reference",
             C_FAINT);
 
-    char line[96];
-    u32 at = put(line, 0, type_name(obj_type(focus())));
-    at = put(line, at, "  ");
-    at = put(line, at, r);
+    /* Room for the footer, which is the longest line anywhere on the
+     * screen. It was 96 for a long time, and the footer was longer than
+     * that for exactly as long -- put() does not check, so the hints
+     * quietly wrote over whatever the compiler had placed next. Found
+     * the day the text grew and the corruption finally landed somewhere
+     * visible. */
+    char line[192];
+    i32 tx = sw / 2 + PAD;
+    const char *tn = type_name(obj_type(focus()));
+    text_at(tx, 14, sw - PAD, tn, type_color(obj_type(focus())));
+    while (*tn++) tx += GLYPH_W;
+    tx += 2 * GLYPH_W;
+
+    u32 at = put(line, 0, r);
     /* What can be done here, said plainly. A running program is the one
      * case where the answer is neither of the usual two: its contents
      * are not for editing, but what it holds is for giving. And a
@@ -1055,8 +1148,24 @@ static void draw_all(void)
                            ? "  you may change this"
                            : "  read only");
     line[at] = 0;
-    text_at(sw / 2 + PAD, 14, sw - PAD, line,
+    text_at(tx, 14, sw - PAD, line,
             (focus_rights() & CAP_WRITE) ? C_WRITE : C_READONLY);
+
+    /* Far right, quietly: which generation is on the disk, and how long
+     * the system has been up. Not a status bar -- two facts. */
+    at = put(line, 0, "generation ");
+    at = put_dec(line, at, snap_generation());
+    at = put(line, at, "   up ");
+    u64 ups = time_ns() / 1000000000ULL;
+    if (ups >= 60) {
+        at = put_dec(line, at, ups / 60);
+        at = put(line, at, "m ");
+    }
+    at = put_dec(line, at, ups % 60);
+    at = put(line, at, "s");
+    line[at] = 0;
+    text_at(sw - PAD * 2 - (i32)at * GLYPH_W, 12 + ROW, sw - PAD,
+            line, C_FAINT);
 
     /* The history strip.
      *
@@ -1117,13 +1226,31 @@ static void draw_all(void)
                 nav.at_generation ? C_READONLY : C_DIM);
     }
 
+    /* The newest thing that happened, clickable: it leads to the whole
+     * record. Dim on purpose -- it should be findable, not insistent. */
+    if (have_news) {
+        i32 jy = sh - 28 - ROW - 6;
+        bool lit = is_hovered(HOT_JOURNAL, 0);
+        if (lit) fb_rect(0, jy - 2, sw, ROW + 4, C_PANEL);
+        text_at(PAD * 2, jy, sw - PAD, newest, lit ? C_TEXT : C_FAINT);
+        hot_add(0, jy - 2, sw, ROW + 4, HOT_JOURNAL, 0);
+    }
+
     /* Footer: the mode, and what the keys do. No menu bar -- there is
-     * nothing to put in one that is not already visible. */
+     * nothing to put in one that is not already visible. The last hint
+     * follows the focus, because what typing does depends on what is
+     * under it. */
     fb_rect(0, sh - 28, sw, 28, C_BAR);
     at = put(line, 0, mode_name(nav.mode));
     at = put(line, at, "   click anything you can see.   "
-                       "tab: another way of looking.   "
-                       "arrows also move.   typing changes the object.");
+                       "tab: another way of looking.   arrows also move.   ");
+    if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
+        at = put(line, at, "point it at something to hand it over.");
+    else if (obj_type(focus()) == TYPE_TEXT &&
+             (focus_rights() & CAP_WRITE) && nav.at_generation == 0)
+        at = put(line, at, "typing goes where the caret is.");
+    else
+        at = put(line, at, "typing changes the object.");
     line[at] = 0;
     text_at(PAD * 2, sh - 28 + 6, sw - PAD, line, C_FAINT);
 
@@ -1355,6 +1482,24 @@ static void act_on(const hot_region *r)
     case HOT_TIME:
         go_to_generation(r->index);
         break;
+
+    case HOT_JOURNAL: {
+        /* The line leads to the record. The walk is a real walk -- back
+         * to the start, then through the reference that holds the
+         * journal -- so what one arrives holding is what that path
+         * grants, which for the journal is reading and nothing else. */
+        object *j = journal_object();
+        if (!j) break;
+        if (nav.at_generation != 0) leave_past();
+        go_back_to(0);
+        for (u64 i = 0; i < obj_slots(focus()); i++)
+            if (obj_get_slot(focus(), i) == j) {
+                nav.selected = (u32)i;
+                follow(i);
+                break;
+            }
+        break;
+    }
 
     case HOT_RIGHT: {
         /* One letter, one right. Turning it off narrows what anyone
@@ -1729,9 +1874,25 @@ void shell_init(domain *d, object *root, u32 rights, object *session)
 void shell_run(void *arg)
 {
     (void)arg;
+    u64 seen_journal = journal_sequence();
+    u64 last_tick = time_ns();
+
     for (;;) {
         handle_mouse();
         handle_keys();
+
+        /* Two things redraw the screen without anybody touching it:
+         * something happened (the journal grew), and time passed (the
+         * clock in the corner would otherwise only be right while one
+         * is doing something, which is exactly when nobody looks). */
+        u64 seq = journal_sequence();
+        if (seq != seen_journal) { seen_journal = seq; nav.redraw = true; }
+
+        u64 now = time_ns();
+        if (now - last_tick >= 1000000000ULL) {
+            last_tick = now;
+            nav.redraw = true;
+        }
 
         if (nav.redraw) {
             nav.redraw = false;

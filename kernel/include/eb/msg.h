@@ -56,6 +56,12 @@ bool port_send(domain *from, cap_handle port, const message *m);
 /* Requires CAP_READ on the port. Blocks until something arrives. */
 bool port_receive(domain *to, cap_handle port, message *out);
 
+/* Same, and also says who sent it -- the sender's domain label as the
+ * kernel stamped it on the way in, never something the sender wrote.
+ * Kernel-side callers only; ring 3 is not handed kernel pointers. */
+bool port_receive_labelled(domain *to, cap_handle port, message *out,
+                           const char **from);
+
 /* Same, but returns false instead of waiting. */
 bool port_try_receive(domain *to, cap_handle port, message *out);
 
@@ -69,7 +75,8 @@ u64 port_pending(object *port);
  * never holding in the first place. port_send is this plus the checks,
  * which is where the checks belong: on the path a program can take. */
 bool port_post(object *port, const message *m,
-               object **carried, const u32 *rights, u32 ncaps);
+               object **carried, const u32 *rights, u32 ncaps,
+               const char *from);
 
 /* Empties a port's queue, releasing whatever the messages carried. Part
  * of tearing a port down; a queue that outlives its port would hold its

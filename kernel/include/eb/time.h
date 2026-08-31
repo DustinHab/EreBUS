@@ -10,7 +10,15 @@
 bool time_init(void);
 
 u64 time_ns(void);      /* nanoseconds since time_init */
-u64 time_tsc_hz(void);  /* 0 if the measurement failed */
+u64 time_tsc_hz(void);
+
+/* The clock on the wall, from the CMOS RTC read once at start-up and
+ * carried forward by the counter. */
+void time_read_rtc(void);
+void time_wall(u32 *h, u32 *m, u32 *s);
+
+/* Tells this boot apart from any other, to the second. */
+u64  time_boot_stamp(void);  /* 0 if the measurement failed */
 
 /* Periodic tick on interrupt line 0. Not needed for timestamps -- the
  * counter covers those -- but it is what will drive preemption, and it

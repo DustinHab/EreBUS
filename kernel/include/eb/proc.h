@@ -40,6 +40,10 @@ bool    proc_revoke(object *program, object *what);
  * restored from disk can contain one that does not. */
 bool    proc_is_running(object *program);
 
+/* The capability table behind a running program's object, so the shell
+ * can show what the program holds. NULL unless it is running. */
+domain *proc_domain_of(object *program);
+
 domain     *proc_domain(process *p);
 const char *proc_name(const process *p);
 u64         proc_id(const process *p);

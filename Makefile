@@ -87,6 +87,7 @@ KERN_C   := kernel/main.c \
             kernel/obj/cap.c \
             kernel/obj/port.c \
             kernel/obj/snapshot.c \
+            kernel/obj/journal.c \
             kernel/sched/thread.c \
             kernel/sched/proc.c \
             kernel/arch/x86_64/syscall.c \
@@ -354,14 +355,18 @@ agent: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 # read-only -- its own decision, enforced by the kernel -- and the agent
 # duly reads it and fails to change it. No step here involves the shell
 # doing the delegating; two programs did.
+# The coordinates track the root's slot layout: seed objects in 0-3,
+# the two programs in 4 and 5, the journal in 6, so the note made here
+# becomes slot 7. When the seed graph changes, this changes.
 RELAY_HOME := home $(shell for i in $$(seq 17); do printf 'm100,0 '; done)
-RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,49 click m0,22 click ret \
-              down down down down down down right p a s s spc i t left \
-              up right \
+RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,71 click m0,22 click ret \
+              down down down down down down down right \
+              p a s s spc i t left \
+              up up right \
               $(RELAY_HOME) m0,100 m0,15 click \
               m0,100 m0,100 m0,42 click ret \
               $(RELAY_HOME) m0,100 m0,39 click \
-              m0,100 m0,100 m0,62 click ret
+              m0,100 m0,100 m0,84 click ret
 
 relay: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 	@rm -f $(STORE)

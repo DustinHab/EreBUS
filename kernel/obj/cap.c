@@ -171,6 +171,22 @@ bool cap_revoke(domain *d, cap_handle h)
     return true;
 }
 
+object *domain_cap_at(const domain *d, u64 slot, u32 *rights)
+{
+    /* One slot of a domain's table, for showing rather than for using.
+     *
+     * This is not a namespace and not an enumeration a program can
+     * reach: no system call leads here, and the only caller is the
+     * shell, showing the holder of a program what that program can
+     * touch. Delegated authority that could not be inspected by the one
+     * who delegated it would be authority handed out and forgotten. */
+    check(d, "inspect");
+    if (slot == 0 || slot >= d->capacity) return NULL;
+    if (!d->slots[slot].target) return NULL;
+    if (rights) *rights = d->slots[slot].rights;
+    return d->slots[slot].target;
+}
+
 u32 cap_revoke_object(domain *d, object *o)
 {
     check(d, "revoke object");
