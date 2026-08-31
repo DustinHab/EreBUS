@@ -3,12 +3,12 @@
 
 #include <eb/types.h>
 
-/* Bricht das System kontrolliert ab: Meldung auf die serielle
- * Schnittstelle und auf den Bildschirm, danach Stillstand.
+/* Brings the system down in a controlled way: message to the serial
+ * port and to the screen, then a halt.
  *
- * Grundsatz von Erebus: lieber sichtbar stehenbleiben als mit einem
- * unklaren Zustand weiterlaufen. Ein weiterlaufendes System mit
- * verletzten Annahmen ist genau das, was Angriffe brauchbar macht. */
+ * Erebus principle: stop visibly rather than continue in an unclear
+ * state. A system still running on broken assumptions is exactly what
+ * makes an attack useful. */
 __attribute__((noreturn, format(printf, 1, 2)))
 void panic(const char *fmt, ...);
 

@@ -1,8 +1,8 @@
 /*
- * io.h -- Zugriff auf den x86-Ein-/Ausgabeadressraum.
+ * io.h -- access to the x86 I/O address space.
  *
- * Der getrennte E/A-Adressraum ist ein Relikt, aber die serielle
- * Schnittstelle und der PS/2-Baustein hängen nun einmal daran.
+ * A separate I/O space is a leftover from 1978, but the serial port and
+ * the PS/2 controller hang off it, so here we are.
  */
 #ifndef EB_IO_H
 #define EB_IO_H
@@ -45,18 +45,46 @@ static inline u32 inl(u16 port)
     return v;
 }
 
-/* Kurze Verzögerung durch einen Zugriff auf einen ungenutzten Port --
- * manche alten Bausteine brauchen Zeit zwischen zwei Befehlen. */
+/* A short delay by touching an unused port -- some old chips need time
+ * between two commands. */
 static inline void io_wait(void)
 {
     outb(0x80, 0);
 }
 
-static inline void cpu_halt(void)  { __asm__ volatile ("hlt"); }
-static inline void cpu_cli(void)   { __asm__ volatile ("cli"); }
-static inline void cpu_sti(void)   { __asm__ volatile ("sti"); }
+static inline u64 rdtsc(void)
+{
+    u32 lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((u64)hi << 32) | lo;
+}
 
-/* Endgültiger Stillstand -- kehrt nie zurück. */
+static inline u64 read_cr2(void)
+{
+    u64 v;
+    __asm__ volatile ("movq %%cr2, %0" : "=r"(v));
+    return v;
+}
+
+static inline u64 read_cr3(void)
+{
+    u64 v;
+    __asm__ volatile ("movq %%cr3, %0" : "=r"(v));
+    return v;
+}
+
+static inline void cpu_halt(void) { __asm__ volatile ("hlt"); }
+static inline void cpu_cli(void)  { __asm__ volatile ("cli"); }
+static inline void cpu_sti(void)  { __asm__ volatile ("sti"); }
+
+static inline bool interrupts_enabled(void)
+{
+    u64 flags;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags));
+    return (flags & (1u << 9)) != 0;
+}
+
+/* Final stop -- never returns. */
 static inline __attribute__((noreturn)) void cpu_stop(void)
 {
     for (;;) { __asm__ volatile ("cli; hlt"); }

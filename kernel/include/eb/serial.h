@@ -3,12 +3,11 @@
 
 #include <eb/types.h>
 
-/* Serielle Schnittstelle COM1, 115200 8N1.
+/* Serial port COM1, 115200 8N1.
  *
- * Das ist die Lebensader beim Entwickeln: sie funktioniert, bevor
- * irgendetwas anderes im System steht, sie funktioniert noch, wenn der
- * Bildschirm längst kaputtgeschrieben ist, und QEMU leitet sie direkt
- * ins Terminal um. */
+ * This is the lifeline during development: it works before anything
+ * else in the system does, it still works when the framebuffer has long
+ * been scribbled over, and QEMU pipes it straight into the terminal. */
 bool serial_init(void);
 void serial_putc(char c);
 void serial_write(const char *s);

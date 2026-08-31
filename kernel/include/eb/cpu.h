@@ -3,34 +3,34 @@
 
 #include <eb/types.h>
 
-/* Was CPUID über den Prozessor verrät. Nicht bloß zur Anzeige: ob NX,
- * SMEP und SMAP vorhanden sind, entscheidet darüber, welche Sperren wir
- * beim Aufbau der Seitentabellen überhaupt setzen können. */
+/* What CPUID says about the processor. Not merely for display: whether
+ * NX, SMEP and SMAP exist decides which protections we can switch on
+ * when the page tables go up. */
 typedef struct {
-    char vendor[13];       /* "GenuineIntel", "AuthenticAMD", ...        */
-    char brand[49];        /* Klartextname, falls der Prozessor ihn hat  */
+    char vendor[13];       /* "GenuineIntel", "AuthenticAMD", ...       */
+    char brand[49];        /* marketing name, if the CPU carries one    */
 
     u32  family, model, stepping;
-    u8   phys_bits;        /* nutzbare physische Adressbits             */
-    u8   virt_bits;        /* nutzbare virtuelle Adressbits             */
+    u8   phys_bits;        /* usable physical address bits              */
+    u8   virt_bits;        /* usable virtual address bits               */
 
-    /* Für die Speicherverwaltung */
-    bool pae;              /* physische Adresserweiterung               */
-    bool pge;              /* globale Seiten                            */
-    bool pse1g;            /* 1-GiB-Seiten                              */
-    bool nx;               /* Seiten als nicht ausführbar markierbar    */
+    /* For the memory manager */
+    bool pae;              /* physical address extension                */
+    bool pge;              /* global pages                              */
+    bool pse1g;            /* 1 GiB pages                               */
+    bool nx;               /* pages can be marked non-executable        */
 
-    /* Für die Härtung */
-    bool smep;             /* Kernel kann Nutzercode nicht ausführen    */
-    bool smap;             /* Kernel kann Nutzerdaten nicht lesen       */
-    bool umip;             /* Nutzercode kann Systemtabellen nicht sehen*/
-    bool rdrand, rdseed;   /* Zufall aus der Hardware                   */
+    /* For hardening */
+    bool smep;             /* kernel cannot execute user code           */
+    bool smap;             /* kernel cannot read user data unguarded    */
+    bool umip;             /* user code cannot see the system tables    */
+    bool rdrand, rdseed;   /* randomness from the hardware              */
 
-    /* Sonstiges */
+    /* Everything else */
     bool apic, x2apic;
     bool tsc, invariant_tsc;
     bool syscall;
-    bool hypervisor;       /* laufen wir in einer virtuellen Maschine?  */
+    bool hypervisor;       /* are we running inside a virtual machine?  */
 } cpu_info;
 
 void cpu_detect(cpu_info *out);

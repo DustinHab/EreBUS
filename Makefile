@@ -1,15 +1,16 @@
 # ---------------------------------------------------------------------
-# Erebus -- Buildsystem
+# Erebus -- build system
 #
-# Bewusst ein einzelner, gerade heruntergeschriebener Makefile: keine
-# Generatoren, keine Konfigurationsschicht, keine Fremdbibliotheken. Was
-# hier steht, kann man von oben nach unten lesen und nachvollziehen.
+# Deliberately a single, top-to-bottom makefile: no generator, no
+# configuration layer, no third-party libraries. What is here can be
+# read from the first line to the last.
 #
-#   make          Lader, Kernel und startfaehiges Abbild bauen
-#   make run      im QEMU starten (Fenster, serielle Ausgabe im Terminal)
-#   make shot     kopflos starten und einen Bildschirmabzug ablegen
-#   make debug    mit angehaltener CPU starten, wartet auf gdb
-#   make clean    alles Erzeugte loeschen
+#   make          build the loader, the kernel and a bootable image
+#   make run      start it in QEMU (window, serial output in terminal)
+#   make shot     start headless and save a screenshot plus the log
+#   make fault    build with the deliberate fault test and screenshot it
+#   make debug    start halted, waiting for gdb on port 1234
+#   make clean    remove everything generated
 # ---------------------------------------------------------------------
 
 ROOT   := $(CURDIR)
@@ -24,14 +25,22 @@ UNIFONT   := /usr/share/unifont/unifont.hex
 OVMF_CODE := /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS := /usr/share/OVMF/OVMF_VARS_4M.fd
 
-# Aufloesung, die wir der Firmware per EDID anbieten.
+# Resolution offered to the firmware over EDID.
 XRES := 1280
 YRES := 800
 
-# --- Uebersetzerschalter ---------------------------------------------
-# Gemeinsam: freistehend (keine C-Bibliothek), kein Red Zone (der waere
-# bei Unterbrechungen sofort zerstoert), keine Vektoreinheiten (die
-# muessten erst eingeschaltet und bei jedem Wechsel gesichert werden).
+# Extra flags for the kernel, used by the "fault" target.
+EXTRA ?=
+
+# Where the serial port goes during "make shot". Override with
+# SERIAL=null to time the framebuffer console on its own -- the serial
+# line is slow enough to hide everything else.
+SERIAL ?= file:$(BUILD)/serial.log
+
+# --- compiler flags ---------------------------------------------------
+# Shared: freestanding (no C library), no red zone (an interrupt would
+# destroy it immediately), no vector units (they would have to be
+# enabled first and saved on every context switch).
 COMMON_FLAGS := -ffreestanding -nostdlib -mno-red-zone \
                 -mno-mmx -mno-sse -mno-sse2 \
                 -fno-pic -fno-pie -fno-common \
@@ -40,16 +49,16 @@ COMMON_FLAGS := -ffreestanding -nostdlib -mno-red-zone \
                 -Wall -Wextra -Wshadow -Wvla \
                 -I$(ROOT) -I$(ROOT)/kernel/include
 
-# Lader: PE/COFF fuer UEFI, MS-ABI, 16-Bit-wchar wie es die Firmware
-# erwartet. Ohne Stapelschutz, weil es hier noch keinen panic() gibt.
+# Loader: PE/COFF for UEFI, MS ABI, 16-bit wchar as the firmware
+# expects. No stack protector, because there is no panic() yet.
 BOOT_FLAGS := -target x86_64-unknown-windows $(COMMON_FLAGS) \
               -fshort-wchar -fno-stack-protector
 
-# Kernel: ELF, SysV-ABI, mit Stapelschutz.
+# Kernel: ELF, SysV ABI, with the stack protector.
 KERN_FLAGS := -target x86_64-unknown-none-elf $(COMMON_FLAGS) \
-              -fstack-protector-strong
+              -fstack-protector-strong $(EXTRA)
 
-# --- Quellen ----------------------------------------------------------
+# --- sources ----------------------------------------------------------
 BOOT_SRC := boot/boot.c
 
 KERN_C   := kernel/main.c \
@@ -59,8 +68,13 @@ KERN_C   := kernel/main.c \
             kernel/lib/harden.c \
             kernel/hw/serial.c \
             kernel/hw/cpu.c \
-            kernel/gfx/fb.c
-KERN_S   := kernel/arch/x86_64/start.S
+            kernel/hw/pic.c \
+            kernel/hw/time.c \
+            kernel/gfx/fb.c \
+            kernel/arch/x86_64/gdt.c \
+            kernel/arch/x86_64/trap.c
+KERN_S   := kernel/arch/x86_64/start.S \
+            kernel/arch/x86_64/isr.S
 
 KERN_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(KERN_C)) \
             $(patsubst %.S,$(BUILD)/%.o,$(KERN_S))
@@ -70,15 +84,15 @@ LOADER := $(BUILD)/BOOTX64.EFI
 KERNEL := $(BUILD)/kernel.elf
 IMAGE  := $(BUILD)/esp.img
 
-.PHONY: all run shot debug clean info
+.PHONY: all run shot fault debug clean info
 all: $(IMAGE)
 
-# --- Zeichensatz ------------------------------------------------------
+# --- font -------------------------------------------------------------
 $(FONT): tools/mkfont.py
-	@echo "  ZEICHEN $@"
+	@echo "  FONT    $@"
 	@$(PY) tools/mkfont.py $(UNIFONT) $@
 
-# --- Lader ------------------------------------------------------------
+# --- loader -----------------------------------------------------------
 $(LOADER): $(BOOT_SRC) boot/efi.h common/bootinfo.h common/elf64.h
 	@mkdir -p $(BUILD)
 	@echo "  CC      $(BOOT_SRC)"
@@ -87,7 +101,7 @@ $(LOADER): $(BOOT_SRC) boot/efi.h common/bootinfo.h common/elf64.h
 	@$(PELINK) -subsystem:efi_application -entry:efi_main -nodefaultlib \
 	           $(BUILD)/boot.o -out:$@
 
-# --- Kernel -----------------------------------------------------------
+# --- kernel -----------------------------------------------------------
 $(BUILD)/%.o: %.c $(FONT)
 	@mkdir -p $(dir $@)
 	@echo "  CC      $<"
@@ -102,26 +116,26 @@ $(KERNEL): $(KERN_OBJ) kernel/arch/x86_64/linker.ld
 	@echo "  LINK    $@"
 	@$(LD) -T kernel/arch/x86_64/linker.ld -nostdlib -z noexecstack \
 	       -o $@ $(KERN_OBJ)
-	@echo "  GROESSE $$(stat -c%s $@) Bytes"
+	@echo "  SIZE    $$(stat -c%s $@) bytes"
 
-# --- Startfaehiges Abbild --------------------------------------------
-# Eine schlichte FAT32-Partition ohne Partitionstabelle. UEFI erkennt
-# das als EFI-Systempartition; fuer echte Datentraeger baut
-# tools/mkusb.sh spaeter ein GPT-Abbild daraus.
+# --- bootable image ---------------------------------------------------
+# A plain FAT32 volume with no partition table. UEFI recognises that as
+# an EFI system partition; a GPT image for real media will come from
+# tools/mkusb.sh later.
 $(IMAGE): $(LOADER) $(KERNEL)
-	@echo "  ABBILD  $@"
+	@echo "  IMAGE   $@"
 	@dd if=/dev/zero of=$@ bs=1M count=64 status=none
 	@mkfs.vfat -F 32 -n EREBUS $@ >/dev/null
 	@mmd   -i $@ ::/EFI ::/EFI/BOOT ::/erebus
 	@mcopy -i $@ $(LOADER) ::/EFI/BOOT/BOOTX64.EFI
 	@mcopy -i $@ $(KERNEL) ::/erebus/kernel.elf
-	@echo "  FERTIG  $@"
+	@echo "  DONE    $@"
 
 $(BUILD)/OVMF_VARS.fd: $(OVMF_VARS)
 	@mkdir -p $(BUILD)
 	@cp $(OVMF_VARS) $@
 
-# --- Ausfuehren -------------------------------------------------------
+# --- running ----------------------------------------------------------
 QEMU := qemu-system-x86_64 \
   -machine q35 -m 512M -cpu max \
   -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
@@ -133,26 +147,39 @@ QEMU := qemu-system-x86_64 \
 run: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 	$(QEMU) -serial stdio
 
-# Kopflos starten, kurz laufen lassen, Bildschirm abziehen, beenden.
-# Der Umweg ueber den Monitor ist der einzige Weg, ohne Fenster an ein
-# Bild zu kommen.
+# Start headless, let it settle, grab the screen, quit. Going through
+# the monitor is the only way to get an image without a window.
 shot: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 	@rm -f $(BUILD)/screen.ppm $(BUILD)/serial.log
-	@{ sleep 6; echo "screendump $(BUILD)/screen.ppm"; sleep 2; echo quit; } | \
+	@{ sleep 9; echo "screendump $(BUILD)/screen.ppm"; sleep 2; echo quit; } | \
 	  $(QEMU) -display none -monitor stdio \
-	          -serial file:$(BUILD)/serial.log >/dev/null 2>&1 || true
+	          -serial $(SERIAL) >/dev/null 2>&1 || true
 	@$(PY) tools/ppm2png.py $(BUILD)/screen.ppm $(BUILD)/screen.png
-	@echo "--- serielle Ausgabe ---"
-	@cat $(BUILD)/serial.log || true
+
+# Rebuild the kernel with the deliberate fault and photograph the
+# result.
+#
+# The object files are thrown away both before and after. Before,
+# because make cannot see that a compiler flag changed and would happily
+# reuse them. After, for the same reason in reverse: leaving objects
+# built with the test flag behind would silently contaminate the next
+# ordinary build, and a kernel that faults on purpose is not something
+# to discover by accident.
+fault:
+	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
+	@$(MAKE) --no-print-directory EXTRA=-DEREBUS_TEST_FAULT shot
+	@mv $(BUILD)/screen.png $(BUILD)/screen-fault.png
+	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
+	@echo "  DONE    $(BUILD)/screen-fault.png"
 
 debug: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 	$(QEMU) -serial stdio -s -S
 
 info:
-	@echo "Lader : $(LOADER)"
-	@echo "Kernel: $(KERNEL)"
-	@echo "Abbild: $(IMAGE)"
-	@echo "OVMF  : $(OVMF_CODE)"
+	@echo "loader: $(LOADER)"
+	@echo "kernel: $(KERNEL)"
+	@echo "image : $(IMAGE)"
+	@echo "ovmf  : $(OVMF_CODE)"
 
 clean:
 	rm -rf $(BUILD)

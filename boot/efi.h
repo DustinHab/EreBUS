@@ -1,12 +1,13 @@
 /*
- * efi.h -- die Teile der UEFI-Schnittstelle, die der Lader braucht.
+ * efi.h -- the parts of the UEFI interface the loader needs.
  *
- * Bewusst von Hand geschrieben statt gnu-efi einzubinden: der Lader ist
- * Teil des Systems, nicht eine fremde Bibliothek mit unserem Code drin.
- * Die Reihenfolge der Funktionszeiger in den Tabellen ist ABI, nicht
- * Geschmackssache -- sie folgt exakt der UEFI-Spezifikation 2.10.
- * Nicht benötigte Einträge stehen als void* drin, damit die Abstände
- * stimmen.
+ * Written by hand rather than pulling in gnu-efi: the loader is part of
+ * the system, not our code living inside somebody else's library. For a
+ * security-focused system that also keeps the trusted base small.
+ *
+ * The order of the function pointers in these tables is ABI, not taste.
+ * It follows UEFI specification 2.10 exactly. Entries we do not use are
+ * declared as void* so that the offsets still line up.
  */
 #ifndef EREBUS_EFI_H
 #define EREBUS_EFI_H
@@ -34,7 +35,7 @@ typedef UINT64             EFI_TPL;
 #define TRUE  1
 #define FALSE 0
 
-/* Statuscodes: das oberste Bit markiert einen Fehler. */
+/* Status codes: the top bit marks an error. */
 #define EFI_ERROR_BIT           0x8000000000000000ULL
 #define EFI_SUCCESS             0
 #define EFI_LOAD_ERROR          (EFI_ERROR_BIT | 1)
@@ -64,7 +65,7 @@ typedef struct {
 } EFI_TABLE_HEADER;
 
 /* ------------------------------------------------------------------ */
-/* Speicher                                                            */
+/* Memory                                                              */
 /* ------------------------------------------------------------------ */
 
 typedef enum {
@@ -93,9 +94,9 @@ typedef enum {
     EfiMaxMemoryType
 } EFI_MEMORY_TYPE;
 
-/* Achtung: die Firmware darf einen GRÖSSEREN Deskriptor liefern als
- * hier steht. Beim Durchlaufen der Karte niemals sizeof() benutzen,
- * immer die von GetMemoryMap zurückgegebene DescriptorSize. */
+/* Careful: the firmware is allowed to hand back a LARGER descriptor
+ * than declared here. When walking the map never use sizeof() -- always
+ * the DescriptorSize returned by GetMemoryMap. */
 typedef struct {
     UINT32               Type;
     UINT32               Pad;
@@ -106,7 +107,7 @@ typedef struct {
 } EFI_MEMORY_DESCRIPTOR;
 
 /* ------------------------------------------------------------------ */
-/* Textausgabe                                                         */
+/* Text output                                                         */
 /* ------------------------------------------------------------------ */
 
 struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
@@ -140,7 +141,7 @@ typedef struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
 } EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
 
 /* ------------------------------------------------------------------ */
-/* Grafik (GOP)                                                        */
+/* Graphics Output Protocol                                            */
 /* ------------------------------------------------------------------ */
 
 #define EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID \
@@ -190,7 +191,7 @@ typedef struct _EFI_GRAPHICS_OUTPUT_PROTOCOL {
 } EFI_GRAPHICS_OUTPUT_PROTOCOL;
 
 /* ------------------------------------------------------------------ */
-/* Geladenes Abbild und Dateisystem                                    */
+/* Loaded image and file system                                        */
 /* ------------------------------------------------------------------ */
 
 #define EFI_LOADED_IMAGE_PROTOCOL_GUID \
@@ -200,7 +201,7 @@ typedef struct {
     UINT32       Revision;
     EFI_HANDLE   ParentHandle;
     VOID        *SystemTable;
-    EFI_HANDLE   DeviceHandle;   /* <- daher kommt unser Dateisystem */
+    EFI_HANDLE   DeviceHandle;   /* <- where our file system comes from */
     VOID        *FilePath;
     VOID        *Reserved;
     UINT32       LoadOptionsSize;
@@ -269,17 +270,17 @@ typedef struct {
 } EFI_FILE_INFO;
 
 /* ------------------------------------------------------------------ */
-/* Boot Services -- Reihenfolge ist ABI!                               */
+/* Boot services -- the order of these fields is ABI                   */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
     EFI_TABLE_HEADER Hdr;
 
-    /* Task Priority */
+    /* Task priority */
     VOID *RaiseTPL;
     VOID *RestoreTPL;
 
-    /* Speicher */
+    /* Memory */
     EFI_STATUS (EFIAPI *AllocatePages)(EFI_ALLOCATE_TYPE Type,
                                        EFI_MEMORY_TYPE MemoryType,
                                        UINTN Pages,
@@ -294,7 +295,7 @@ typedef struct {
                                       VOID **Buffer);
     EFI_STATUS (EFIAPI *FreePool)(VOID *Buffer);
 
-    /* Ereignisse und Zeitgeber */
+    /* Events and timers */
     VOID *CreateEvent;
     VOID *SetTimer;
     VOID *WaitForEvent;
@@ -302,7 +303,7 @@ typedef struct {
     VOID *CloseEvent;
     VOID *CheckEvent;
 
-    /* Protokollverwaltung */
+    /* Protocol handling */
     VOID *InstallProtocolInterface;
     VOID *ReinstallProtocolInterface;
     VOID *UninstallProtocolInterface;
@@ -314,29 +315,29 @@ typedef struct {
     VOID *LocateDevicePath;
     VOID *InstallConfigurationTable;
 
-    /* Abbilder */
+    /* Images */
     VOID *LoadImage;
     VOID *StartImage;
     VOID *Exit;
     VOID *UnloadImage;
     EFI_STATUS (EFIAPI *ExitBootServices)(EFI_HANDLE ImageHandle, UINTN MapKey);
 
-    /* Verschiedenes */
+    /* Miscellaneous */
     VOID *GetNextMonotonicCount;
     EFI_STATUS (EFIAPI *Stall)(UINTN Microseconds);
     EFI_STATUS (EFIAPI *SetWatchdogTimer)(UINTN Timeout, UINT64 WatchdogCode,
                                           UINTN DataSize, CHAR16 *WatchdogData);
 
-    /* Treiberunterstützung */
+    /* Driver support */
     VOID *ConnectController;
     VOID *DisconnectController;
 
-    /* Protokolle öffnen/schließen */
+    /* Open and close protocol */
     VOID *OpenProtocol;
     VOID *CloseProtocol;
     VOID *OpenProtocolInformation;
 
-    /* Bibliothek */
+    /* Library */
     VOID *ProtocolsPerHandle;
     VOID *LocateHandleBuffer;
     EFI_STATUS (EFIAPI *LocateProtocol)(EFI_GUID *Protocol, VOID *Registration,
@@ -344,10 +345,10 @@ typedef struct {
     VOID *InstallMultipleProtocolInterfaces;
     VOID *UninstallMultipleProtocolInterfaces;
 
-    /* 32-Bit-CRC */
+    /* 32-bit CRC */
     VOID *CalculateCrc32;
 
-    /* Verschiedenes, Teil 2 */
+    /* Miscellaneous, part two */
     VOID (EFIAPI *CopyMem)(VOID *Destination, VOID *Source, UINTN Length);
     VOID (EFIAPI *SetMem)(VOID *Buffer, UINTN Size, UINT8 Value);
     VOID *CreateEventEx;
@@ -374,11 +375,10 @@ typedef struct {
     EFI_CONFIGURATION_TABLE         *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
 
-/* ACPI 2.0+ Wurzelzeiger, steht in der Konfigurationstabelle. */
+/* ACPI root pointer, found in the firmware configuration table. */
 #define EFI_ACPI_20_TABLE_GUID \
     { 0x8868e871, 0xe4f1, 0x11d3, { 0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 } }
 #define EFI_ACPI_10_TABLE_GUID \
     { 0xeb9d2d30, 0x2d88, 0x11d3, { 0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d } }
 
 #endif /* EREBUS_EFI_H */
-

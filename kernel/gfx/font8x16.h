@@ -1,10 +1,10 @@
 /*
- * font8x16.h -- ERZEUGTE DATEI, nicht von Hand aendern.
+ * font8x16.h -- GENERATED FILE, do not edit by hand.
  *
- * Quelle: GNU Unifont (SIL Open Font License 1.1),
- * erzeugt von tools/mkfont.py.
+ * Source: GNU Unifont (SIL Open Font License 1.1),
+ * produced by tools/mkfont.py.
  *
- * 1035 Zeichen in 6 Bereichen, 16560 Bytes.
+ * 1035 glyphs in 6 ranges, 16560 bytes.
  */
 #ifndef EB_FONT8X16_H
 #define EB_FONT8X16_H
@@ -12,9 +12,9 @@
 #include <eb/types.h>
 
 typedef struct {
-    u32 first;   /* erster Codepunkt des Bereichs      */
-    u32 last;    /* letzter, einschliesslich           */
-    u32 offset;  /* Zeile in font_bitmap fuer 'first'  */
+    u32 first;   /* first code point of the range     */
+    u32 last;    /* last one, inclusive               */
+    u32 offset;  /* row in font_bitmap for 'first'    */
 } font_range;
 
 #define FONT_RANGE_COUNT 6
@@ -29,7 +29,7 @@ static const font_range font_ranges[FONT_RANGE_COUNT] = {
     { 0x25A0, 0x25CF, 987 },
 };
 
-/* Ersatzdarstellung fuer unbekannte Zeichen. */
+/* Shown in place of a code point we do not have. */
 static const u8 font_missing[16] = {
     0x00, 0x00, 0x7E, 0x42, 0x42, 0x5A, 0x5A, 0x42, 0x42, 0x5A, 0x5A, 0x42, 0x42, 0x7E, 0x00, 0x00
 };

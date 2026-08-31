@@ -1,5 +1,5 @@
 /*
- * fmt.c -- formatierte Ausgabe des Kernels.
+ * fmt.c -- the kernel's formatted output.
  */
 #include <eb/fmt.h>
 
@@ -8,22 +8,62 @@ static kout_sink sinks[MAX_SINKS];
 static u32       sink_count;
 static bool      screen_muted;
 
+static u64 (*clock_ns)(void);
+static bool at_line_start = true;
+
 void kout_add_sink(kout_sink sink)
 {
     if (sink && sink_count < MAX_SINKS)
         sinks[sink_count++] = sink;
 }
 
-/* Senke 0 ist immer die serielle Schnittstelle. Beim Ausgeben langer
- * Diagnosen will man den Bildschirm nicht vollschreiben -- damit geht
- * alles Weitere nur noch ans Kabel. */
+/* Sink 0 is always the serial port. */
 void kout_mute_screen(bool mute) { screen_muted = mute; }
 
-void kputc(char c)
+void kout_set_clock(u64 (*nanoseconds)(void)) { clock_ns = nanoseconds; }
+
+static void raw_putc(char c)
 {
     u32 n = screen_muted && sink_count > 0 ? 1 : sink_count;
     for (u32 i = 0; i < n; i++)
         sinks[i](c);
+}
+
+/* Decimal number, right-aligned to at least min_width using padc. */
+static void raw_num(u64 v, u32 min_width, char padc)
+{
+    char tmp[24];
+    u32 n = 0;
+
+    if (v == 0) tmp[n++] = '0';
+    while (v) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
+
+    for (u32 i = n; i < min_width; i++) raw_putc(padc);
+    while (n) raw_putc(tmp[--n]);
+}
+
+/* "[    3.148271] " -- seconds and microseconds since the clock was
+ * started, in the same shape dmesg uses. */
+static void emit_timestamp(void)
+{
+    u64 ns = clock_ns();
+    raw_putc('[');
+    raw_num(ns / 1000000000ULL, 5, ' ');
+    raw_putc('.');
+    raw_num((ns / 1000ULL) % 1000000ULL, 6, '0');
+    raw_putc(']');
+    raw_putc(' ');
+}
+
+void kputc(char c)
+{
+    /* Blank lines stay blank -- a timestamp on an empty line is noise. */
+    if (at_line_start && clock_ns && c != '\n') {
+        at_line_start = false;
+        emit_timestamp();
+    }
+    raw_putc(c);
+    if (c == '\n') at_line_start = true;
 }
 
 void kputs(const char *s)
@@ -39,8 +79,8 @@ static void pad(u32 count, char c)
     while (count--) kputc(c);
 }
 
-/* Gibt ein fertiges Feld mit Auffuellung aus. Bei Null-Auffuellung muss
- * ein Minuszeichen vor die Nullen, sonst steht "00-42" auf dem Schirm. */
+/* Emits a finished field with padding. With zero padding a minus sign
+ * has to come before the zeros, otherwise "00-42" appears. */
 static void emit(const char *s, u32 len, u32 width, bool left, bool zero)
 {
     u32 fill = (width > len) ? width - len : 0;
@@ -60,7 +100,6 @@ static void emit(const char *s, u32 len, u32 width, bool left, bool zero)
     for (u32 i = 0; i < len; i++) kputc(s[i]);
 }
 
-/* Zahl rueckwaerts in den Puffer schreiben und die Laenge liefern. */
 static u32 render_u64(u64 v, u32 base, bool upper, char *buf)
 {
     const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
@@ -78,7 +117,7 @@ static u32 render_i64(i64 v, char *buf)
 {
     if (v >= 0) return render_u64((u64)v, 10, false, buf);
     buf[0] = '-';
-    /* Ueber u64 gehen: -(i64)MIN passt nicht in i64. */
+    /* Go through u64: -(i64)MIN does not fit in an i64. */
     return 1 + render_u64((u64)(-(v + 1)) + 1u, 10, false, buf + 1);
 }
 
@@ -90,20 +129,19 @@ void kvprintf(const char *fmt, va_list ap)
         if (*fmt != '%') { kputc(*fmt++); continue; }
         fmt++;
 
-        /* Flaggen: '-' linksbuendig, '0' mit Nullen auffuellen. */
         bool left = false, zero = false;
         for (;;) {
             if      (*fmt == '-') { left = true;  fmt++; }
             else if (*fmt == '0') { zero = true;  fmt++; }
             else break;
         }
-        if (left) zero = false;   /* Nullen rechts waeren sinnlos */
+        if (left) zero = false;
 
         u32 width = 0;
         while (*fmt >= '0' && *fmt <= '9')
             width = width * 10u + (u32)(*fmt++ - '0');
 
-        /* Laengenangaben bestimmen nur, wie breit wir vom Stapel holen. */
+        /* Length modifiers only decide how wide we pull from the stack. */
         bool wide = false;
         while (*fmt == 'l' || *fmt == 'z' || *fmt == 'h') {
             if (*fmt != 'h') wide = true;
@@ -139,8 +177,8 @@ void kvprintf(const char *fmt, va_list ap)
         case 's': {
             const char *s = va_arg(ap, const char *);
             if (!s) s = "(null)";
-            /* Feldbreite in Zeichen, nicht in Bytes -- sonst rutschen
-             * Spalten mit Umlauten auseinander. */
+            /* Field width in characters, not bytes, so columns still
+             * line up if the text is not plain ASCII. */
             u32 chars = 0;
             for (const char *p = s; *p; p++)
                 if (((u8)*p & 0xC0) != 0x80) chars++;
@@ -158,7 +196,7 @@ void kvprintf(const char *fmt, va_list ap)
             kputc('%');
             break;
         case 0:
-            return;                        /* '%' am Ende der Zeichenkette */
+            return;                        /* '%' at the end of the string */
         default:
             kputc('%');
             kputc(*fmt);

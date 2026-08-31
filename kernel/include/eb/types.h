@@ -1,9 +1,9 @@
 /*
- * types.h -- Grundtypen des Kernels.
+ * types.h -- the kernel's base types.
  *
- * Erebus benutzt keine C-Bibliothek. Alles, was sonst aus <stdint.h>
- * käme, steht hier -- und zwar mit kurzen Namen, weil diese Typen in
- * jeder zweiten Zeile vorkommen.
+ * Erebus has no C library. Everything that would otherwise come from
+ * <stdint.h> lives here, with short names, because these types appear
+ * in every other line.
  */
 #ifndef EB_TYPES_H
 #define EB_TYPES_H
@@ -20,8 +20,8 @@ typedef signed long long   i64;
 
 typedef u64                usize;
 typedef i64                isize;
-typedef u64                phys_addr;   /* physische Adresse */
-typedef u64                virt_addr;   /* virtuelle Adresse */
+typedef u64                phys_addr;
+typedef u64                virt_addr;
 
 typedef _Bool              bool;
 #define true  1
@@ -34,13 +34,12 @@ typedef _Bool              bool;
 #define PAGE_SIZE  4096ULL
 #define PAGE_SHIFT 12
 
-/* Auf- und Abrunden auf Seitengrenzen. */
 #define PAGE_DOWN(x) ((u64)(x) & ~(PAGE_SIZE - 1))
 #define PAGE_UP(x)   PAGE_DOWN((u64)(x) + PAGE_SIZE - 1)
 
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
 
-/* Vom Bindeskript gesetzt, umschließen das Kernelabbild. */
+/* Provided by the linker script, bracketing the kernel image. */
 extern char __kernel_start[];
 extern char __kernel_end[];
 extern char __bss_start[];

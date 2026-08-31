@@ -1,8 +1,8 @@
 #ifndef EB_VARARGS_H
 #define EB_VARARGS_H
 
-/* Ohne C-Bibliothek gibt es kein <stdarg.h> -- der Übersetzer stellt die
- * Bausteine aber selbst bereit. */
+/* Without a C library there is no <stdarg.h>, but the compiler still
+ * provides the building blocks. */
 typedef __builtin_va_list va_list;
 #define va_start(ap, last) __builtin_va_start(ap, last)
 #define va_arg(ap, type)   __builtin_va_arg(ap, type)

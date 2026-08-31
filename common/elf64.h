@@ -1,5 +1,5 @@
 /*
- * elf64.h -- so viel vom ELF64-Format, wie zum Laden eines Abbilds nötig ist.
+ * elf64.h -- as much of the ELF64 format as loading an image requires.
  */
 #ifndef EREBUS_ELF64_H
 #define EREBUS_ELF64_H

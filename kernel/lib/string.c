@@ -1,9 +1,9 @@
 /*
- * string.c -- die Speicherfunktionen, die der Übersetzer voraussetzt.
+ * string.c -- the memory routines the compiler takes for granted.
  *
- * clang erzeugt Aufrufe auf memset/memcpy/memmove/memcmp auch dann,
- * wenn man sie nie hinschreibt (Strukturzuweisungen, Initialisierer).
- * Ohne diese Datei bleibt der Binder mit undefinierten Symbolen stehen.
+ * clang emits calls to memset/memcpy/memmove/memcmp even where they are
+ * never written out (struct assignments, initialisers). Without this
+ * file the linker stops with undefined symbols.
  */
 #include <eb/types.h>
 
@@ -22,7 +22,7 @@ void *memcpy(void *dst, const void *src, usize n)
     return dst;
 }
 
-/* Wie memcpy, aber korrekt bei sich überlappenden Bereichen. */
+/* Like memcpy, but correct when the ranges overlap. */
 void *memmove(void *dst, const void *src, usize n)
 {
     u8 *d = (u8 *)dst;

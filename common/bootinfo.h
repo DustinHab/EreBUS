@@ -1,10 +1,9 @@
 /*
- * bootinfo.h -- Übergabestruktur vom UEFI-Lader an den Kernel.
+ * bootinfo.h -- handover structure from the UEFI loader to the kernel.
  *
- * Diese Datei wird von BEIDEN Seiten eingebunden: vom Lader (PE/COFF,
- * MS-ABI) und vom Kernel (ELF, SysV-ABI). Deshalb ausschließlich
- * festbreitige Typen und keine Bitfelder -- das Speicherlayout muss auf
- * beiden Seiten identisch sein.
+ * Included by BOTH sides: the loader (PE/COFF, MS ABI) and the kernel
+ * (ELF, SysV ABI). Therefore fixed-width types only and no bitfields --
+ * the memory layout must be identical on both sides.
  */
 #ifndef EREBUS_BOOTINFO_H
 #define EREBUS_BOOTINFO_H
@@ -14,53 +13,53 @@ typedef unsigned short     eb_u16;
 typedef unsigned int       eb_u32;
 typedef unsigned long long eb_u64;
 
-/* "EREB" -- der Kernel prüft das als erstes und hält an, wenn es fehlt. */
+/* "EREB" -- the kernel checks this first and stops if it is missing. */
 #define EREBUS_BOOT_MAGIC   0x45524542u
 #define EREBUS_BOOT_VERSION 1u
 
-/* Art eines Speicherbereichs, wie ihn der Kernel sieht. */
-#define EB_MEM_FREE     0u  /* frei nutzbar */
-#define EB_MEM_RESERVED 1u  /* Firmware/Hardware, nie anfassen */
-#define EB_MEM_LOADER   2u  /* Lader-Daten, nach Übernahme freigebbar */
-#define EB_MEM_KERNEL   3u  /* Kernel-Abbild und Bootinfo selbst */
-#define EB_MEM_ACPI     4u  /* ACPI-Tabellen, nach Auswertung freigebbar */
-#define EB_MEM_MMIO     5u  /* speicherabgebildete Geräte */
+/* How the kernel sees a region of the address space. */
+#define EB_MEM_FREE     0u  /* usable */
+#define EB_MEM_RESERVED 1u  /* firmware or hardware, never touch */
+#define EB_MEM_LOADER   2u  /* loader data, reclaimable after takeover */
+#define EB_MEM_KERNEL   3u  /* kernel image and the handover data itself */
+#define EB_MEM_ACPI     4u  /* ACPI tables, reclaimable once parsed */
+#define EB_MEM_MMIO     5u  /* memory-mapped devices */
 
 typedef struct {
-    eb_u64 base;   /* physische Startadresse, 4-KiB-ausgerichtet */
-    eb_u64 pages;  /* Länge in 4-KiB-Seiten */
+    eb_u64 base;   /* physical start address, 4 KiB aligned */
+    eb_u64 pages;  /* length in 4 KiB pages */
     eb_u32 type;   /* EB_MEM_* */
     eb_u32 _pad;
 } eb_mem_range;
 
-/* Pixelformat des Bildpuffers. Wir unterstützen nur 32 Bit pro Pixel. */
-#define EB_FB_BGRX8888 0u  /* Byte-Reihenfolge B,G,R,X -- der Normalfall */
+/* Framebuffer pixel format. Only 32 bits per pixel is supported. */
+#define EB_FB_BGRX8888 0u  /* byte order B,G,R,X -- the common case */
 #define EB_FB_RGBX8888 1u
 
 typedef struct {
     eb_u32 magic;
     eb_u32 version;
 
-    /* --- Bildschirm ------------------------------------------------ */
-    eb_u64 fb_base;    /* physische Adresse des Bildpuffers */
-    eb_u64 fb_size;    /* Größe in Bytes */
-    eb_u32 fb_width;   /* sichtbare Breite in Pixeln */
-    eb_u32 fb_height;  /* sichtbare Höhe in Pixeln */
-    eb_u32 fb_stride;  /* Pixel pro Zeile (kann > fb_width sein!) */
+    /* --- display ---------------------------------------------------- */
+    eb_u64 fb_base;    /* physical address of the framebuffer */
+    eb_u64 fb_size;    /* size in bytes */
+    eb_u32 fb_width;   /* visible width in pixels */
+    eb_u32 fb_height;  /* visible height in pixels */
+    eb_u32 fb_stride;  /* pixels per scanline -- may exceed fb_width */
     eb_u32 fb_format;  /* EB_FB_* */
 
-    /* --- Speicherkarte --------------------------------------------- */
-    eb_u64 mem_ranges; /* Zeiger auf eb_mem_range[mem_count] */
+    /* --- memory map -------------------------------------------------- */
+    eb_u64 mem_ranges; /* pointer to eb_mem_range[mem_count] */
     eb_u64 mem_count;
-    eb_u64 mem_free;   /* Summe der freien Bytes, nur zur Anzeige */
+    eb_u64 mem_free;   /* total free bytes, for reporting only */
 
-    /* --- Kernel-Abbild --------------------------------------------- */
-    eb_u64 kernel_phys; /* physische Ladeadresse */
-    eb_u64 kernel_size; /* belegte Bytes inkl. bss */
+    /* --- kernel image ------------------------------------------------ */
+    eb_u64 kernel_phys; /* physical load address */
+    eb_u64 kernel_size; /* bytes occupied, including bss */
 
-    /* --- Firmware --------------------------------------------------- */
-    eb_u64 acpi_rsdp;        /* 0, falls nicht gefunden */
-    eb_u64 efi_system_table; /* für spätere Runtime-Services */
+    /* --- firmware ---------------------------------------------------- */
+    eb_u64 acpi_rsdp;        /* zero if not found */
+    eb_u64 efi_system_table; /* kept for later runtime services */
 } eb_boot_info;
 
 #endif /* EREBUS_BOOTINFO_H */

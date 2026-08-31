@@ -1,98 +1,120 @@
 # Erebus
 
-Ein objektbasiertes, rechtegebundenes Betriebssystem für x86_64-UEFI.
-Kein Unix-Nachbau — eigener Startlader, eigener Kernel, eigene Konzepte.
+An object-based, capability-secured operating system for x86_64 UEFI.
+Not a Unix rebuild — its own boot loader, its own kernel, its own ideas.
 
-## Grundidee
+## The idea
 
 | Unix | Erebus |
 |---|---|
-| Alles ist eine Datei | Alles ist ein typisiertes Objekt |
-| Pfade in einem globalen Namensraum | Nur Referenzen; kein globaler Namensraum |
-| Rechte werden geprüft | Die Referenz *ist* das Recht (Capability) |
-| Speichern in Dateien | Versionierte Snapshots des Objektgraphen |
-| Byteströme (stdin/stdout, Pipes) | Typisierte Nachrichten |
-| Anwendung öffnet Datei | Fenster ist eine Sicht auf ein Objekt |
+| Everything is a file | Everything is a typed object |
+| Paths in one global namespace | References only; no global namespace |
+| Permissions are checked | The reference *is* the permission (capability) |
+| Saving into files | Versioned snapshots of the object graph |
+| Byte streams (stdin/stdout, pipes) | Typed messages |
+| An application opens a file | A window is a view onto an object |
 
-Sicherheitsfolge: Ein Programm kann nichts benennen, was ihm nicht
-übergeben wurde. Es gibt keinen Allmachtszustand („root"), keine
-setuid-Kette und keinen Weg, sich Rechte zu *erwerben* — sie werden nur
-weitergegeben, und dabei höchstens abgeschwächt.
+The security consequence: a program cannot name anything it was not
+handed. There is no all-powerful state to capture ("root"), no setuid
+chain, and no way to *acquire* authority — it is only ever passed along,
+and never strengthened in the process.
 
-## Bauen
+## Building
 
-Vorausgesetzt wird eine Linux-Umgebung (hier: WSL2 / Ubuntu) mit
+Needs a Linux environment (here: WSL2 with Ubuntu) and
 
     apt install clang lld nasm make qemu-system-x86 ovmf mtools \
                 dosfstools xorriso gdb unifont python3-pil
 
-Dann:
+then
 
-    make          # Lader, Kernel und startfähiges Abbild
-    make run      # in QEMU starten, serielle Ausgabe im Terminal
-    make shot     # kopflos starten, build/screen.png + build/serial.log
-    make debug    # angehalten starten, wartet auf gdb an Port 1234
+    make          # loader, kernel and a bootable image
+    make run      # start in QEMU, serial output in the terminal
+    make shot     # headless, writes build/screen.png and build/serial.log
+    make fault    # same, but with the deliberate fault test built in
+    make debug    # start halted, waiting for gdb on port 1234
     make clean
 
-Unter Windows aus dem Projektverzeichnis heraus:
+From Windows, out of the project directory:
 
     wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"
 
-## Aufbau
+## Layout
 
-    boot/            UEFI-Startlader (PE/COFF, MS-ABI)
-      efi.h          von Hand geschriebene UEFI-Schnittstelle, kein gnu-efi
-      boot.c         GOP, Dateisystem, ELF laden, ExitBootServices
-    common/          von Lader UND Kernel benutzt
-      bootinfo.h     Übergabestruktur
-      elf64.h        ELF-Kopfstrukturen
+    boot/            UEFI boot loader (PE/COFF, MS ABI)
+      efi.h          hand-written UEFI interface, no gnu-efi
+      boot.c         GOP, file system, ELF loading, ExitBootServices
+    common/          shared by the loader AND the kernel
+      bootinfo.h     handover structure
+      elf64.h        ELF header structures
     kernel/
-      arch/x86_64/   start.S, linker.ld
-      hw/            Gerätetreiber (bisher: serielle Schnittstelle)
-      gfx/           Bildpuffer, Zeichensatz, Bildschirmkonsole
-      lib/           kprintf, Speicherfunktionen, panic, Härtung
-      include/eb/    Kopfdateien
-    tools/           mkfont.py (Zeichensatz), ppm2png.py (Abzüge)
+      arch/x86_64/   start.S, linker.ld, gdt.c, isr.S, trap.c
+      hw/            device drivers: serial, cpuid, 8259, timers
+      gfx/           framebuffer, font, screen console
+      lib/           kprintf, memory routines, panic, hardening
+      include/eb/    headers
+    tools/           mkfont.py, ppm2png.py, check-isr.sh
 
-## Entscheidungen und ihre Gründe
+## Decisions, and why
 
-**Eigener Startlader statt GRUB oder Limine.** Der Bootvorgang gehört
-zum System. Kein Fremdcode zwischen Firmware und Kernel bedeutet auch:
-keine fremde Vertrauensbasis in einem sicherheitsorientierten System.
+**Our own boot loader instead of GRUB or Limine.** Booting is part of
+the system. No foreign code between firmware and kernel also means no
+foreign code in the trusted base of a security-focused system.
 
-**Kernel fest bei 2 MiB, identisch abgebildet.** UEFI bildet vor
-`ExitBootServices` alles eins zu eins ab, also stimmen virtuelle und
-physische Adresse überein. Das hält den Start nachvollziehbar. Der Umzug
-in die obere Adresshälfte kommt, wenn eigene Seitentabellen stehen.
+**Kernel fixed at 2 MiB, identity mapped.** UEFI maps everything one to
+one before `ExitBootServices`, so virtual and physical addresses agree.
+That keeps start-up traceable. The move into the upper half of the
+address space comes once we build our own page tables.
 
-**Zeichensatz aus GNU Unifont, zur Bauzeit eingebettet.** Genau 8×16, kein
-Rasterizer zur Laufzeit, keine Schriftdatei die gelesen werden müsste.
-Deckt Latein inkl. Umlauten, Rahmen- und Blockzeichen ab.
+**Font from GNU Unifont, embedded at build time.** Exactly 8x16, no
+runtime rasteriser, no font file to read. Covers Latin plus box drawing
+and block elements.
 
-**Serielle Schnittstelle als erste Ausgabe.** Sie funktioniert, bevor
-irgendetwas anderes steht, und noch dann, wenn der Bildpuffer zerschossen
-ist. QEMU leitet sie direkt ins Terminal.
+**Serial port as the first output.** It works before anything else does,
+and it still works when the framebuffer has been scribbled over. QEMU
+pipes it straight into the terminal.
 
-**Kein SSE/MMX im Kernel.** Vektorregister müssten erst eingeschaltet und
-bei jedem Kontextwechsel gesichert werden. Ohne sie ist der Wechsel
-billiger und der Startpfad kürzer.
+It is also, by a wide margin, the slowest thing in the boot path. At
+115200 baud a character takes 87 microseconds on the wire, and the
+driver waits for each one: measured against the same build with the
+serial sink removed, a log line costs 20 ms with it and 0.3 ms without.
+Linux behaves identically with `console=ttyS0`. If a boot ever looks
+sluggish, that is where the time went, not in the graphics —
+`make shot SERIAL=null` shows the difference.
 
-## Stand
+**No SSE or MMX in the kernel.** Vector registers would have to be
+enabled first and saved on every context switch. Without them the switch
+is cheaper and the boot path shorter.
 
-* **M1 — erledigt.** Eigener UEFI-Lader, Kernel übernimmt Bildschirm und
-  serielle Schnittstelle, Speicherkarte gelesen und geprüft (122 Bereiche,
-  505 MiB frei bei 512 MiB Maschine).
-* M2 — GDT, IDT, Ausnahmebehandlung, Zeitgeber, Panik-Bildschirm
-* M3 — Seitenrahmenverwaltung, eigene Seitentabellen, Kernel-Heap, NX/SMEP/SMAP
-* M4 — Objektspeicher und Capability-Tabelle
-* M5 — Threads, Ablaufsteuerung, Nachrichten
-* M6 — Nutzermodus (Ring 3), Prozesse, getrennte Adressräume
-* M7 — Compositor, Fenster, Eingabe (PS/2)
-* M8 — Desktop: Objektbrowser und Typ-Betrachter
-* M9 — Beständigkeit: NVMe/AHCI, Snapshot und Wiederherstellung
-* M10 — Start von echter Hardware per USB-Stick
+**The 8259 controller before the APIC.** Every machine has one, or
+emulates one, and it needs no ACPI tables parsed first. The local APIC
+is the better answer and will replace it, but not while there are more
+fundamental things missing.
 
-## Hinweis zu Secure Boot
+**Interrupt stubs as a 16-byte table.** Vector *n* lives at
+`isr_stubs + n * 16`, so the C side needs no table of 256 symbols. If a
+stub ever outgrew its slot the failure would look like random
+corruption, so `tools/check-isr.sh` verifies the layout against the
+built binary.
 
-Der Lader ist nicht signiert. Auf echter Hardware muss Secure Boot
-abgeschaltet sein. Eine eigene Signaturkette wäre ein Thema für später.
+## Status
+
+* **M1 — done.** Own UEFI loader; the kernel takes over the display and
+  the serial port and reads the memory map.
+* **M2 — done.** GDT with a TSS and three fault stacks, IDT with 256
+  vectors, readable crash reports with register dump and call trace,
+  8259 remapped, PIT tick, TSC calibrated against the PIT, timestamped
+  log lines, and two independent clocks checking each other at start-up.
+* M3 — page frame allocator, our own page tables, kernel heap, NX/SMEP/SMAP
+* M4 — object store and capability table
+* M5 — threads, scheduling, message passing
+* M6 — user mode (ring 3), processes, separate address spaces
+* M7 — compositor, windows, PS/2 input
+* M8 — desktop: object browser and type viewers
+* M9 — persistence: NVMe/AHCI, snapshot and restore
+* M10 — booting real hardware from a USB stick
+
+## A note on Secure Boot
+
+The loader is unsigned, so Secure Boot has to be off on real hardware.
+A signing chain of our own would be a separate project.

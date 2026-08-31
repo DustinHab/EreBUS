@@ -1,21 +1,21 @@
 /*
- * linker.ld -- Speicherbild des Kernels.
+ * linker.ld -- the kernel's memory layout.
  *
- * Der Kernel liegt fest bei 2 MiB physisch und wird dort auch
- * ausgefuehrt. UEFI bildet vor ExitBootServices alles eins zu eins ab,
- * also stimmen virtuelle und physische Adresse ueberein -- das haelt den
- * Start einfach und macht jeden Zeiger nachvollziehbar.
+ * The kernel sits at a fixed 2 MiB physically and runs there. UEFI maps
+ * everything one to one before ExitBootServices, so virtual and
+ * physical addresses agree -- which keeps start-up simple and every
+ * pointer traceable.
  *
- * Ein Umzug in die obere Haelfte des Adressraums kommt erst, wenn wir
- * eigene Seitentabellen aufbauen. Dann aendert sich hier die Basis und
- * sonst fast nichts.
+ * Moving into the upper half of the address space comes once we build
+ * our own page tables. At that point the base here changes and little
+ * else does.
  */
 
 ENTRY(_start)
 OUTPUT_FORMAT(elf64-x86-64)
 
-/* Getrennte Programmsegmente, damit spaeter W^X moeglich ist:
- * 5 = lesen+ausfuehren, 4 = nur lesen, 6 = lesen+schreiben. */
+/* Separate program segments so W^X becomes possible later:
+ * 5 = read+execute, 4 = read only, 6 = read+write. */
 PHDRS
 {
     text   PT_LOAD FLAGS(5);
@@ -29,7 +29,7 @@ SECTIONS
     __kernel_start = .;
 
     .text : ALIGN(4K) {
-        *(.text.boot)          /* _start muss zuerst kommen */
+        *(.text.boot)          /* _start has to come first */
         *(.text .text.*)
     } :text
 
@@ -52,8 +52,8 @@ SECTIONS
     . = ALIGN(4K);
     __kernel_end = .;
 
-    /* Nichts davon wird zur Laufzeit gebraucht und alles davon macht
-     * das Abbild groesser. */
+    /* None of this is needed at run time and all of it makes the image
+     * bigger. */
     /DISCARD/ : {
         *(.eh_frame*)
         *(.note*)
