@@ -14,6 +14,7 @@
 #include <eb/mm.h>
 #include <eb/msg.h>
 #include <eb/object.h>
+#include <eb/blk.h>
 #include <eb/cap.h>
 #include <eb/cpu.h>
 #include <eb/fb.h>
@@ -21,12 +22,14 @@
 #include <eb/gdt.h>
 #include <eb/kheap.h>
 #include <eb/panic.h>
+#include <eb/pci.h>
 #include <eb/proc.h>
 #include <eb/syscall.h>
 #include <eb/pic.h>
 #include <eb/pmm.h>
 #include <eb/ps2.h>
 #include <eb/serial.h>
+#include <eb/snapshot.h>
 #include <eb/thread.h>
 #include <eb/time.h>
 #include <eb/trap.h>
@@ -74,6 +77,44 @@ static void console_server(void *arg)
         kprintf("user: ");
         print_message_text(&m);
         kprintf("\n");
+    }
+}
+
+/* What persistence watches over. One object here; a real system would
+ * hand it the roots of everything the user owns. */
+static object *persistent_root;
+
+/* Writes the graph out once changes have stopped arriving.
+ *
+ * There is no save command, so something has to decide when. Waiting
+ * for quiet rather than saving on every keystroke means a burst of
+ * typing costs one write instead of thirty, and half a second of
+ * stillness is far below the point where anyone would notice. */
+static void persist_thread(void *arg)
+{
+    (void)arg;
+
+    u64 seen = wm_changes();
+    u64 written = seen;
+    u64 quiet_since = time_ns();
+
+    for (;;) {
+        u64 now = wm_changes();
+        if (now != seen) {
+            seen = now;
+            quiet_since = time_ns();
+        } else if (seen != written &&
+                   time_ns() - quiet_since > 500000000ULL) {
+            if (snap_save(&persistent_root, 1)) {
+                written = seen;
+                kprintf("snap: generation %llu written, %u objects, %llu bytes\n",
+                        snap_generation(), snap_object_count(), snap_bytes());
+            } else {
+                kprintf("snap: could not write the graph\n");
+                written = seen;      /* do not spin on a failing disk */
+            }
+        }
+        sched_yield();
     }
 }
 
@@ -537,6 +578,32 @@ void kmain(eb_boot_info *bi)
     kprintf("proc: %llu processes started, %llu ended by a fault\n",
             proc_count(), proc_faults());
 
+    /* --- storage ------------------------------------------------------ */
+
+    pci_scan();
+    kprintf("pci:  %u devices\n", pci_device_count());
+    for (u32 i = 0; i < pci_device_count(); i++) {
+        const pci_device *d = pci_get(i);
+        if (d->class_code == 0x06 && d->subclass == 0x00) continue;
+        kprintf("pci:  %02x:%02x.%u  %04x:%04x  %s\n",
+                d->bus, d->device, d->function, d->vendor, d->device_id,
+                pci_class_name(d->class_code, d->subclass));
+    }
+
+    if (blk_init()) {
+        kprintf("blk:  %s on ahci port %u, %llu sectors (",
+                blk_model(), blk_port(), blk_sectors());
+        print_size(blk_sectors() * BLK_SECTOR_SIZE);
+        kprintf("), %u disks found\n", blk_disk_count());
+
+        if (blk_selftest())
+            kprintf("blk:  self test passed, a written sector reads back\n");
+        else
+            kprintf("blk:  self test FAILED\n");
+    } else {
+        kprintf("blk:  no ahci disk found\n");
+    }
+
     /* --- the desktop ------------------------------------------------- */
 
     ps2_init();
@@ -562,15 +629,27 @@ void kmain(eb_boot_info *bi)
      * every time it draws. Typing into the writable one changes the
      * object, and the other two show the change because they were never
      * looking at anything else. */
-    object *note = obj_create(TYPE_TEXT, 256, 0);
-    if (note) {
-        static const char initial[] =
-            "a typed object, not a file.\n"
-            "three windows are looking at it.\n"
-            "type here and watch the others.\n";
-        u8 *d = (u8 *)obj_data(note);
-        for (u32 i = 0; i < sizeof(initial); i++) d[i] = (u8)initial[i];
+    /* Try the disk before making anything. If a graph is there, the
+     * system picks up where it left off; there is no separate "open" to
+     * perform and nothing for the user to remember the name of. */
+    object *note = NULL;
+    if (snap_load(&note, 1) == 1) {
+        kprintf("snap: graph restored from generation %llu, %u objects\n",
+                snap_generation(), snap_object_count());
+    } else {
+        note = obj_create(TYPE_TEXT, 256, 0);
+        kprintf("snap: no snapshot on the disk, starting fresh\n");
+        if (note) {
+            static const char initial[] =
+                "a typed object, not a file.\n"
+                "three windows are looking at it.\n"
+                "type here and watch the others.\n";
+            u8 *d = (u8 *)obj_data(note);
+            for (u32 i = 0; i < sizeof(initial); i++) d[i] = (u8)initial[i];
+        }
+    }
 
+    if (note) {
         cap_handle rw = cap_insert(kernel_domain, note, CAP_READ | CAP_WRITE);
         cap_handle ro = cap_insert(kernel_domain, note, CAP_READ);
 
@@ -590,7 +669,12 @@ void kmain(eb_boot_info *bi)
          * reference for happens to work here and is still the wrong
          * habit. */
         u64 note_id = obj_id(note);
-        obj_release(note);
+
+        /* The persistence root keeps the reference we were holding,
+         * rather than borrowing one from the capabilities. A pointer
+         * that stays valid only because somebody else has not let go is
+         * a pointer that breaks the day they do. */
+        persistent_root = note;
 
         kprintf("wm:   desktop started, 3 views of object %llu\n", note_id);
 
@@ -599,6 +683,8 @@ void kmain(eb_boot_info *bi)
          * anything. */
         kout_detach_screen();
         thread_create("desktop", wm_run, NULL, kernel_domain);
+        if (blk_present()) thread_create("persist", persist_thread, NULL,
+                                         kernel_domain);
     }
 
     dump_ranges(bi);

@@ -45,4 +45,8 @@ void wm_run(void *arg);
 
 u64 wm_frames(void);
 
+/* How often an object has been altered through a window. What the
+ * persistence layer watches, so that nothing has to be saved by hand. */
+u64 wm_changes(void);
+
 #endif /* EB_WM_H */

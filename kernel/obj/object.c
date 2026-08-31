@@ -33,6 +33,8 @@ struct object {
     u64     refs;
     u64     size;      /* payload bytes */
     u64     nslots;    /* outgoing references */
+    u32     mark;      /* used by graph walks; not part of the object */
+    u32     _mark_pad;
     /* payload follows, then the slot array */
 };
 
@@ -194,6 +196,15 @@ object *obj_get_slot(object *o, u64 index)
     if (index >= o->nslots) return NULL;
     return slots_of(o)[index];
 }
+
+/* The mark lives on the object rather than in a table beside it. A walk
+ * over a graph needs somewhere to record what it has already seen, and
+ * putting that where the object is means the walk costs nothing extra
+ * per object and terminates on a cycle. The snapshot writer uses it
+ * now; a collector for the cycles reference counting cannot reach will
+ * use the same field. */
+bool obj_marked(const object *o)     { check(o, "mark"); return o->mark != 0; }
+void obj_set_mark(object *o, bool m) { check(o, "mark"); o->mark = m ? 1 : 0; }
 
 u64 obj_live_count(void)    { return live_objects; }
 u64 obj_total_created(void) { return created_objects; }

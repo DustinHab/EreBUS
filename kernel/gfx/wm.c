@@ -44,6 +44,7 @@ static u8   mouse_buttons;
 static i32  drag_index = -1, drag_dx, drag_dy;
 static u64  frames;
 static bool needs_redraw = true;
+static u64  changes;      /* how often an object was altered through a window */
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
@@ -393,11 +394,13 @@ static void handle_keys(void)
             data[len] = (u8)k.codepoint;
             data[len + 1] = 0;
         }
+        changes++;
         needs_redraw = true;
     }
 }
 
-u64 wm_frames(void) { return frames; }
+u64 wm_frames(void)  { return frames; }
+u64 wm_changes(void) { return changes; }
 
 void wm_run(void *arg)
 {

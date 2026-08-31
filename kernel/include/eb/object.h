@@ -68,6 +68,10 @@ type_id     type_register(const char *name);
 const char *type_name(type_id t);
 u32         type_count(void);
 
+/* A mark bit for graph walks: snapshotting now, cycle collection later. */
+bool obj_marked(const object *o);
+void obj_set_mark(object *o, bool marked);
+
 u64 obj_live_count(void);
 u64 obj_total_created(void);
 

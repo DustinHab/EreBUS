@@ -78,12 +78,15 @@ KERN_C   := kernel/main.c \
             kernel/gfx/fb.c \
             kernel/gfx/wm.c \
             kernel/hw/ps2.c \
+            kernel/hw/pci.c \
+            kernel/hw/ahci.c \
             kernel/mm/pmm.c \
             kernel/mm/vmm.c \
             kernel/mm/kheap.c \
             kernel/obj/object.c \
             kernel/obj/cap.c \
             kernel/obj/port.c \
+            kernel/obj/snapshot.c \
             kernel/sched/thread.c \
             kernel/sched/proc.c \
             kernel/arch/x86_64/syscall.c \
@@ -102,8 +105,9 @@ FONT   := kernel/gfx/font8x16.h
 LOADER := $(BUILD)/BOOTX64.EFI
 KERNEL := $(BUILD)/kernel.elf
 IMAGE  := $(BUILD)/esp.img
+STORE  := $(BUILD)/store.img
 
-.PHONY: all run shot fault wx stack trace-stack desktop trace-input debug clean info
+.PHONY: all run shot fault wx stack trace-stack desktop trace-input persist debug clean info
 all: $(IMAGE)
 
 # --- font -------------------------------------------------------------
@@ -150,6 +154,12 @@ $(IMAGE): $(LOADER) $(KERNEL)
 	@mcopy -i $@ $(KERNEL) ::/erebus/kernel.elf
 	@echo "  DONE    $@"
 
+# A second disk, kept across runs. This is where the object graph goes;
+# the boot disk is left alone.
+$(STORE):
+	@mkdir -p $(BUILD)
+	@dd if=/dev/zero of=$@ bs=1M count=32 status=none
+
 $(BUILD)/OVMF_VARS.fd: $(OVMF_VARS)
 	@mkdir -p $(BUILD)
 	@cp $(OVMF_VARS) $@
@@ -161,14 +171,16 @@ QEMU := qemu-system-x86_64 \
   -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS.fd \
   -drive format=raw,file=$(IMAGE) \
   -vga none -device VGA,edid=on,xres=$(XRES),yres=$(YRES) \
+  -drive id=store,file=$(STORE),format=raw,if=none \
+  -device ide-hd,drive=store,bus=ide.1 \
   -net none
 
-run: $(IMAGE) $(BUILD)/OVMF_VARS.fd
+run: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
 	$(QEMU) -serial stdio
 
 # Start headless, let it settle, grab the screen, quit. Going through
 # the monitor is the only way to get an image without a window.
-shot: $(IMAGE) $(BUILD)/OVMF_VARS.fd
+shot: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
 	@rm -f $(BUILD)/screen.ppm $(BUILD)/serial.log
 	@{ sleep 9; echo "screendump $(BUILD)/screen.ppm"; sleep 2; echo quit; } | \
 	  $(QEMU) -display none -monitor stdio \
@@ -230,7 +242,7 @@ trace-stack:
 # QEMU's monitor, and photographs the result. Typing is the only way to
 # show that input reaches a window and that the other views of the same
 # object follow along.
-desktop: $(IMAGE) $(BUILD)/OVMF_VARS.fd
+desktop: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
 	@rm -f $(BUILD)/screen.ppm
 	@{ sleep 8; \
 	   for k in t y p e d spc l i v e; do \
@@ -244,7 +256,7 @@ desktop: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 
 # Which interrupt vectors actually reach the processor while keys are
 # being sent. 0x21 is line 1 (keyboard), 0x2c is line 12 (mouse).
-trace-input: $(IMAGE) $(BUILD)/OVMF_VARS.fd
+trace-input: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
 	@rm -f $(BUILD)/qemu.log
 	@{ sleep 8; echo "sendkey a"; echo "sendkey b"; echo "sendkey c"; \
 	   sleep 2; echo quit; } | \
@@ -253,7 +265,32 @@ trace-input: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 	@echo "vectors seen after the keys were sent:"
 	@grep -oE 'v=[0-9a-f]+' $(BUILD)/qemu.log | sort | uniq -c | sort -rn | head
 
-debug: $(IMAGE) $(BUILD)/OVMF_VARS.fd
+# The point of the whole milestone, in one target.
+#
+# Boots with an empty store, types into a window, waits for the graph to
+# settle and be written; then boots a second time and photographs what
+# comes back. Nothing was saved by anyone, and nothing was opened.
+persist: $(IMAGE) $(BUILD)/OVMF_VARS.fd
+	@rm -f $(STORE)
+	@$(MAKE) --no-print-directory $(STORE)
+	@echo "  RUN 1   typing, then leaving it alone"
+	@{ sleep 9; \
+	   for k in i t spc j u s t spc s t a y s; do \
+	     echo "sendkey $$k"; sleep 0.2; done; \
+	   sleep 3; echo quit; } | \
+	  $(QEMU) -display none -monitor stdio \
+	          -serial file:$(BUILD)/serial-1.log >/dev/null 2>&1 || true
+	@echo "  RUN 2   booting again, nothing opened"
+	@{ sleep 10; echo "screendump $(BUILD)/screen.ppm"; sleep 2; echo quit; } | \
+	  $(QEMU) -display none -monitor stdio \
+	          -serial file:$(BUILD)/serial-2.log >/dev/null 2>&1 || true
+	@$(PY) tools/ppm2png.py $(BUILD)/screen.ppm $(BUILD)/screen-persist.png
+	@echo "--- first boot ---"
+	@grep -ao 'snap:.*' $(BUILD)/serial-1.log | tail -3
+	@echo "--- second boot ---"
+	@grep -ao 'snap:.*' $(BUILD)/serial-2.log | tail -3
+
+debug: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
 	$(QEMU) -serial stdio -s -S
 
 info:

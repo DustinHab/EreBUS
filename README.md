@@ -168,8 +168,14 @@ built binary.
   the read-only windows cannot alter a byte because their capability
   does not resolve for a write. make desktop types into it through
   QEMU's monitor and photographs the result.
-* M8 — desktop: object browser and type viewers
-* M9 — persistence: NVMe/AHCI, snapshot and restore
+* **M9 — done.** PCI enumeration, an AHCI driver, and persistence by
+  snapshot. What goes to disk is the object graph itself: walk from the
+  roots, follow every reference, write the reachable set down. Two slots
+  written alternately, each with a generation and a checksum, so an
+  interrupted write costs the changes since the last one and never the
+  graph. Nothing is saved by hand -- the system writes when changes stop
+  arriving. make persist types into a window on one boot and shows it
+  still there on the next.
 * M10 — booting real hardware from a USB stick
 
 ## A note on Secure Boot
