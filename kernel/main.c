@@ -11,6 +11,7 @@
  */
 #include <eb/types.h>
 #include <eb/io.h>
+#include <eb/mm.h>
 #include <eb/cpu.h>
 #include <eb/fb.h>
 #include <eb/fmt.h>
@@ -110,7 +111,7 @@ static void log_cpu(void)
 
 static void log_memory(const eb_boot_info *bi)
 {
-    const eb_mem_range *r = (const eb_mem_range *)(virt_addr)bi->mem_ranges;
+    const eb_mem_range *r = (const eb_mem_range *)phys_to_virt(bi->mem_ranges);
     u64 by_type[8] = { 0 }, count[8] = { 0 };
     u64 largest = 0, largest_at = 0;
 
@@ -154,7 +155,7 @@ static void log_memory(const eb_boot_info *bi)
  * put on screen, but it is exactly what one wants when checking. */
 static void dump_ranges(const eb_boot_info *bi)
 {
-    const eb_mem_range *r = (const eb_mem_range *)(virt_addr)bi->mem_ranges;
+    const eb_mem_range *r = (const eb_mem_range *)phys_to_virt(bi->mem_ranges);
 
     kout_mute_screen(true);
     kprintf("\nfull memory map, %llu ranges:\n", bi->mem_count);
@@ -223,6 +224,12 @@ void kmain(eb_boot_info *bi)
      * wrong with the framebuffer. */
     bool com = serial_init();
     if (com) kout_add_sink(serial_putc);
+
+    /* The loader hands over a physical pointer, because it built the
+     * structure before there was an address space to speak of. Move it
+     * onto the direct map straight away, so nothing below this line
+     * depends on the identity mapping still being in place. */
+    if (bi) bi = (eb_boot_info *)phys_to_virt((phys_addr)bi);
 
     /* Check the handover before reading anything out of it. A wrong
      * magic means loader and kernel do not belong together. */

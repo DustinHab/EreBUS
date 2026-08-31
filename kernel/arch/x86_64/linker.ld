@@ -1,20 +1,31 @@
 /*
  * linker.ld -- the kernel's memory layout.
  *
- * The kernel sits at a fixed 2 MiB physically and runs there. UEFI maps
- * everything one to one before ExitBootServices, so virtual and
- * physical addresses agree -- which keeps start-up simple and every
- * pointer traceable.
+ * The kernel lives in the upper half of the address space, at
+ * -2 GiB, and is loaded at 2 MiB physically. The AT() clauses keep
+ * those two apart: the ELF program headers carry the virtual address
+ * for execution and the physical one for loading, so the boot loader
+ * can place the image low while the code is linked high.
  *
- * Moving into the upper half of the address space comes once we build
- * our own page tables. At that point the base here changes and little
- * else does.
+ * Why the upper half at all: the lower half belongs to user processes.
+ * Every address space will map the kernel into the same high window and
+ * a different program into the low one, so a system call needs no
+ * change of page tables. Keeping the kernel at 2 MiB would put it right
+ * where user programs have to go.
+ *
+ * -2 GiB specifically, rather than anywhere else up there, because the
+ * compiler's "kernel" code model assumes exactly that: it lets calls
+ * and data references use 32-bit offsets, which keeps the code smaller
+ * and faster than fully general 64-bit addressing.
  */
 
 ENTRY(_start)
 OUTPUT_FORMAT(elf64-x86-64)
 
-/* Separate program segments so W^X becomes possible later:
+KERNEL_VMA = 0xFFFFFFFF80000000;
+KERNEL_LMA = 2M;
+
+/* Separate program segments so W^X can be enforced:
  * 5 = read+execute, 4 = read only, 6 = read+write. */
 PHDRS
 {
@@ -25,23 +36,29 @@ PHDRS
 
 SECTIONS
 {
-    . = 2M;
+    . = KERNEL_VMA + KERNEL_LMA;
     __kernel_start = .;
 
-    .text : ALIGN(4K) {
+    .text : AT(ADDR(.text) - KERNEL_VMA) {
         *(.text.boot)          /* _start has to come first */
         *(.text .text.*)
+        . = ALIGN(4K);
+        __text_end = .;
     } :text
 
-    .rodata : ALIGN(4K) {
+    .rodata : AT(ADDR(.rodata) - KERNEL_VMA) {
+        __rodata_start = .;
         *(.rodata .rodata.*)
+        . = ALIGN(4K);
+        __rodata_end = .;
     } :rodata
 
-    .data : ALIGN(4K) {
+    .data : AT(ADDR(.data) - KERNEL_VMA) {
+        __data_start = .;
         *(.data .data.*)
     } :data
 
-    .bss : ALIGN(4K) {
+    .bss : AT(ADDR(.bss) - KERNEL_VMA) {
         __bss_start = .;
         *(COMMON)
         *(.bss .bss.*)
@@ -51,6 +68,10 @@ SECTIONS
 
     . = ALIGN(4K);
     __kernel_end = .;
+
+    /* Physical address the image was loaded at, so the kernel can work
+     * out the offset between the two views of itself. */
+    __kernel_phys = KERNEL_LMA;
 
     /* None of this is needed at run time and all of it makes the image
      * bigger. */

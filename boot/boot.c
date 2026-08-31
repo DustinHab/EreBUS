@@ -270,13 +270,113 @@ static UINT64 find_rsdp(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Steps 5 and 6: shut the firmware down and jump                      */
+/* Step 5: the initial address space                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The kernel is linked for the upper half but loaded low, so something
+ * has to be mapping the two together before its first instruction runs.
+ * Doing that here rather than in the kernel keeps the kernel's entry
+ * path trivial: it wakes up already living at its own addresses.
+ *
+ * Three regions go in:
+ *
+ *   identity   physical P at virtual P, for the low addresses. The
+ *              loader itself is still running from there, and the
+ *              firmware left everything mapped that way, so this is
+ *              what keeps the ground from vanishing mid-step.
+ *   direct map physical P at PHYSMAP_BASE + P. How the kernel reaches
+ *              arbitrary physical memory once identity goes away.
+ *   kernel     KERNEL_BASE + P for the first gigabyte, which is what
+ *              puts the image at the address it was linked for.
+ *
+ * All of it with 2 MiB pages. 1 GiB pages would need fewer tables, but
+ * they are not on every processor, and one page table page per gigabyte
+ * of memory is not worth a second code path for.
+ *
+ * Everything is mapped writable and executable here. That is deliberate
+ * and temporary: the kernel replaces these tables with fine-grained
+ * ones as soon as it has a frame allocator, and applies W^X there.
+ */
+
+#define PTE_PRESENT   0x001ULL
+#define PTE_WRITE     0x002ULL
+#define PTE_HUGE      0x080ULL
+
+#define SIZE_2M       0x200000ULL
+#define SIZE_1G       0x40000000ULL
+
+/* Upper bound on how much we map. Anything past this is device space
+ * the kernel will map explicitly when it needs it. */
+#define MAP_SPAN_MAX  (64ULL * SIZE_1G)
+
+static UINT64 *pt_pool;
+static UINTN   pt_used, pt_total;
+
+static UINT64 *pt_alloc(void)
+{
+    if (pt_used >= pt_total) return NULL;
+    UINT64 *page = (UINT64 *)((UINT8 *)pt_pool + pt_used * 4096);
+    pt_used++;
+    memset(page, 0, 4096);
+    return page;
+}
+
+/* Walks down to the page directory and drops in a 2 MiB entry. Runs
+ * while the identity mapping is still in force, so table pointers can
+ * be used as they are. */
+static int map_2m(UINT64 *pml4, UINT64 va, UINT64 pa)
+{
+    UINTN i4 = (va >> 39) & 0x1FF;
+    UINTN i3 = (va >> 30) & 0x1FF;
+    UINTN i2 = (va >> 21) & 0x1FF;
+    UINT64 *pdpt, *pd;
+
+    if (!(pml4[i4] & PTE_PRESENT)) {
+        pdpt = pt_alloc();
+        if (!pdpt) return 0;
+        pml4[i4] = (UINT64)pdpt | PTE_PRESENT | PTE_WRITE;
+    } else {
+        pdpt = (UINT64 *)(pml4[i4] & ~0xFFFULL);
+    }
+
+    if (!(pdpt[i3] & PTE_PRESENT)) {
+        pd = pt_alloc();
+        if (!pd) return 0;
+        pdpt[i3] = (UINT64)pd | PTE_PRESENT | PTE_WRITE;
+    } else {
+        pd = (UINT64 *)(pdpt[i3] & ~0xFFFULL);
+    }
+
+    pd[i2] = (pa & ~(SIZE_2M - 1)) | PTE_PRESENT | PTE_WRITE | PTE_HUGE;
+    return 1;
+}
+
+static int map_range(UINT64 *pml4, UINT64 va, UINT64 pa, UINT64 size)
+{
+    UINT64 end = (pa + size + SIZE_2M - 1) & ~(SIZE_2M - 1);
+    UINT64 start = pa & ~(SIZE_2M - 1);
+    va &= ~(SIZE_2M - 1);
+
+    for (UINT64 off = 0; start + off < end; off += SIZE_2M)
+        if (!map_2m(pml4, va + off, start + off)) return 0;
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Steps 6 and 7: shut the firmware down and jump                      */
 /* ------------------------------------------------------------------ */
 
 /* One block for boot_info and the memory map, claimed before we lose
  * the firmware. 64 KiB is room for well over 2000 ranges. */
 #define BOOTDATA_PAGES 16
 #define BOOTDATA_BYTES (BOOTDATA_PAGES * 4096)
+
+/* Page table pool. Mapping 64 GiB twice with 2 MiB pages needs 64 page
+ * directories each, plus a handful of upper level tables; 192 pages
+ * leaves comfortable room above that. */
+#define PAGETAB_PAGES 192
+#define PAGETAB_BYTES (PAGETAB_PAGES * 4096)
 
 static eb_u32 classify(UINT32 efi_type)
 {
@@ -324,6 +424,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     eb_mem_range *ranges = (eb_mem_range *)(bootdata + sizeof(eb_boot_info));
     UINTN max_ranges = (BOOTDATA_BYTES - sizeof(eb_boot_info)) / sizeof(eb_mem_range);
 
+    /* Page tables have to be claimed now too. After ExitBootServices
+     * there is no allocator left, and the tables are built after it. */
+    EFI_PHYSICAL_ADDRESS pagetab = 0;
+    st = BS->AllocatePages(AllocateAnyPages, EfiLoaderData,
+                           PAGETAB_PAGES, &pagetab);
+    if (EFI_ERROR(st)) halt(u"out of memory for page tables", st);
+    memset((void *)pagetab, 0, PAGETAB_BYTES);
+    pt_pool  = (UINT64 *)pagetab;
+    pt_total = PAGETAB_PAGES;
+
     /* Read and place the kernel. */
     EFI_FILE_PROTOCOL *root = open_boot_volume(image);
     UINTN elf_size = 0;
@@ -346,10 +456,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     bi->fb_format = (mi->PixelFormat == PixelRedGreenBlueReserved8BitPerColor)
                     ? EB_FB_RGBX8888 : EB_FB_BGRX8888;
     bi->kernel_phys      = kbase;
+    bi->kernel_virt      = EB_KERNEL_BASE + kbase;
     bi->kernel_size      = kspan;
     bi->acpi_rsdp        = rsdp;
     bi->efi_system_table = (eb_u64)ST;
     bi->mem_ranges       = (eb_u64)ranges;
+    bi->physmap_base     = EB_PHYSMAP_BASE;
+    bi->pagetab_base     = (eb_u64)pagetab;
+    bi->pagetab_size     = PAGETAB_BYTES;
 
     /* Buffer for the raw EFI map. Ask for the size, then allocate with
      * headroom -- allocating changes the map again. */
@@ -392,7 +506,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
         UINT64 e = s + (d->NumberOfPages << 12);
         int hits_kernel   = (s < kbase + kspan) && (e > kbase);
         int hits_bootdata = (s < bootdata + BOOTDATA_BYTES) && (e > bootdata);
-        if (hits_kernel || hits_bootdata) type = EB_MEM_KERNEL;
+        int hits_pagetab  = (s < pagetab + PAGETAB_BYTES) && (e > pagetab);
+        if (hits_kernel || hits_bootdata || hits_pagetab) type = EB_MEM_KERNEL;
 
         /* The first page stays blocked: a null pointer should raise a
          * fault, not quietly hit valid memory. */
@@ -412,6 +527,50 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     bi->mem_count = n;
     bi->mem_free  = free_bytes;
 
+    /* How far up does anything worth mapping reach. Reserved regions
+     * count: the framebuffer and other device windows live in them. */
+    UINT64 span = 4ULL * SIZE_1G;
+    for (UINTN i = 0; i < n; i++) {
+        UINT64 end = ranges[i].base + ranges[i].pages * 4096;
+        if (end > span) span = end;
+    }
+    if (span > MAP_SPAN_MAX) span = MAP_SPAN_MAX;
+    span = (span + SIZE_2M - 1) & ~(SIZE_2M - 1);
+
+    UINT64 *pml4 = pt_alloc();
+
+    int ok = pml4 != NULL;
+    /* Identity, so the ground does not disappear under the loader. */
+    ok = ok && map_range(pml4, 0, 0, span);
+    /* Direct map, the kernel's future window onto physical memory. */
+    ok = ok && map_range(pml4, EB_PHYSMAP_BASE, 0, span);
+    /* The kernel's own window: the first gigabyte is plenty, the image
+     * sits at 2 MiB inside it. */
+    ok = ok && map_range(pml4, EB_KERNEL_BASE, 0, SIZE_1G);
+
+    /* On some machines the framebuffer sits above whatever the memory
+     * map described. Map it explicitly rather than hope. */
+    if (ok && bi->fb_base + bi->fb_size > span) {
+        ok = map_range(pml4, bi->fb_base, bi->fb_base, bi->fb_size)
+          && map_range(pml4, EB_PHYSMAP_BASE + bi->fb_base,
+                       bi->fb_base, bi->fb_size);
+    }
+
+    if (!ok) {
+        /* Out of table pages, and no firmware left to say so with. The
+         * kernel never starts; stopping here is all that is left. */
+        for (;;) __asm__ volatile ("cli; hlt");
+    }
+
+    bi->pml4         = (eb_u64)pml4;
+    bi->physmap_size = span;
+
+    /* From the next instruction on, addresses go through our tables.
+     * The loader survives it because the identity mapping above covers
+     * exactly where it is running. */
+    __asm__ volatile ("movq %0, %%cr3" :: "r"((UINT64)pml4) : "memory");
+
+    /* entry is a virtual address in the upper half, reachable only now. */
     ((kernel_entry_t)entry)(bi);
 
     /* The kernel does not return. If it does, stop safely. */

@@ -55,8 +55,13 @@ BOOT_FLAGS := -target x86_64-unknown-windows $(COMMON_FLAGS) \
               -fshort-wchar -fno-stack-protector
 
 # Kernel: ELF, SysV ABI, with the stack protector.
+#
+# -mcmodel=kernel goes with the linker script: it tells the compiler
+# that everything lives in the top 2 GiB of the address space, so
+# references can stay 32-bit signed offsets. Building upper-half code
+# without it produces addresses that are quietly wrong.
 KERN_FLAGS := -target x86_64-unknown-none-elf $(COMMON_FLAGS) \
-              -fstack-protector-strong $(EXTRA)
+              -mcmodel=kernel -fstack-protector-strong $(EXTRA)
 
 # --- sources ----------------------------------------------------------
 BOOT_SRC := boot/boot.c

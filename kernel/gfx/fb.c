@@ -8,6 +8,7 @@
  */
 #include <eb/fb.h>
 #include <eb/fmt.h>
+#include <eb/mm.h>
 #include "font8x16.h"
 
 static struct {
@@ -20,7 +21,9 @@ static struct {
 
 void fb_init(const eb_boot_info *bi)
 {
-    fb.base   = (u32 *)(virt_addr)bi->fb_base;
+    /* The framebuffer address from the firmware is physical; reach it
+     * through the direct map like any other physical memory. */
+    fb.base   = (u32 *)phys_to_virt(bi->fb_base);
     fb.width  = bi->fb_width;
     fb.height = bi->fb_height;
     fb.stride = bi->fb_stride;
