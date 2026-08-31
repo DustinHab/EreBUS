@@ -48,30 +48,44 @@ static u64 *table_at(phys_addr p)
     return (u64 *)phys_to_virt(p & ADDR_MASK);
 }
 
-/* Returns the next table down, creating it when asked to. Intermediate
- * entries stay permissive (present, writable, and without NX): the
- * processor combines the levels, so restrictions belong on the leaf
- * where they can be read off directly. */
-static u64 *step(u64 *table, u64 index, bool create)
+/* Returns the next table down, creating it when asked to.
+ *
+ * Intermediate entries stay permissive on write and execute -- the
+ * processor takes the most restrictive of all four levels, so those
+ * belong on the leaf where they can be read off directly.
+ *
+ * The user bit is the exception, and it is not optional. The processor
+ * grants user access only if every level down to the leaf allows it, so
+ * a perfectly correct leaf under a kernel-only directory is unreachable
+ * from ring 3. That failure looks like a protection violation on a page
+ * that is plainly present, which reads as a nonsense error until one
+ * remembers the levels are combined. Hence the flag travelling down. */
+static u64 *step(u64 *table, u64 index, bool create, u64 flags)
 {
+    u64 pass_down = PTE_PRESENT | PTE_WRITE | (flags & PTE_USER);
+
     if (!(table[index] & PTE_PRESENT)) {
         if (!create) return NULL;
         phys_addr frame = pmm_alloc();
         if (frame == PMM_NO_FRAME) return NULL;
-        table[index] = frame | PTE_PRESENT | PTE_WRITE;
+        table[index] = frame | pass_down;
         return table_at(frame);
     }
     if (table[index] & PTE_HUGE) return NULL;   /* already a 2 MiB leaf */
+
+    /* An existing table on the way to a user mapping has to allow user
+     * access too, even if it was first created for something else. */
+    table[index] |= (flags & PTE_USER);
     return table_at(table[index]);
 }
 
 static bool map_4k(u64 *pml4v, virt_addr va, phys_addr pa, u64 flags)
 {
-    u64 *pdpt = step(pml4v, (va >> 39) & 0x1FF, true);
+    u64 *pdpt = step(pml4v, (va >> 39) & 0x1FF, true, flags);
     if (!pdpt) return false;
-    u64 *pd = step(pdpt, (va >> 30) & 0x1FF, true);
+    u64 *pd = step(pdpt, (va >> 30) & 0x1FF, true, flags);
     if (!pd) return false;
-    u64 *pt = step(pd, (va >> 21) & 0x1FF, true);
+    u64 *pt = step(pd, (va >> 21) & 0x1FF, true, flags);
     if (!pt) return false;
 
     pt[(va >> 12) & 0x1FF] = (pa & ADDR_MASK) | flags;
@@ -80,9 +94,9 @@ static bool map_4k(u64 *pml4v, virt_addr va, phys_addr pa, u64 flags)
 
 static bool map_2m(u64 *pml4v, virt_addr va, phys_addr pa, u64 flags)
 {
-    u64 *pdpt = step(pml4v, (va >> 39) & 0x1FF, true);
+    u64 *pdpt = step(pml4v, (va >> 39) & 0x1FF, true, flags);
     if (!pdpt) return false;
-    u64 *pd = step(pdpt, (va >> 30) & 0x1FF, true);
+    u64 *pd = step(pdpt, (va >> 30) & 0x1FF, true, flags);
     if (!pd) return false;
 
     pd[(va >> 21) & 0x1FF] = (pa & ~(SIZE_2M - 1)) | flags | PTE_HUGE;
@@ -291,6 +305,28 @@ void vmm_init(const eb_boot_info *bi)
         if (!vmm_map(root, EB_PHYSMAP_BASE + fb, fb, fb_size,
                      PAGE_KERNEL_DATA))
             panic("could not map the framebuffer");
+    }
+
+    /* Fill in every top level entry of the upper half, even the empty
+     * ones.
+     *
+     * This looks like waste -- 256 page tables, a megabyte, most of
+     * which will never hold a mapping. It buys something specific.
+     * Every process gets its own top level table whose upper half is
+     * copied from this one, and a copy only stays correct if the
+     * original never changes afterwards. Anything the kernel maps later
+     * -- heap growth, a new thread stack, a device -- then lands in a
+     * table that already exists and is already shared, instead of
+     * creating a top level entry that existing processes would never
+     * see. That failure would appear as one process faulting on memory
+     * another can read perfectly well, which is not a bug anybody wants
+     * to chase. */
+    u64 *root_v = table_at(root);
+    for (u32 i = 256; i < 512; i++) {
+        if (root_v[i] & PTE_PRESENT) continue;
+        phys_addr t = pmm_alloc();
+        if (t == PMM_NO_FRAME) panic("no memory to reserve the kernel half");
+        root_v[i] = t | PTE_PRESENT | PTE_WRITE;
     }
 
     /* Everything the kernel needs now exists in the upper half. The

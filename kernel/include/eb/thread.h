@@ -39,6 +39,9 @@ void sched_yield(void);
  * whatever wait list will wake it, and losing the race between those
  * two steps would lose the wakeup. */
 void sched_block(void);
+
+/* Gives a thread its own address space. Zero means the kernel's. */
+void thread_set_pml4(thread *t, phys_addr pml4);
 void sched_wake(thread *t);
 
 /* Called from the timer interrupt. Marks the slice as spent; the switch

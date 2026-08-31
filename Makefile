@@ -83,11 +83,15 @@ KERN_C   := kernel/main.c \
             kernel/obj/cap.c \
             kernel/obj/port.c \
             kernel/sched/thread.c \
+            kernel/sched/proc.c \
+            kernel/arch/x86_64/syscall.c \
             kernel/arch/x86_64/gdt.c \
             kernel/arch/x86_64/trap.c
 KERN_S   := kernel/arch/x86_64/start.S \
             kernel/arch/x86_64/isr.S \
-            kernel/arch/x86_64/switch.S
+            kernel/arch/x86_64/switch.S \
+            kernel/arch/x86_64/entry.S \
+            kernel/user/programs.S
 
 KERN_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(KERN_C)) \
             $(patsubst %.S,$(BUILD)/%.o,$(KERN_S))

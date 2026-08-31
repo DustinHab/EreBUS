@@ -58,13 +58,24 @@ isr_common:
                                    clear; an interrupt can arrive while
                                    it is set */
 
-    /* Once there is user mode, SWAPGS goes here, guarded by a check of
-     * the saved CS: coming from ring 3 the GS base must be exchanged
-     * for the kernel's before any per-CPU data is touched. */
+    /* If this interrupt arrived while a program was running, GS still
+     * belongs to that program. Swap the kernel's in before anything
+     * touches per-processor data. The saved code selector says where we
+     * came from: its bottom two bits are the privilege level, and the
+     * frame puts it 144 bytes up from here. */
+    testb   $3, 144(%rsp)
+    jz      1f
+    swapgs
+1:
 
     movq    %rsp, %rdi          /* first argument: the frame */
     call    trap_dispatch
 
+    /* And back, if that is where we are returning to. */
+    testb   $3, 144(%rsp)
+    jz      2f
+    swapgs
+2:
     popq    %r15
     popq    %r14
     popq    %r13

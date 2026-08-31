@@ -16,6 +16,7 @@
 #include <eb/pic.h>
 #include <eb/thread.h>
 #include <eb/vmm.h>
+#include <eb/proc.h>
 #include <eb/fmt.h>
 #include <eb/io.h>
 
@@ -225,7 +226,6 @@ static void report(trap_frame *f)
             f->cs, f->ss, f->rflags, f->cs & 3);
 
     backtrace(f->rbp);
-    kprintf("kern: system halted\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -237,7 +237,19 @@ void trap_dispatch(trap_frame *f);   /* called from isr.S */
 void trap_dispatch(trap_frame *f)
 {
     if (f->vector < 32) {
+        /* Where the fault came from decides what it means. A fault in
+         * ring 3 is one program overstepping: report it, end that
+         * thread, and carry on. The same fault in ring 0 is the kernel
+         * being wrong about itself, and there is nothing to carry on
+         * with. */
+        if ((f->cs & 3) == 3) {
+            report(f);
+            proc_fault(exception_name(f->vector),
+                       f->vector == 14 ? read_cr2() : f->rip);
+            return;
+        }
         report(f);
+        kprintf("kern: system halted\n");
         cpu_stop();
     }
 

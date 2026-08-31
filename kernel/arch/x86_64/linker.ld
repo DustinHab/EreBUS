@@ -49,6 +49,19 @@ SECTIONS
     .rodata : AT(ADDR(.rodata) - KERNEL_VMA) {
         __rodata_start = .;
         *(.rodata .rodata.*)
+
+        /* Programs that run outside the kernel. They travel inside the
+         * kernel image but are mapped into a process's own address
+         * space, and the kernel's view of them stays read-only and
+         * non-executable -- only the user mapping may run them. Page
+         * aligned at both ends because that is the granularity a
+         * mapping can have. */
+        . = ALIGN(4K);
+        __user_start = .;
+        *(.user .user.*)
+        . = ALIGN(4K);
+        __user_end = .;
+
         . = ALIGN(4K);
         __rodata_end = .;
     } :rodata

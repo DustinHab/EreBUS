@@ -21,6 +21,8 @@
 #include <eb/gdt.h>
 #include <eb/kheap.h>
 #include <eb/panic.h>
+#include <eb/proc.h>
+#include <eb/syscall.h>
 #include <eb/pic.h>
 #include <eb/pmm.h>
 #include <eb/serial.h>
@@ -31,6 +33,47 @@
 #include <common/bootinfo.h>
 
 #define EREBUS_VERSION "0.1"
+
+/* The programs that run outside the kernel, from user/programs.S. */
+extern char user_hello[];
+extern char user_trespass[];
+
+/* The one capability the kernel keeps on the console port: the right to
+ * take messages out of it. Programs get send-only copies. */
+static domain     *kernel_domain;
+static cap_handle  console_receive;
+
+/* Prints the packed characters a message carries. Anything outside
+ * printable ASCII is dropped rather than sent to the console, so a
+ * program cannot drive the terminal with escape sequences. */
+static void print_message_text(const message *m)
+{
+    for (u32 i = 0; i < m->nwords; i++) {
+        u64 w = m->words[i];
+        for (u32 b = 0; b < 8; b++) {
+            char c = (char)((w >> (b * 8)) & 0xFF);
+            if (c >= 0x20 && c < 0x7F) kputc(c);
+        }
+    }
+}
+
+/* A kernel thread that serves the console port. Programs cannot print;
+ * they can only ask this to, through a capability, and only if they
+ * were given one. */
+static void console_server(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        message m;
+        if (!port_receive(kernel_domain, console_receive, &m)) {
+            sched_yield();
+            continue;
+        }
+        kprintf("user: ");
+        print_message_text(&m);
+        kprintf("\n");
+    }
+}
 
 /* Top of the boot stack, laid out in start.S. */
 extern char stack_top[];
@@ -423,7 +466,7 @@ void kmain(eb_boot_info *bi)
 
     /* --- threads and messages -------------------------------------- */
 
-    domain *kernel_domain = domain_create("kernel", 256);
+    kernel_domain = domain_create("kernel", 256);
     if (!kernel_domain) panic("no memory for the kernel domain");
 
     sched_init(kernel_domain);
@@ -444,6 +487,53 @@ void kmain(eb_boot_info *bi)
 
     kprintf("sched: %llu threads, %llu context switches so far\n",
             sched_threads(), sched_switches());
+
+    /* --- user mode --------------------------------------------------- */
+
+    percpu_init();
+    syscall_init();
+    kprintf("cpu0: syscall entry armed, %u calls in the interface\n", SYS_MAX);
+
+    object *console = port_create(16);
+    if (!console) panic("no memory for the console port");
+    console_receive = cap_insert(kernel_domain, console,
+                                 CAP_READ | CAP_CALL | CAP_GRANT);
+    thread_create("console", console_server, NULL, kernel_domain);
+
+    static const struct { const char *name; char *entry; } programs[] = {
+        { "hello",    user_hello },
+        { "trespass", user_trespass },
+    };
+
+    for (u32 i = 0; i < ARRAY_LEN(programs); i++) {
+        process *proc = proc_create(programs[i].name, programs[i].entry);
+        if (!proc) { kprintf("proc: could not create %s\n", programs[i].name); continue; }
+
+        /* The entire authority this program will ever have: permission
+         * to send to the console port. Not to read it, not to pass it
+         * on, and nothing else at all. */
+        cap_insert(proc_domain(proc), console, CAP_CALL);
+
+        if (proc_start(proc))
+            kprintf("proc: %llu (%s) starting in ring 3 with one capability\n",
+                    proc_id(proc), proc_name(proc));
+    }
+    obj_release(console);
+
+    /* Let them run. */
+    for (u32 i = 0; i < 400; i++) sched_yield();
+
+    /* The copy path is where the kernel touches an address a program
+     * chose. Handing it a kernel address is the oldest trick there is:
+     * get the privileged side to do the reaching for you. */
+    u8 probe = 0;
+    bool refused = !copy_to_user((virt_addr)__kernel_start, &probe, 1) &&
+                   !copy_from_user(&probe, (virt_addr)__kernel_start, 1);
+    kprintf("proc: kernel addresses %s by the user copy path\n",
+            refused ? "refused" : "ACCEPTED, which is a hole");
+
+    kprintf("proc: %llu processes started, %llu ended by a fault\n",
+            proc_count(), proc_faults());
 
     dump_ranges(bi);
 

@@ -20,6 +20,8 @@
 #include <eb/mm.h>
 #include <eb/fmt.h>
 #include <eb/io.h>
+#include <eb/gdt.h>
+#include <eb/syscall.h>
 #include <eb/panic.h>
 
 /* Thread stacks live in their own window, well clear of the heap. */
@@ -53,6 +55,8 @@ struct thread {
     virt_addr    stack_low;    /* first mapped byte */
     thread_entry entry;
     void        *arg;
+    phys_addr    pml4;         /* zero means the kernel's own space */
+    u64          kstack_top;   /* where an interrupt from ring 3 lands */
 
     struct thread *next;       /* run queue, circular */
     struct thread *prev;
@@ -60,6 +64,12 @@ struct thread {
 };
 
 extern void switch_stack(u64 *save_rsp, u64 load_rsp);
+extern char stack_top_symbol[] __asm__("stack_top");
+
+void thread_set_pml4(thread *t, phys_addr pml4)
+{
+    if (t && t->magic == THREAD_MAGIC) t->pml4 = pml4;
+}
 
 static thread *current;
 static thread *run_queue;      /* circular; points at some ready thread */
@@ -161,6 +171,7 @@ void sched_init(domain *boot_domain)
     t->dom   = boot_domain;
     t->state = THREAD_RUNNING;
     t->slot  = 0xFFFFFFFFu;    /* runs on the stack from start.S */
+    t->kstack_top = (u64)stack_top_symbol;
 
     current = t;
     thread_count = 1;
@@ -187,6 +198,7 @@ thread *thread_create(const char *name, thread_entry entry, void *arg,
     t->arg   = arg;
     t->state = THREAD_READY;
     t->stack_low = low;
+    t->kstack_top = low + TSTACK_SIZE;
 
     /* Lay out the stack so that switch_stack's epilogue walks off it
      * straight into the trampoline: flags first, then the six
@@ -231,6 +243,18 @@ static void switch_to_next(void)
     switches++;
     slice_left = SLICE_TICKS;
     resched_due = false;
+
+    /* Two things have to follow the thread, not the code: the address
+     * space it runs in, and where the processor should land if an
+     * interrupt arrives while it is in ring 3. Both are per thread, and
+     * both are wrong the instant a switch forgets them. */
+    if (to->pml4 && to->pml4 != from->pml4)
+        __asm__ volatile ("movq %0, %%cr3" :: "r"(to->pml4) : "memory");
+    else if (!to->pml4 && from->pml4)
+        __asm__ volatile ("movq %0, %%cr3" :: "r"(vmm_kernel_pml4()) : "memory");
+
+    tss_set_kernel_stack(to->kstack_top);
+    percpu_set_kernel_stack(to->kstack_top);
 
     switch_stack(&from->rsp, to->rsp);
     /* Execution resumes here when somebody switches back to us. */

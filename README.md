@@ -152,7 +152,14 @@ built binary.
   mail. `make stack` runs a thread off the end of its stack and shows
   the whole chain hold: guard page, page fault, no stack left, double
   fault onto the TSS stack, readable report.
-* M6 — user mode (ring 3), processes, separate address spaces
+* **M6 — done.** Processes in ring 3, each with its own address space
+  sharing the kernel's upper half. Four system calls in total: exit,
+  yield, send, receive. A program starts holding exactly one capability
+  and every register but that one is zeroed on the way out of the
+  kernel. It cannot print -- it can only ask a console server to, and
+  only because it was handed a send-only capability to that server's
+  port. A second program reaches for kernel memory on purpose: it is
+  ended, and the machine carries on.
 * M7 — compositor, windows, PS/2 input
 * M8 — desktop: object browser and type viewers
 * M9 — persistence: NVMe/AHCI, snapshot and restore
