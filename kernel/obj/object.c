@@ -91,6 +91,7 @@ void obj_store_init(void)
     type_names[TYPE_TEXT]   = "text";
     type_names[TYPE_LIST]   = "list";
     type_names[TYPE_DOMAIN] = "domain";
+    type_names[TYPE_SESSION] = "session";
     types_registered = TYPE_BUILTIN_COUNT;
 
     next_id = 1;

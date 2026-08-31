@@ -173,7 +173,8 @@ static void persist_thread(void *arg)
             quiet_since = time_ns();
         } else if (seen != written &&
                    time_ns() - quiet_since > 500000000ULL) {
-            if (snap_save(&persistent_root, 1)) {
+            object *roots[2] = { persistent_root, shell_session() };
+            if (snap_save(roots, roots[1] ? 2 : 1)) {
                 written = seen;
                 kprintf("snap: generation %llu written, %u objects, %llu bytes\n",
                         snap_generation(), snap_object_count(), snap_bytes());
@@ -701,7 +702,12 @@ void kmain(eb_boot_info *bi)
      * system picks up where it left off; there is no separate "open" to
      * perform and nothing for the user to remember the name of. */
     object *root = NULL;
-    if (snap_load(&root, 1) == 1) {
+    object *session = NULL;
+    object *loaded[2] = { NULL, NULL };
+
+    if (snap_load(loaded, 2) >= 1) {
+        root = loaded[0];
+        session = loaded[1];
         kprintf("snap: graph restored from generation %llu, %u objects\n",
                 snap_generation(), snap_object_count());
     } else {
@@ -720,8 +726,12 @@ void kmain(eb_boot_info *bi)
          * a pointer that breaks the day they do. */
         persistent_root = root;
 
-        shell_init(kernel_domain, root, CAP_READ | CAP_WRITE | CAP_GRANT);
-        kprintf("shell: three ways of looking at one navigation state\n");
+        shell_init(kernel_domain, root, CAP_READ | CAP_WRITE | CAP_GRANT,
+                   session);
+        kprintf("shell: %s, %u generations kept on the disk\n",
+                session ? "resumed where it was left"
+                        : "starting at the root",
+                snap_slot_count());
 
         /* The screen belongs to the shell from here on. The log keeps
          * going to the serial port, where it paints over nothing. */

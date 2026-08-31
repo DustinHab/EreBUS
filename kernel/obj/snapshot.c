@@ -1,5 +1,6 @@
 /*
- * snapshot.c -- writing the object graph down and reading it back.
+ * snapshot.c -- writing the object graph down, and reading it back from
+ * any point in its history.
  */
 #include <eb/snapshot.h>
 #include <eb/blk.h>
@@ -8,13 +9,26 @@
 #include <eb/fmt.h>
 
 #define SNAP_MAGIC   0x50414E5342455245ULL   /* "EREBSNAP" */
-#define SNAP_VERSION 3u
+#define SNAP_VERSION 4u
 
-/* Two slots, far apart on the disk so a write to one cannot possibly
- * disturb the other. Each holds a header sector followed by its data. */
-#define SLOT_A_LBA   1u
-#define SLOT_B_LBA   32768u                  /* 16 MiB in */
-#define SLOT_MAX_SECTORS 4096u               /* 2 MiB per snapshot */
+/* A ring of slots rather than two.
+ *
+ * Two slots make a snapshot survivable: one is always intact while the
+ * other is being written. A ring makes it navigable as well. Every
+ * write lands in the next slot round, so the last sixteen states of the
+ * system are all still on the disk, and going back is reading one of
+ * them rather than undoing anything.
+ *
+ * That is the difference between this and an undo history inside a
+ * program. Undo belongs to the program and dies with it, covers only
+ * what that program did, and has to be written by hand for every
+ * document type. This belongs to the system, covers everything at once,
+ * and nobody had to implement it. */
+#define SNAP_BASE_LBA 1024u
+#define SLOT_SECTORS  2048u                 /* 1 MiB each */
+#define SLOT_COUNT    16u
+#define SLOT_MAX_DATA ((u64)(SLOT_SECTORS - 1) * BLK_SECTOR_SIZE)
+
 #define SNAP_MAX_OBJECTS 4096u
 
 typedef struct {
@@ -25,42 +39,39 @@ typedef struct {
     u64 object_count;
     u64 root_count;
     u64 data_bytes;
-    u64 checksum;       /* over the data, not over this header */
+    u64 checksum;
 } snap_header;
 
-/* One object as it appears on disk. The payload follows, padded out to
- * eight bytes, and then the outgoing references as indices into this
- * snapshot rather than as pointers. */
 typedef struct {
     u32  type;
     u32  slot_count;
     u64  size;
-    char name[OBJ_NAME_MAX];      /* the object's own claim */
+    char name[OBJ_NAME_MAX];
 } snap_record;
 
-/* A reference on disk: where the target sits in this snapshot, and what
- * following it is allowed to do. The rights travel with it, or the
- * graph would come back more permissive than it went down. */
+/* A reference on disk: where the target sits in this snapshot, what
+ * following it permits, and what the holder calls it. */
 typedef struct {
     i64  index;                   /* -1 for an empty slot */
     u32  rights;
     u32  _pad;
-    char name[OBJ_NAME_MAX];      /* what the holder calls it */
+    char name[OBJ_NAME_MAX];
 } snap_ref;
 
-static bool  have_snapshot;
-static u64   current_generation;
-static u64   last_bytes;
-static u32   last_objects;
+static bool have_snapshot;
+static u64  current_generation;
+static u64  last_bytes;
+static u32  last_objects;
 
-static u8   *buffer;          /* staging area, direct-map pointer */
-static u64   buffer_bytes;
+static u8  *buffer;
+static u64  buffer_bytes;
 
-/* Objects collected during a walk, and where each landed. */
 static object *collected[SNAP_MAX_OBJECTS];
 static u32     collected_count;
 
 /* ------------------------------------------------------------------ */
+
+static u32 slot_lba(u32 slot) { return SNAP_BASE_LBA + slot * SLOT_SECTORS; }
 
 /* FNV-1a. Not a cryptographic hash and not meant to be one: it is here
  * to catch a torn write, not a forged snapshot. Signing is a separate
@@ -79,7 +90,7 @@ static bool ensure_buffer(void)
 {
     if (buffer) return true;
 
-    u64 pages = SLOT_MAX_SECTORS * BLK_SECTOR_SIZE / PAGE_SIZE;
+    u64 pages = PAGE_UP(SLOT_MAX_DATA) / PAGE_SIZE;
     phys_addr p = pmm_alloc_contig(pages);
     if (p == PMM_NO_FRAME) return false;
 
@@ -88,14 +99,16 @@ static bool ensure_buffer(void)
     return true;
 }
 
+static u64 align8(u64 v) { return (v + 7) & ~7ULL; }
+
 /* ------------------------------------------------------------------ */
 /* Walking the graph                                                    */
 /* ------------------------------------------------------------------ */
 
-/* Depth first, using the mark on each object so a shared target is
- * collected once and a cycle terminates instead of running forever.
- * This is the same walk a garbage collector would do, which is why the
- * mark lives on the object rather than in a table here. */
+/* Depth first, using the mark on each object, so a shared target is
+ * collected once and a loop terminates instead of running forever. This
+ * is the walk a garbage collector would do, which is why the mark lives
+ * on the object rather than in a table here. */
 static bool collect(object *o)
 {
     if (!o || obj_marked(o)) return true;
@@ -115,7 +128,6 @@ static void clear_marks(void)
     for (u32 i = 0; i < collected_count; i++) obj_set_mark(collected[i], false);
 }
 
-/* Where an object ended up in the collected list, or -1. */
 static i64 index_of(const object *o)
 {
     if (!o) return -1;
@@ -124,11 +136,16 @@ static i64 index_of(const object *o)
     return -1;
 }
 
+static void copy_name(char *dst, const char *src)
+{
+    for (u32 i = 0; i < OBJ_NAME_MAX; i++) dst[i] = 0;
+    if (!src) return;
+    for (u32 i = 0; i < OBJ_NAME_MAX - 1 && src[i]; i++) dst[i] = src[i];
+}
+
 /* ------------------------------------------------------------------ */
 /* Writing                                                             */
 /* ------------------------------------------------------------------ */
-
-static u64 align8(u64 v) { return (v + 7) & ~7ULL; }
 
 bool snap_save(object **roots, u32 root_count)
 {
@@ -136,30 +153,35 @@ bool snap_save(object **roots, u32 root_count)
     if (root_count == 0) return false;
 
     collected_count = 0;
-
-    /* Roots first and in order, so restoring hands them back the way
-     * they were given. */
     for (u32 i = 0; i < root_count; i++)
         if (!collect(roots[i])) { clear_marks(); return false; }
 
-    /* Lay the records out one after another. */
-    u64 at = 0;
+    /* The roots, by position, before anything else.
+     *
+     * They cannot be recovered from the order of the records. The walk
+     * is depth first, so everything reachable from the first root is
+     * collected before the second root is even reached -- taking the
+     * first N records as the N roots silently hands back the wrong
+     * objects, and the wrong ones are plausible enough to be used. */
+    u64 at = (u64)root_count * sizeof(u64);
+    if (at > SLOT_MAX_DATA) { clear_marks(); return false; }
+    for (u32 i = 0; i < root_count; i++)
+        ((u64 *)buffer)[i] = (u64)index_of(roots[i]);
+
     for (u32 i = 0; i < collected_count; i++) {
         object *o = collected[i];
         u64 payload = obj_size(o);
         u64 slots = obj_slots(o);
-        u64 need = sizeof(snap_record) + align8(payload) + slots * sizeof(snap_ref);
+        u64 need = sizeof(snap_record) + align8(payload)
+                 + slots * sizeof(snap_ref);
 
-        if (at + need > buffer_bytes) { clear_marks(); return false; }
+        if (at + need > SLOT_MAX_DATA) { clear_marks(); return false; }
 
         snap_record *r = (snap_record *)(buffer + at);
         r->type = obj_type(o);
         r->slot_count = (u32)slots;
         r->size = payload;
-        for (u32 c = 0; c < OBJ_NAME_MAX; c++) r->name[c] = 0;
-        const char *self = obj_name(o);
-        if (self) for (u32 c = 0; c < OBJ_NAME_MAX - 1 && self[c]; c++)
-            r->name[c] = self[c];
+        copy_name(r->name, obj_name(o));
         at += sizeof(snap_record);
 
         const u8 *src = (const u8 *)obj_data(o);
@@ -169,16 +191,13 @@ bool snap_save(object **roots, u32 root_count)
 
         /* References become positions in this snapshot. A pointer means
          * nothing once the memory is gone; a position is still true
-         * when the graph is built somewhere else entirely. */
+         * when the graph is rebuilt somewhere else entirely. */
         snap_ref *refs = (snap_ref *)(buffer + at);
         for (u64 s = 0; s < slots; s++) {
             refs[s].index = index_of(obj_get_slot(o, s));
             refs[s].rights = obj_slot_rights(o, s);
             refs[s]._pad = 0;
-            for (u32 c = 0; c < OBJ_NAME_MAX; c++) refs[s].name[c] = 0;
-            const char *pn = obj_slot_name(o, s);
-            if (pn) for (u32 c = 0; c < OBJ_NAME_MAX - 1 && pn[c]; c++)
-                refs[s].name[c] = pn[c];
+            copy_name(refs[s].name, obj_slot_name(o, s));
         }
         at += slots * sizeof(snap_ref);
     }
@@ -195,22 +214,20 @@ bool snap_save(object **roots, u32 root_count)
         .checksum = checksum(buffer, at),
     };
 
-    /* Alternate slots, so the previous snapshot survives this one
-     * failing halfway. */
-    u32 base = (h.generation & 1) ? SLOT_A_LBA : SLOT_B_LBA;
-    u32 data_sectors = (u32)((at + BLK_SECTOR_SIZE - 1) / BLK_SECTOR_SIZE);
-    if (data_sectors + 1 > SLOT_MAX_SECTORS) return false;
+    u32 slot = (u32)(h.generation % SLOT_COUNT);
+    u32 base = slot_lba(slot);
+    u32 sectors = (u32)((at + BLK_SECTOR_SIZE - 1) / BLK_SECTOR_SIZE);
+    if (sectors + 1 > SLOT_SECTORS) return false;
 
     /* Data first, header last. Until the header lands the slot is not
-     * claimed, so an interruption anywhere before that leaves it as it
-     * was rather than half new. */
-    if (data_sectors && !blk_write(base + 1, data_sectors, buffer))
-        return false;
+     * claimed, so an interruption anywhere before that leaves the slot
+     * holding whatever it held before -- an older generation, still
+     * whole. */
+    if (sectors && !blk_write(base + 1, sectors, buffer)) return false;
 
     static u8 header_sector[BLK_SECTOR_SIZE];
     for (u32 i = 0; i < BLK_SECTOR_SIZE; i++) header_sector[i] = 0;
     for (u32 i = 0; i < sizeof(h); i++) header_sector[i] = ((const u8 *)&h)[i];
-
     if (!blk_write(base, 1, header_sector)) return false;
 
     current_generation = h.generation;
@@ -224,119 +241,173 @@ bool snap_save(object **roots, u32 root_count)
 /* Reading                                                             */
 /* ------------------------------------------------------------------ */
 
-static bool read_slot(u32 base, snap_header *out)
+static bool read_header(u32 slot, snap_header *out)
 {
     static u8 sector[BLK_SECTOR_SIZE];
-    if (!blk_read(base, 1, sector)) return false;
+    if (!blk_read(slot_lba(slot), 1, sector)) return false;
 
     const snap_header *h = (const snap_header *)sector;
     if (h->magic != SNAP_MAGIC) return false;
     if (h->version != SNAP_VERSION) return false;
-    if (h->data_bytes > buffer_bytes) return false;
+    if (h->data_bytes > SLOT_MAX_DATA) return false;
     if (h->object_count > SNAP_MAX_OBJECTS) return false;
 
     *out = *h;
     return true;
 }
 
+u32 snap_history(u64 *generations, u32 max)
+{
+    if (!blk_present()) return 0;
+
+    u32 n = 0;
+    for (u32 s = 0; s < SLOT_COUNT && n < max; s++) {
+        snap_header h;
+        if (read_header(s, &h)) generations[n++] = h.generation;
+    }
+
+    /* Newest first: a history is read from the present backwards. */
+    for (u32 i = 0; i + 1 < n; i++)
+        for (u32 j = i + 1; j < n; j++)
+            if (generations[j] > generations[i]) {
+                u64 t = generations[i];
+                generations[i] = generations[j];
+                generations[j] = t;
+            }
+    return n;
+}
+
+/* Rebuilds a graph from the buffer. Two passes: the first creates every
+ * object, because a reference may point forward as easily as back, and
+ * the second fills the references in once there is something to point
+ * at. */
+static u32 rebuild(const snap_header *h, object **roots, u32 max_roots)
+{
+    collected_count = 0;
+    u64 root_table = (u64)h->root_count * sizeof(u64);
+    u64 at = root_table;
+
+    for (u64 i = 0; i < h->object_count; i++) {
+        const snap_record *r = (const snap_record *)(buffer + at);
+        at += sizeof(snap_record);
+
+        object *o = obj_create(r->type, r->size, r->slot_count);
+        if (!o) return 0;
+
+        u8 *dst = (u8 *)obj_data(o);
+        for (u64 b = 0; b < r->size; b++) dst[b] = buffer[at + b];
+        obj_set_name(o, r->name[0] ? r->name : NULL);
+
+        at += align8(r->size) + (u64)r->slot_count * sizeof(snap_ref);
+        collected[collected_count++] = o;
+    }
+
+    at = root_table;
+    for (u64 i = 0; i < h->object_count; i++) {
+        const snap_record *r = (const snap_record *)(buffer + at);
+        at += sizeof(snap_record) + align8(r->size);
+
+        const snap_ref *refs = (const snap_ref *)(buffer + at);
+        for (u32 s = 0; s < r->slot_count; s++) {
+            i64 target = refs[s].index;
+            if (target >= 0 && target < (i64)collected_count) {
+                obj_set_slot(collected[i], s, collected[target],
+                             refs[s].rights);
+                obj_set_slot_name(collected[i], s,
+                                  refs[s].name[0] ? refs[s].name : NULL);
+            }
+        }
+        at += (u64)r->slot_count * sizeof(snap_ref);
+    }
+
+    u32 n = (u32)h->root_count;
+    if (n > max_roots) n = max_roots;
+    for (u32 i = 0; i < n; i++) {
+        u64 index = ((const u64 *)buffer)[i];
+        if (index >= collected_count) { roots[i] = NULL; continue; }
+        roots[i] = collected[index];
+        obj_retain(roots[i]);
+    }
+
+    /* Everything created above came back holding one reference. The
+     * graph now holds the rest and the roots have been retained for the
+     * caller, so let ours go. */
+    for (u32 i = 0; i < collected_count; i++) obj_release(collected[i]);
+    return n;
+}
+
+static u32 load_slot(u32 slot, object **roots, u32 max_roots,
+                     bool make_current)
+{
+    snap_header h;
+    if (!read_header(slot, &h)) return 0;
+
+    u32 sectors = (u32)((h.data_bytes + BLK_SECTOR_SIZE - 1)
+                        / BLK_SECTOR_SIZE);
+    if (sectors && !blk_read(slot_lba(slot) + 1, sectors, buffer)) return 0;
+
+    if (checksum(buffer, h.data_bytes) != h.checksum) {
+        kprintf("snap: generation %llu fails its checksum, skipping\n",
+                h.generation);
+        return 0;
+    }
+
+    u32 n = rebuild(&h, roots, max_roots);
+    if (n && make_current) {
+        current_generation = h.generation;
+        have_snapshot = true;
+        last_bytes = h.data_bytes;
+        last_objects = (u32)h.object_count;
+    }
+    return n;
+}
+
 u32 snap_load(object **roots, u32 max_roots)
 {
     if (!blk_present() || !ensure_buffer()) return 0;
 
-    snap_header a, b;
-    bool have_a = read_slot(SLOT_A_LBA, &a);
-    bool have_b = read_slot(SLOT_B_LBA, &b);
+    /* Newest first, and if that one is damaged the one before it is
+     * still there -- which is the whole reason for a ring. */
+    for (;;) {
+        u64 best = 0;
+        i32 best_slot = -1;
 
-    /* The newer generation wins, but only if its data survives the
-     * checksum. If it does not, the older one is still there, which is
-     * the entire reason for having two. */
-    for (u32 attempt = 0; attempt < 2; attempt++) {
-        bool use_a;
-        if (attempt == 0)
-            use_a = have_a && (!have_b || a.generation > b.generation);
-        else
-            use_a = have_a && have_b && !(a.generation > b.generation);
-
-        if (attempt == 1 && !(have_a && have_b)) break;
-
-        const snap_header *h = use_a ? &a : &b;
-        if (!(use_a ? have_a : have_b)) continue;
-
-        u32 base = use_a ? SLOT_A_LBA : SLOT_B_LBA;
-        u32 sectors = (u32)((h->data_bytes + BLK_SECTOR_SIZE - 1)
-                            / BLK_SECTOR_SIZE);
-
-        if (sectors && !blk_read(base + 1, sectors, buffer)) continue;
-        if (checksum(buffer, h->data_bytes) != h->checksum) {
-            kprintf("snap: slot %c fails its checksum, falling back\n",
-                    use_a ? 'a' : 'b');
-            continue;
+        for (u32 s = 0; s < SLOT_COUNT; s++) {
+            snap_header h;
+            if (!read_header(s, &h)) continue;
+            if (h.generation > best) { best = h.generation; best_slot = (i32)s; }
         }
+        if (best_slot < 0) return 0;
 
-        /* Two passes. The first creates every object, because a
-         * reference may point forward as easily as back; the second
-         * fills the references in, once there is something for them to
-         * point at. */
-        collected_count = 0;
-        u64 at = 0;
-        for (u64 i = 0; i < h->object_count; i++) {
-            const snap_record *r = (const snap_record *)(buffer + at);
-            at += sizeof(snap_record);
+        u32 n = load_slot((u32)best_slot, roots, max_roots, true);
+        if (n) return n;
 
-            object *o = obj_create(r->type, r->size, r->slot_count);
-            if (!o) return 0;
-
-            u8 *dst = (u8 *)obj_data(o);
-            for (u64 bcount = 0; bcount < r->size; bcount++)
-                dst[bcount] = buffer[at + bcount];
-
-            obj_set_name(o, r->name[0] ? r->name : NULL);
-
-            at += align8(r->size) + (u64)r->slot_count * sizeof(snap_ref);
-            collected[collected_count++] = o;
-        }
-
-        at = 0;
-        for (u64 i = 0; i < h->object_count; i++) {
-            const snap_record *r = (const snap_record *)(buffer + at);
-            at += sizeof(snap_record) + align8(r->size);
-
-            const snap_ref *refs = (const snap_ref *)(buffer + at);
-            for (u32 s = 0; s < r->slot_count; s++) {
-                i64 target = refs[s].index;
-                if (target >= 0 && target < (i64)collected_count) {
-                    obj_set_slot(collected[i], s, collected[target],
-                                 refs[s].rights);
-                    obj_set_slot_name(collected[i], s,
-                                      refs[s].name[0] ? refs[s].name : NULL);
-                }
-            }
-            at += (u64)r->slot_count * sizeof(snap_ref);
-        }
-
-        u32 n = (u32)h->root_count;
-        if (n > max_roots) n = max_roots;
-        for (u32 i = 0; i < n; i++) {
-            roots[i] = collected[i];
-            obj_retain(roots[i]);
-        }
-
-        /* Everything created above came back with one reference of its
-         * own. The graph now holds the rest, and the roots have been
-         * retained for the caller, so let ours go. */
-        for (u32 i = 0; i < collected_count; i++) obj_release(collected[i]);
-
-        current_generation = h->generation;
-        have_snapshot = true;
-        last_bytes = h->data_bytes;
-        last_objects = (u32)h->object_count;
-        return n;
+        /* That one is unreadable. Blank its header so the next round
+         * looks past it rather than at it again. */
+        static u8 zero[BLK_SECTOR_SIZE];
+        blk_write(slot_lba((u32)best_slot), 1, zero);
     }
+}
 
+u32 snap_load_generation(u64 generation, object **roots, u32 max_roots)
+{
+    if (!blk_present() || !ensure_buffer()) return 0;
+
+    for (u32 s = 0; s < SLOT_COUNT; s++) {
+        snap_header h;
+        if (!read_header(s, &h)) continue;
+        if (h.generation != generation) continue;
+
+        /* Reading an old generation does not make it the present one.
+         * Looking at the past must not be able to overwrite the future:
+         * the next save still follows on from the newest state. */
+        return load_slot(s, roots, max_roots, false);
+    }
     return 0;
 }
 
-bool snap_present(void)     { return have_snapshot; }
-u64  snap_generation(void)  { return current_generation; }
-u64  snap_bytes(void)       { return last_bytes; }
-u32  snap_object_count(void){ return last_objects; }
+bool snap_present(void)      { return have_snapshot; }
+u64  snap_generation(void)   { return current_generation; }
+u64  snap_bytes(void)        { return last_bytes; }
+u32  snap_object_count(void) { return last_objects; }
+u32  snap_slot_count(void)   { return SLOT_COUNT; }

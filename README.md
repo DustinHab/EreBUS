@@ -176,6 +176,19 @@ built binary.
   graph. Nothing is saved by hand -- the system writes when changes stop
   arriving. make persist types into a window on one boot and shows it
   still there on the next.
+* **The shell.** No task bar, no window frames, no close and minimise --
+  none of them mean anything when a view is just somewhere you are
+  looking. Three ways of seeing one navigation state: focus with the
+  path beside it, the reachable graph, the path as columns. Names live
+  on the reference rather than the object, so an object handed to you
+  cannot announce itself as something it is not. Everything visible that
+  does something can be clicked; the keyboard is a shortcut, never the
+  only way.
+* **Time.** The snapshot ring keeps sixteen generations, so stepping
+  back is reading an older state rather than undoing anything. The
+  shell's own position is an object in the graph, which means it is
+  written out with everything else -- so going back in time returns you
+  to where you were standing then, not merely to the data.
 * M10 — booting real hardware from a USB stick
 
 ## A note on Secure Boot

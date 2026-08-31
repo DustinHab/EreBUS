@@ -26,6 +26,11 @@ QEMU="qemu-system-x86_64 -machine q35 -m 512M -cpu max \
 
 rm -f "$BUILD/screen.ppm"
 
+# The store persists between runs and is not part of the build, so a
+# cleaned tree has to grow one before QEMU will start.
+[ -f "$BUILD/store.img" ] || dd if=/dev/zero of="$BUILD/store.img" \
+    bs=1M count=32 status=none
+
 {
     sleep 9
     for k in "$@"; do

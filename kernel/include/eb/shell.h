@@ -39,8 +39,20 @@ typedef enum {
     LENS_COUNT
 } lens_kind;
 
-/* Starts at an object, holding the given rights on it. */
-void shell_init(domain *d, object *root, u32 rights);
+/* Starts at an object, holding the given rights on it.
+ *
+ * session may be an object saved by an earlier run, in which case the
+ * shell comes up exactly where it was left -- same focus, same lenses,
+ * same path. Pass NULL for a fresh start. */
+void shell_init(domain *d, object *root, u32 rights, object *session);
+
+/* The shell's own state, kept as an object in the graph like anything
+ * else. That is not a trick: it means persistence writes it out with
+ * everything else and nothing special had to be arranged for it. */
+object *shell_session(void);
+
+/* Whether the session handed to shell_init was actually usable. */
+bool shell_resumed(void);
 
 void shell_run(void *arg);
 

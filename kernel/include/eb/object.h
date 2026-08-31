@@ -39,7 +39,8 @@ typedef struct object object;
 #define TYPE_TEXT    3u   /* UTF-8 text */
 #define TYPE_LIST    4u   /* an ordered set of references */
 #define TYPE_DOMAIN  5u   /* a protection domain */
-#define TYPE_BUILTIN_COUNT 6u
+#define TYPE_SESSION 6u   /* where somebody was looking, and how */
+#define TYPE_BUILTIN_COUNT 7u
 
 void obj_store_init(void);
 

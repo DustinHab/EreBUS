@@ -34,9 +34,20 @@ bool snap_save(object **roots, u32 root_count);
  * restore. */
 u32 snap_load(object **roots, u32 max_roots);
 
+/* The generations still on the disk, newest first. Older ones fall off
+ * the end as the ring comes round. */
+u32 snap_history(u64 *generations, u32 max);
+
+/* Rebuilds one particular past generation. It does not become the
+ * present: the next save still follows on from the newest state, so
+ * looking at the past cannot overwrite the future. The graph handed
+ * back is a separate copy, and releasing the roots disposes of it. */
+u32 snap_load_generation(u64 generation, object **roots, u32 max_roots);
+
 bool snap_present(void);      /* is there a valid snapshot on the disk */
 u64  snap_generation(void);   /* which one was last read or written */
 u64  snap_bytes(void);        /* size of the last snapshot */
 u32  snap_object_count(void);
+u32  snap_slot_count(void);   /* how many generations the ring keeps */
 
 #endif /* EB_SNAPSHOT_H */

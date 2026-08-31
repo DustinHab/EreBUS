@@ -5,8 +5,10 @@
 #include <eb/fb.h>
 #include <eb/ps2.h>
 #include <eb/thread.h>
+#include <eb/snapshot.h>
 #include <eb/msg.h>
 
+#define SNAP_HISTORY_MAX 32
 #define TRAIL_MAX 12
 #define LENS_MAX   3
 #define GRAPH_MAX 48
@@ -51,10 +53,96 @@ static struct {
     bool redraw;
     i32  mouse_x, mouse_y;
     u8   buttons;
+
+    /* The shell's own state, as an object in the graph. Persistence
+     * writes it out with everything else, which is why coming back
+     * lands where one left off without any special arrangement. */
+    object *session;
+
+    /* Looking at the past. The live path is set aside while a past
+     * generation is on screen, and put back on the way out. */
+    u64     history[SNAP_HISTORY_MAX];
+    u32     history_count;
+    u32     at_generation;         /* 0 = now, otherwise into history[] */
+    object *past_root;
+    object *past_session;
+
+    object *live_node[TRAIL_MAX];
+    u32     live_rights[TRAIL_MAX];
+    u32     live_via[TRAIL_MAX];
+    u32     live_depth;
+    u32     live_selected;
 } nav;
 
 static object *focus(void)      { return nav.node[nav.depth - 1]; }
 static u32     focus_rights(void){ return nav.rights[nav.depth - 1]; }
+
+/* Declared here because the input handling comes before them in the
+ * file and the drawing comes after, and both need them. */
+static void session_store(void);
+static void leave_past(void);
+static void go_to_generation(u32 index);
+static void follow(u64 slot);
+
+/* ------------------------------------------------------------------ */
+/* What can be pointed at                                              */
+/* ------------------------------------------------------------------ */
+
+/* Everything drawn that means something records where it was drawn, and
+ * a click looks up what is underneath.
+ *
+ * The rule this enforces: if it is on the screen and it does something,
+ * it can be clicked. Keyboard shortcuts are then genuinely shortcuts --
+ * faster for whoever knows them, and never the only way to reach
+ * something. A thing that can only be done by remembering a key is a
+ * thing most people will never find. */
+typedef enum {
+    HOT_NONE,
+    HOT_REFERENCE,   /* an outgoing reference: follow it */
+    HOT_TRAIL,       /* a step on the path: go back to it */
+    HOT_LENS,        /* a lens tab: turn it on or off */
+    HOT_NODE,        /* a node in the graph */
+    HOT_TIME,        /* a mark in the history */
+    HOT_MODE         /* the name of the current shell */
+} hot_kind;
+
+typedef struct {
+    i32      x, y, w, h;
+    hot_kind kind;
+    u32      index;
+} hot_region;
+
+#define HOT_MAX 96
+static hot_region hots[HOT_MAX];
+static u32        hot_count;
+static i32        hovered = -1;
+
+static void hot_reset(void) { hot_count = 0; }
+
+static void hot_add(i32 x, i32 y, i32 w, i32 h, hot_kind k, u32 index)
+{
+    if (hot_count >= HOT_MAX) return;
+    hots[hot_count++] = (hot_region){ x, y, w, h, k, index };
+}
+
+static i32 hot_at(i32 mx, i32 my)
+{
+    /* Last one wins: regions are added in drawing order, so whatever is
+     * drawn on top is also what gets clicked. */
+    for (i32 i = (i32)hot_count - 1; i >= 0; i--) {
+        const hot_region *r = &hots[i];
+        if (mx >= r->x && mx < r->x + r->w &&
+            my >= r->y && my < r->y + r->h)
+            return i;
+    }
+    return -1;
+}
+
+static bool is_hovered(hot_kind k, u32 index)
+{
+    if (hovered < 0 || (u32)hovered >= hot_count) return false;
+    return hots[hovered].kind == k && hots[hovered].index == index;
+}
 
 u64        shell_changes(void)      { return nav.changes; }
 object    *shell_focus(void)        { return focus(); }
@@ -329,6 +417,7 @@ static lens_kind default_lens(object *o)
 
 static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
 {
+    (void)sh;
     i32 left_w = 300;
     i32 right_w = 340;
     i32 mid_x = PAD + left_w + PAD;
@@ -357,9 +446,12 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         line[at] = 0;
 
         bool here = (i + 1 == nav.depth);
-        if (here) fb_rect(PAD, ty - 3, left_w, ROW, C_PANEL_HI);
+        bool hot = is_hovered(HOT_TRAIL, i);
+        if (here || hot)
+            fb_rect(PAD, ty - 3, left_w, ROW, here ? C_PANEL_HI : C_EDGE);
         text_at(PAD + PAD, ty, PAD + left_w - PAD, line,
-                here ? C_TEXT : C_DIM);
+                (here || hot) ? C_TEXT : C_DIM);
+        hot_add(PAD, ty - 3, left_w, ROW, HOT_TRAIL, i);
         ty += ROW;
     }
 
@@ -372,9 +464,15 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         for (u32 j = 0; j < nav.lens_count; j++) if (nav.lens[j] == i) on = true;
 
         const char *n = lens_name((lens_kind)i);
-        i32 w = (i32)(8 * GLYPH_W);
-        if (on) fb_rect(tab_x - 4, top + PAD - 4, w, ROW, C_PANEL_HI);
-        text_at(tab_x, top + PAD, mid_x + mid_w, n, on ? C_ACCENT : C_FAINT);
+        i32 w = (i32)(10 * GLYPH_W);
+        bool hot = is_hovered(HOT_LENS, i);
+
+        if (on || hot)
+            fb_rect(tab_x - 4, top + PAD - 4, w, ROW,
+                    on ? C_PANEL_HI : C_EDGE);
+        text_at(tab_x, top + PAD, mid_x + mid_w, n,
+                on ? C_ACCENT : (hot ? C_TEXT : C_FAINT));
+        hot_add(tab_x - 4, top + PAD - 4, w, ROW, HOT_LENS, i);
         tab_x += w + 8;
     }
     fb_rect(mid_x + PAD, top + PAD + ROW + 2, mid_w - 2 * PAD, 1, C_EDGE);
@@ -408,7 +506,10 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         rights_text(focus_rights() & obj_slot_rights(f, i), r);
 
         bool picked = (i == nav.selected);
-        if (picked) fb_rect(rx, ty - 3, right_w, ROW, C_PANEL_HI);
+        bool hot = is_hovered(HOT_REFERENCE, (u32)i);
+        if (picked || hot)
+            fb_rect(rx, ty - 3, right_w, ROW, picked ? C_PANEL_HI : C_EDGE);
+        if (t) hot_add(rx, ty - 3, right_w, ROW, HOT_REFERENCE, (u32)i);
 
         u32 at = put(line, 0, picked ? "> " : "  ");
         at = put(line, at, r);
@@ -417,7 +518,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         line[at] = 0;
 
         text_at(rx + PAD, ty, sw - PAD, line,
-                !t ? C_FAINT : (picked ? C_TEXT : C_DIM));
+                !t ? C_FAINT : ((picked || hot) ? C_TEXT : C_DIM));
         ty += ROW;
     }
 }
@@ -562,9 +663,13 @@ static void draw_graph_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         i32 x = gnodes[i].x, y = gnodes[i].y;
         if (y < top || y + node_h > bottom) continue;
 
+        bool hot = is_hovered(HOT_NODE, i);
         fb_rect(x - 2, y - 2, node_w + 4, node_h + 4,
-                is_focus ? C_ACCENT : (on_path ? C_EDGE : C_PANEL));
-        fb_rect(x, y, node_w, node_h, is_focus ? C_PANEL_HI : C_PANEL);
+                is_focus ? C_ACCENT : (hot ? C_DIM
+                                           : (on_path ? C_EDGE : C_PANEL)));
+        fb_rect(x, y, node_w, node_h,
+                (is_focus || hot) ? C_PANEL_HI : C_PANEL);
+        hot_add(x - 2, y - 2, node_w + 4, node_h + 4, HOT_NODE, i);
 
         char what[40];
         graph_node *par = gnodes[i].parent >= 0 ? &gnodes[gnodes[i].parent]
@@ -663,6 +768,7 @@ static void draw_all(void)
     i32 sw = (i32)fb_width(), sh = (i32)fb_height();
     i32 top = 66, bottom = sh - 34;
 
+    hot_reset();
     fb_rect(0, 0, sw, sh, C_BACK);
 
     /* Header: what is in focus and what may be done with it. Rights are
@@ -695,6 +801,15 @@ static void draw_all(void)
     text_at(sw / 2 + PAD, 14, sw - PAD, line,
             (focus_rights() & CAP_WRITE) ? C_WRITE : C_READONLY);
 
+    /* The history strip.
+     *
+     * A row of marks, oldest at the left, the present at the right.
+     * It is not a scrollbar and not an undo list: each mark is a whole
+     * state of the system that is still on the disk, and standing on
+     * one shows everything as it was, not one document. */
+    i32 strip_h = 30;
+    if (nav.history_count > 0) bottom -= strip_h;
+
     switch (nav.mode) {
     case SHELL_FOCUS: draw_focus_shell(sw, sh, top, bottom); break;
     case SHELL_GRAPH: draw_graph_shell(sw, sh, top, bottom); break;
@@ -702,13 +817,56 @@ static void draw_all(void)
     default: break;
     }
 
+    if (nav.history_count > 0) {
+        i32 sy = bottom + 6;
+        i32 tick = 14, gap = 5;
+        i32 count = (i32)nav.history_count;
+        i32 x = PAD * 2;
+
+        text_at(x, sy + 2, sw, "history", C_FAINT);
+        x += 9 * GLYPH_W;
+
+        /* Oldest on the left, so time runs the way it is read. Index 0
+         * of the history is the newest, hence the reversal. */
+        for (i32 i = count - 1; i >= 0; i--) {
+            /* Mark i is history entry i, and entry zero is the present.
+             * Clicking one goes there; clicking the rightmost comes
+             * back to now. */
+            bool here = (nav.at_generation == 0) ? (i == 0)
+                                                 : ((u32)i == nav.at_generation);
+            bool present = (i == 0);
+            color c = here ? C_ACCENT : (present ? C_DIM : C_FAINT);
+
+            if (is_hovered(HOT_TIME, (u32)i) && !here) c = C_TEXT;
+            fb_rect(x, sy + (here ? 0 : 3), tick, here ? 20 : 14, c);
+            hot_add(x - 2, sy, tick + 4, 24, HOT_TIME, (u32)i);
+            x += tick + gap;
+        }
+
+        x += PAD * 2;
+        at = 0;
+        if (nav.at_generation == 0) {
+            at = put(line, 0, "now  --  generation ");
+            at = put_dec(line, at, snap_generation());
+            at = put(line, at, ", changes are kept");
+        } else {
+            at = put(line, 0, "generation ");
+            at = put_dec(line, at, nav.history[nav.at_generation]);
+            at = put(line, at, "  --  the past, read only.  "
+                               "escape returns to now");
+        }
+        line[at] = 0;
+        text_at(x, sy + 2, sw - PAD, line,
+                nav.at_generation ? C_READONLY : C_DIM);
+    }
+
     /* Footer: the mode, and what the keys do. No menu bar -- there is
      * nothing to put in one that is not already visible. */
     fb_rect(0, sh - 28, sw, 28, C_BAR);
     at = put(line, 0, mode_name(nav.mode));
-    at = put(line, at, "   tab: another way of looking   "
-                       "arrows: move through the graph   "
-                       "1 2 3: lenses   typing changes the object");
+    at = put(line, at, "   click anything you can see.   "
+                       "tab: another way of looking.   "
+                       "arrows also move.   typing changes the object.");
     line[at] = 0;
     text_at(PAD * 2, sh - 28 + 6, sw - PAD, line, C_FAINT);
 
@@ -747,6 +905,7 @@ static void follow(u64 slot)
     nav.depth++;
     nav.selected = 0;
     set_lenses_for(t);
+    nav.changes++;
     nav.redraw = true;
 }
 
@@ -756,6 +915,7 @@ static void go_back(void)
     nav.depth--;
     nav.selected = nav.via[nav.depth];
     set_lenses_for(focus());
+    nav.changes++;
     nav.redraw = true;
 }
 
@@ -806,7 +966,22 @@ static void handle_keys(void)
         switch (k.codepoint) {
         case KEY_TAB:
             nav.mode = (shell_mode)((nav.mode + 1) % SHELL_MODE_COUNT);
+            nav.changes++;
             nav.redraw = true;
+            continue;
+
+        /* Time. Page up steps back through the generations the ring
+         * still holds, page down comes forward again, escape returns to
+         * the present. Nothing is undone by going back -- an older
+         * state is read, and the present is still where it was. */
+        case KEY_PGUP:
+            go_to_generation(nav.at_generation + 1);
+            continue;
+        case KEY_PGDN:
+            if (nav.at_generation > 0) go_to_generation(nav.at_generation - 1);
+            continue;
+        case KEY_ESCAPE:
+            leave_past();
             continue;
         case KEY_UP:
             if (nav.selected > 0) { nav.selected--; nav.redraw = true; }
@@ -823,19 +998,86 @@ static void handle_keys(void)
         case KEY_LEFT:
             go_back();
             continue;
-        case '1': toggle_lens(LENS_TEXT);      continue;
-        case '2': toggle_lens(LENS_BYTES);     continue;
-        case '3': toggle_lens(LENS_STRUCTURE); continue;
         default: break;
+        }
+
+        /* Lenses are switched by clicking their tabs, or with control
+         * held. Plain digits used to do it, which meant a digit could
+         * not be typed into a text -- a shortcut that quietly takes a
+         * character away from the thing one is actually doing is worse
+         * than no shortcut. */
+        if (k.ctrl) {
+            if (k.codepoint == '1') { toggle_lens(LENS_TEXT); continue; }
+            if (k.codepoint == '2') { toggle_lens(LENS_BYTES); continue; }
+            if (k.codepoint == '3') { toggle_lens(LENS_STRUCTURE); continue; }
+            continue;
         }
 
         if (k.codepoint < 0x110000u) type_into_focus(k.codepoint);
     }
 }
 
+/* Retreats to an earlier point on the path. */
+static void go_back_to(u32 index)
+{
+    if (index + 1 >= nav.depth) return;
+    while (nav.depth > index + 1) go_back();
+}
+
+/* Acts on whatever was clicked.
+ *
+ * One gesture, one meaning: pointing at a thing and pressing goes to
+ * it, or turns it on. Nothing here opens a menu, and nothing needs a
+ * second click to confirm -- every one of these is undone by clicking
+ * somewhere else, so there is nothing to be careful about. */
+static void act_on(const hot_region *r)
+{
+    switch (r->kind) {
+    case HOT_REFERENCE:
+        nav.selected = r->index;
+        follow(r->index);
+        break;
+
+    case HOT_TRAIL:
+        go_back_to(r->index);
+        break;
+
+    case HOT_LENS:
+        toggle_lens((lens_kind)r->index);
+        break;
+
+    case HOT_NODE: {
+        /* Walk to it from where we are, one reference at a time, so the
+         * path stays a real chain of references rather than a jump that
+         * skipped whatever the steps would have permitted. */
+        if (r->index >= gcount) break;
+        object *want = gnodes[r->index].o;
+        if (want == focus()) break;
+
+        for (u64 s = 0; s < obj_slots(focus()); s++) {
+            if (obj_get_slot(focus(), s) == want) { follow(s); return; }
+        }
+        /* Not a neighbour of where we stand. Retrace: if it is on the
+         * path we came by, go back to it. */
+        for (u32 i = 0; i < nav.depth; i++)
+            if (nav.node[i] == want) { go_back_to(i); return; }
+        break;
+    }
+
+    case HOT_TIME:
+        go_to_generation(r->index);
+        break;
+
+    default:
+        break;
+    }
+}
+
 static void handle_mouse(void)
 {
     mouse_event m;
+    bool moved = false;
+
     while (ps2_poll_mouse(&m)) {
         nav.mouse_x += m.dx;
         nav.mouse_y += m.dy;
@@ -843,39 +1085,182 @@ static void handle_mouse(void)
         if (nav.mouse_y < 0) nav.mouse_y = 0;
         if (nav.mouse_x > (i32)fb_width() - 2)  nav.mouse_x = (i32)fb_width() - 2;
         if (nav.mouse_y > (i32)fb_height() - 2) nav.mouse_y = (i32)fb_height() - 2;
+        moved = true;
 
         bool was = (nav.buttons & 1) != 0;
         bool is = (m.buttons & 1) != 0;
         nav.buttons = m.buttons;
 
-        /* One gesture, one meaning: pointing at something and pressing
-         * goes there. Nothing here opens a menu. */
-        if (is && !was && nav.mode == SHELL_GRAPH) {
-            for (u32 i = 0; i < gcount; i++) {
-                if (nav.mouse_x < gnodes[i].x || nav.mouse_x > gnodes[i].x + 250)
-                    continue;
-                if (nav.mouse_y < gnodes[i].y || nav.mouse_y > gnodes[i].y + 46)
-                    continue;
-
-                /* Walk to it from where we are, one reference at a
-                 * time, so the path stays a real chain of references
-                 * rather than a jump that skipped the permissions. */
-                for (u64 s = 0; s < obj_slots(focus()); s++) {
-                    if (obj_get_slot(focus(), s) == gnodes[i].o) {
-                        follow(s);
-                        break;
-                    }
-                }
-                break;
-            }
+        if (is && !was) {
+            i32 h = hot_at(nav.mouse_x, nav.mouse_y);
+            if (h >= 0) act_on(&hots[h]);
         }
-        nav.redraw = true;
     }
+
+    if (!moved) return;
+
+    /* Whatever is under the pointer lights up. Without that one has to
+     * click to find out whether anything was there at all, and guessing
+     * is not the same as knowing. */
+    i32 now_over = hot_at(nav.mouse_x, nav.mouse_y);
+    if (now_over != hovered) hovered = now_over;
+    nav.redraw = true;
 }
 
 /* ------------------------------------------------------------------ */
 
-void shell_init(domain *d, object *root, u32 rights)
+/* ------------------------------------------------------------------ */
+/* The session, as an object                                           */
+/* ------------------------------------------------------------------ */
+
+/* Everything about where somebody is that is not itself an object. The
+ * path is kept in the session object's own reference slots, which is
+ * both the natural place for it and the reason the snapshot picks it up
+ * without being told. */
+typedef struct {
+    u32 mode;
+    u32 lens_count;
+    u32 lens[LENS_MAX];
+    u32 depth;
+    u32 selected;
+    u32 via[TRAIL_MAX];
+} session_state;
+
+static void session_store(void)
+{
+    if (!nav.session) return;
+    if (nav.at_generation != 0) return;   /* the past is not written down */
+
+    session_state *s = (session_state *)obj_data(nav.session);
+    if (!s) return;
+
+    s->mode = (u32)nav.mode;
+    s->lens_count = nav.lens_count;
+    for (u32 i = 0; i < LENS_MAX; i++) s->lens[i] = (u32)nav.lens[i];
+    s->depth = nav.depth;
+    s->selected = nav.selected;
+    for (u32 i = 0; i < TRAIL_MAX; i++) s->via[i] = nav.via[i];
+
+    /* The path itself, as references. The rights each step conferred go
+     * on the reference, so coming back restores not only where one was
+     * but what one was allowed to do there. */
+    for (u32 i = 0; i < TRAIL_MAX; i++)
+        obj_set_slot(nav.session, i,
+                     i < nav.depth ? nav.node[i] : NULL,
+                     i < nav.depth ? nav.rights[i] : 0);
+}
+
+static bool session_restore(object *session)
+{
+    if (!session || obj_type(session) != TYPE_SESSION) return false;
+
+    const session_state *s = (const session_state *)obj_data(session);
+    if (!s || s->depth == 0 || s->depth > TRAIL_MAX) return false;
+
+    for (u32 i = 0; i < s->depth; i++) {
+        object *n = obj_get_slot(session, i);
+        if (!n) return false;
+        nav.node[i] = n;
+        nav.rights[i] = obj_slot_rights(session, i);
+        nav.via[i] = s->via[i];
+    }
+    nav.depth = s->depth;
+    nav.selected = s->selected;
+    nav.mode = (shell_mode)(s->mode % SHELL_MODE_COUNT);
+    nav.lens_count = s->lens_count ? (s->lens_count > LENS_MAX ? 1
+                                                              : s->lens_count)
+                                   : 1;
+    for (u32 i = 0; i < nav.lens_count; i++)
+        nav.lens[i] = (lens_kind)(s->lens[i] % LENS_COUNT);
+    return true;
+}
+
+static bool resumed;
+
+object *shell_session(void) { return nav.session; }
+bool    shell_resumed(void) { return resumed; }
+
+/* ------------------------------------------------------------------ */
+/* Time                                                                */
+/* ------------------------------------------------------------------ */
+
+static void leave_past(void)
+{
+    if (nav.at_generation == 0) return;
+
+    if (nav.past_session) { obj_release(nav.past_session); nav.past_session = NULL; }
+    if (nav.past_root)    { obj_release(nav.past_root);    nav.past_root = NULL; }
+
+    for (u32 i = 0; i < nav.live_depth; i++) {
+        nav.node[i] = nav.live_node[i];
+        nav.rights[i] = nav.live_rights[i];
+        nav.via[i] = nav.live_via[i];
+    }
+    nav.depth = nav.live_depth;
+    nav.selected = nav.live_selected;
+    nav.at_generation = 0;
+    set_lenses_for(focus());
+    nav.redraw = true;
+}
+
+/* Steps to a generation in the history. Index 0 is the present.
+ *
+ * The past is loaded as its own graph, entirely separate from the live
+ * one, and every step through it is read-only. That is not a policy
+ * decision that had to be enforced anywhere: the rights are simply
+ * masked down on the way in, and everything downstream already refuses
+ * to write without them. */
+static void go_to_generation(u32 index)
+{
+    if (index == 0) { leave_past(); return; }
+
+    nav.history_count = snap_history(nav.history, SNAP_HISTORY_MAX);
+    if (index >= nav.history_count) return;
+
+    /* history[0] is the newest generation, which is the present as it
+     * was last written down -- stepping back has to skip it, or the
+     * first step would go nowhere. */
+    u64 want = nav.history[index];
+
+    object *roots[2] = { NULL, NULL };
+    if (snap_load_generation(want, roots, 2) < 1) return;
+
+    if (nav.at_generation == 0) {
+        /* First step away from the present: put the live path aside. */
+        for (u32 i = 0; i < nav.depth; i++) {
+            nav.live_node[i] = nav.node[i];
+            nav.live_rights[i] = nav.rights[i];
+            nav.live_via[i] = nav.via[i];
+        }
+        nav.live_depth = nav.depth;
+        nav.live_selected = nav.selected;
+    } else {
+        if (nav.past_session) obj_release(nav.past_session);
+        if (nav.past_root) obj_release(nav.past_root);
+    }
+
+    nav.past_root = roots[0];
+    nav.past_session = roots[1];
+    nav.at_generation = index;
+
+    /* If that generation recorded where somebody was, go back to
+     * exactly there rather than merely to the same data. */
+    bool placed = nav.past_session && session_restore(nav.past_session);
+    if (!placed) {
+        nav.node[0] = nav.past_root;
+        nav.via[0] = 0;
+        nav.depth = 1;
+        nav.selected = 0;
+    }
+
+    for (u32 i = 0; i < nav.depth; i++) nav.rights[i] &= CAP_READ;
+    set_lenses_for(focus());
+    nav.redraw = true;
+}
+
+/* ------------------------------------------------------------------ */
+
+void shell_init(domain *d, object *root, u32 rights, object *session)
 {
     nav.dom = d;
     nav.node[0] = root;
@@ -884,9 +1269,29 @@ void shell_init(domain *d, object *root, u32 rights)
     nav.depth = 1;
     nav.selected = 0;
     nav.mode = SHELL_FOCUS;
+    nav.at_generation = 0;
     nav.mouse_x = (i32)fb_width() / 2;
     nav.mouse_y = (i32)fb_height() / 2;
     set_lenses_for(root);
+
+    /* Whether the restore actually worked, rather than whether one was
+     * offered. A session that failed to load and a fresh start look the
+     * same on screen, and saying "resumed" for both would hide exactly
+     * the failure worth noticing. */
+    resumed = (session != NULL) && session_restore(session);
+
+    if (resumed) {
+        nav.session = session;
+        obj_retain(session);
+    } else {
+        if (session) obj_release(session);
+        nav.session = obj_create(TYPE_SESSION, sizeof(session_state),
+                                 TRAIL_MAX);
+        if (nav.session) obj_set_name(nav.session, "where you were");
+    }
+
+    nav.history_count = snap_history(nav.history, SNAP_HISTORY_MAX);
+    session_store();
     nav.redraw = true;
 }
 
@@ -899,6 +1304,7 @@ void shell_run(void *arg)
 
         if (nav.redraw) {
             nav.redraw = false;
+            session_store();
             draw_all();
             fb_present();
         }
