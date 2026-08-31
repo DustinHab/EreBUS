@@ -176,7 +176,7 @@ static struct {
  * rest are objects already in hand, so pointing at something that
  * exists needs no dragging and no second window. */
 #define PALETTE_FIXED 3
-#define CARRY_MAX 12
+#define CARRY_MAX 16
 
 /* What is being carried.
  *
@@ -502,10 +502,10 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
         if (obj_get_slot(o, i)) filled++; else vacant++;
 
     if (filled == 0) {
-        text_at(x, ty, x + w, "points at nothing", C_FAINT);
+        text_at(x, ty, x + w, "no references", C_FAINT);
         ty += ROW;
     } else {
-        text_at(x, ty, x + w, "points at", C_DIM);
+        text_at(x, ty, x + w, "references", C_DIM);
         ty += ROW;
         for (u64 i = 0; i < obj_slots(o) && ty < y + h; i++) {
             object *t = obj_get_slot(o, i);
@@ -528,7 +528,7 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
     if (vacant > 0 && ty < y + h) {
         at = put(line, 0, "  ");
         at = put_dec(line, at, vacant);
-        at = put(line, at, filled ? " more slots, empty" : " slots, all empty");
+        at = put(line, at, filled ? " empty slots" : " empty slots");
         line[at] = 0;
         text_at(x, ty, x + w, line, C_FAINT);
         ty += ROW;
@@ -536,7 +536,7 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
 
     /* For a running program: what it actually holds.
      *
-     * Not the same list as "points at". The slots above are what YOU
+     * Not the same list as "references". The slots above are what YOU
      * pointed it at -- your record of the giving. This is the program's
      * capability table -- the kernel's record of what it can reach,
      * narrowings and withdrawals included. Whoever delegates can see
@@ -545,7 +545,7 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
     domain *pd = proc_domain_of(o);
     if (pd) {
         ty += ROW / 2;
-        text_at(x, ty, x + w, "it holds", C_DIM);
+        text_at(x, ty, x + w, "capabilities", C_DIM);
         ty += ROW;
 
         u64 held = 0;
@@ -573,7 +573,7 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
             ty += ROW;
         }
         if (held == 0 && ty < y + h)
-            text_at(x, ty, x + w, "  nothing at all", C_FAINT);
+            text_at(x, ty, x + w, "  none", C_FAINT);
     }
 }
 
@@ -625,7 +625,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
 
     /* --- the path we took --------------------------------------- */
     fb_rect(PAD, top, left_w, bottom - top, C_PANEL);
-    text_at(PAD + PAD, top + PAD, PAD + left_w, "how you got here", C_FAINT);
+    text_at(PAD + PAD, top + PAD, PAD + left_w, "path", C_FAINT);
     fb_rect(PAD + PAD, top + PAD + ROW - 2, left_w - 2 * PAD, 1, C_EDGE);
 
     i32 ty = top + PAD + ROW + 4;
@@ -691,7 +691,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     /* --- where it leads ------------------------------------------ */
     i32 rx = sw - PAD - right_w;
     fb_rect(rx, top, right_w, bottom - top, C_PANEL);
-    text_at(rx + PAD, top + PAD, sw - PAD, "where it leads", C_FAINT);
+    text_at(rx + PAD, top + PAD, sw - PAD, "contents", C_FAINT);
     fb_rect(rx + PAD, top + PAD + ROW - 2, right_w - 2 * PAD, 1, C_EDGE);
 
     ty = top + PAD + ROW + 4;
@@ -702,7 +702,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     for (u64 i = 0; i < slots; i++) if (obj_get_slot(f, i)) used++;
 
     if (used == 0 && !may_shape)
-        text_at(rx + PAD, ty, sw - PAD, "nowhere -- this is a leaf", C_FAINT);
+        text_at(rx + PAD, ty, sw - PAD, "no references", C_FAINT);
 
     i32 col_rights = rx + PAD + 2 * GLYPH_W;
     i32 col_name   = rx + PAD + 7 * GLYPH_W;
@@ -794,14 +794,14 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         ty += 4;
         bool lit = is_hovered(HOT_ADD, 0);
         if (lit) fb_rect(rx, ty - 3, right_w, ROW, C_EDGE);
-        text_at(rx + PAD, ty, sw - PAD, "+  point at something new",
+        text_at(rx + PAD, ty, sw - PAD, "+  add",
                 lit ? C_TEXT : C_FAINT);
         hot_add(rx, ty - 3, right_w, ROW, HOT_ADD, 0);
         ty += ROW;
 
         if (edit.kind == EDIT_PICK) {
             static const char *fixed[PALETTE_FIXED] = {
-                "  a text", "  some bytes", "  a list"
+                "  text", "  bytes", "  list"
             };
             for (u32 p = 0; p < PALETTE_FIXED && ty < bottom - ROW; p++) {
                 bool on = is_hovered(HOT_PALETTE, p);
@@ -817,7 +817,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
 
             if (carried_count > 0 && ty < bottom - ROW) {
                 text_at(rx + PAD, ty, sw - PAD,
-                        "  or something you already hold:", C_FAINT);
+                        "  or something you already have:", C_FAINT);
                 ty += ROW;
             }
             for (u32 c = 0; c < carried_count && ty < bottom - ROW; c++) {
@@ -1115,8 +1115,8 @@ static void draw_all(void)
 
     text_at(PAD * 2, 12, sw / 2, what, claimed ? C_READONLY : C_TEXT);
     text_at(PAD * 2, 12 + ROW, sw / 2,
-            claimed ? "the object calls itself that -- you have not named it"
-                    : "you named this reference",
+            claimed ? "the object's own name"
+                    : "named by you",
             C_FAINT);
 
     /* Room for the footer, which is the longest line anywhere on the
@@ -1139,13 +1139,13 @@ static void draw_all(void)
      * program that has ended is a record, not a recipient. */
     if (obj_type(focus()) == TYPE_PROGRAM)
         at = put(line, at, !proc_is_running(focus())
-                           ? "  it has ended"
+                           ? "  ended"
                            : (focus_rights() & CAP_GRANT)
-                           ? "  you may hand it things"
-                           : "  you may only watch it");
+                           ? "  you may give it things"
+                           : "  read only");
     else
         at = put(line, at, (focus_rights() & CAP_WRITE)
-                           ? "  you may change this"
+                           ? "  writable"
                            : "  read only");
     line[at] = 0;
     text_at(tx, 14, sw - PAD, line,
@@ -1214,7 +1214,7 @@ static void draw_all(void)
         if (nav.at_generation == 0) {
             at = put(line, 0, "now  --  generation ");
             at = put_dec(line, at, snap_generation());
-            at = put(line, at, ", changes are kept");
+            at = put(line, at, "");
         } else {
             at = put(line, 0, "generation ");
             at = put_dec(line, at, nav.history[nav.at_generation]);
@@ -1243,7 +1243,7 @@ static void draw_all(void)
     fb_rect(0, sh - 28, sw, 28, C_BAR);
     at = put(line, 0, mode_name(nav.mode));
     at = put(line, at, "   click anything you can see.   "
-                       "tab: another way of looking.   arrows also move.   ");
+                       "tab: switch view.   arrows also move.   ");
     if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
         at = put(line, at, "point it at something to hand it over.");
     else if (obj_type(focus()) == TYPE_TEXT &&
@@ -1596,11 +1596,11 @@ static void act_on(const hot_region *r)
         u32 give = CAP_READ | CAP_WRITE | CAP_GRANT;
 
         if (r->index == 0)      { made = obj_create(TYPE_TEXT, 512, 0);
-                                  suggest = "a note"; created = true; }
+                                  suggest = "note"; created = true; }
         else if (r->index == 1) { made = obj_create(TYPE_BYTES, 64, 0);
-                                  suggest = "some bytes"; created = true; }
+                                  suggest = "bytes"; created = true; }
         else if (r->index == 2) { made = obj_create(TYPE_LIST, 0, 4);
-                                  suggest = "a list"; created = true; }
+                                  suggest = "list"; created = true; }
         else {
             carried carry[CARRY_MAX];
             u32 n = gather(carry);

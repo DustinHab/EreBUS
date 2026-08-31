@@ -8,6 +8,7 @@
 #include <eb/gdt.h>
 #include <eb/fmt.h>
 #include <eb/io.h>
+#include <eb/time.h>
 
 /* Per-processor data. syscall.S reads gs:0 and gs:8 directly, so the
  * layout is not free to change. */
@@ -104,10 +105,19 @@ static u64 do_send(domain *d, u64 handle, u64 tag,
     return SYS_OK;
 }
 
-static u64 do_receive(domain *d, u64 handle, u64 user_buffer)
+static u64 do_receive(domain *d, u64 handle, u64 user_buffer, u64 no_wait)
 {
     message m = { 0 };
-    if (!port_receive(d, (cap_handle)handle, &m)) return SYS_DENIED;
+
+    /* Waiting is the default; a program with other work to do -- a
+     * clock has a clock to keep -- asks not to, and an empty letter box
+     * answers immediately instead of holding it. */
+    if (no_wait) {
+        if (!port_try_receive(d, (cap_handle)handle, &m))
+            return SYS_WOULDFAIL;
+    } else {
+        if (!port_receive(d, (cap_handle)handle, &m)) return SYS_DENIED;
+    }
 
     /* Writing into the program's memory is the one place the kernel
      * touches an address the program chose, so it goes through the
@@ -191,7 +201,7 @@ u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4)
         return do_send(d, a0, a1, a2, a3, a4);
 
     case SYS_RECEIVE:
-        return do_receive(d, a0, a1);
+        return do_receive(d, a0, a1, a2);
 
     case SYS_READ:
         return do_read(d, a0, a1);
@@ -201,6 +211,15 @@ u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4)
 
     case SYS_PASS:
         return do_pass(d, a0, a1, a2, a3, a4);
+
+    case SYS_CLOCK: {
+        /* The one call that needs no capability. The time of day is a
+         * fact about the world, not about any object; answering it
+         * grants nothing and names nothing. */
+        u32 hh, mm, ss;
+        time_wall(&hh, &mm, &ss);
+        return (u64)hh * 3600 + (u64)mm * 60 + ss;
+    }
 
     default:
         return SYS_BADCALL;

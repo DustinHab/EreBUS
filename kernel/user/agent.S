@@ -58,10 +58,13 @@ user_agent:
     movq    %rax,  8(%rbp)          /* how many words, how many caps */
     movq    %rax, 48(%rbp)          /* the first capability */
 
-    /* receive(inbox, buffer) */
+    /* receive(inbox, buffer, wait). The third argument says whether an
+     * empty letter box should hold us; this program has nothing better
+     * to do, so it waits. */
     movq    $3, %rax
     movq    %r13, %rdi
     movq    %rbp, %rsi
+    xorq    %rdx, %rdx
     syscall
     cmpq    $0, %rax
     jne     .Lwait                  /* nothing there yet */

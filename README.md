@@ -234,7 +234,7 @@ built binary.
   holds. `make relay` shows the whole arc: the courier is introduced to
   the agent, is handed a note read-write, and passes it on read-only by
   its own decision -- which the agent then runs into, enforced.
-* **The journal.** What has happened is a text object in the graph:
+* **The journal.** The log is a text object in the graph:
   program utterances (attributed by the kernel, never self-signed),
   processes ending, generations written, collections. The reference to
   it is read-only, so history can be read by anyone who holds it and
@@ -258,6 +258,20 @@ built binary.
   graph are taken over. The world comes back as it was left, including
   what programs held: after a reboot the courier passes its cargo on
   again, unprompted, and the journal shows it happening.
+* **The standard programs.** The system ships with five, started at
+  boot and standing in the graph, each doing one thing to whatever it
+  is pointed at: the agent reports what it can and cannot do, the
+  courier passes things on weakened, the clock keeps the time
+  somewhere, the cipher turns writing over (and back -- it is its own
+  inverse), the tally counts words and lines. A fresh system boots with
+  the clock already wired: "the time" sits in the graph, ticking, held
+  read-only -- a plain text object that one program keeps current. Two
+  system calls came with them: clock, which answers without any
+  capability because the time of day belongs to nobody, and a receive
+  that can decline to wait, because a clock has a clock to keep. All
+  five survive reboots with their delegations replayed, which has a
+  visible consequence: the cipher turns its text again on every boot,
+  because being handed something again means doing the job again.
 * M10 — booting real hardware from a USB stick
 
 ## A note on Secure Boot

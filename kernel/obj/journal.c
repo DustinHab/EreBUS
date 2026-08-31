@@ -26,7 +26,7 @@ bool journal_create(void)
     if (journal) return true;
     journal = obj_create(TYPE_TEXT, JOURNAL_BYTES, 0);
     if (!journal) return false;
-    obj_set_name(journal, "what has happened");
+    obj_set_name(journal, "log");
     return true;
 }
 

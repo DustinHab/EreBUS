@@ -59,7 +59,7 @@ static object *seed_graph(void)
     object *aside = obj_create(TYPE_LIST, 0, 2);
     if (!root || !notes || !idea || !raw || !aside) return NULL;
 
-    obj_set_name(root, "everything you hold");
+    obj_set_name(root, "home");
 
     static const char notes_text[] =
         "type here. this is an object, not a file.\n"
@@ -92,15 +92,15 @@ static object *seed_graph(void)
     obj_set_slot_name(root, 2, "some bytes");
 
     obj_set_slot(root, 3, aside, CAP_READ | CAP_WRITE);
-    obj_set_slot_name(root, 3, "another way round");
+    obj_set_slot_name(root, 3, "aside");
 
     /* The same text again: a different name, and readable only. */
     obj_set_slot(aside, 0, idea, CAP_READ);
-    obj_set_slot_name(aside, 0, "that text, read only");
+    obj_set_slot_name(aside, 0, "the idea, read only");
 
     /* And back where we began, which closes a loop. */
     obj_set_slot(aside, 1, root, CAP_READ);
-    obj_set_slot_name(aside, 1, "back to the start");
+    obj_set_slot_name(aside, 1, "back home");
 
     obj_release(notes);
     obj_release(idea);
@@ -109,17 +109,34 @@ static object *seed_graph(void)
     return root;
 }
 
-/* The programs that run outside the kernel, from user/programs.S. */
+/* The programs that run outside the kernel, from user/. */
 extern char user_hello[];
 extern char user_trespass[];
 extern char user_agent[];
 extern char user_courier[];
+extern char user_clock[];
+extern char user_cipher[];
+extern char user_tally[];
 
-/* The programs that stay running. hello and trespass make their point
- * and end; these two wait to be handed things -- and the courier, once
- * it can reach somebody, hands them on. */
-static object *agent_program;
-static object *courier_program;
+/* What the system ships with. hello and trespass make their point at
+ * start-up and end; these stay, each doing one thing to whatever it is
+ * pointed at: the agent reports, the courier passes on, the clock
+ * keeps the time somewhere, the cipher turns writing over, the tally
+ * counts. None of them can reach anything it was not handed. */
+static const struct {
+    const char *name;
+    char       *entry;
+    const char *petname;
+} standard[] = {
+    { "agent",   user_agent,   "agent" },
+    { "courier", user_courier, "courier" },
+    { "clock",   user_clock,   "clock" },
+    { "cipher",  user_cipher,  "cipher" },
+    { "tally",   user_tally,   "tally" },
+};
+#define STANDARD_COUNT ((u32)ARRAY_LEN(standard))
+
+static object *standard_obj[STANDARD_COUNT];
 
 /* The one capability the kernel keeps on the console port: the right to
  * take messages out of it. Programs get send-only copies. */
@@ -735,23 +752,24 @@ void kmain(eb_boot_info *bi)
                     proc_id(proc), proc_name(proc));
     }
 
-    /* The ones that stay. Each begins holding exactly what the other
-     * two held and can do nothing with it but wait -- there is no call
-     * either could make that would produce the name of anything else.
-     * What they end up able to touch is decided entirely from the
-     * outside, later, by pointing their program objects at things. */
-    process *agent = proc_create("agent", user_agent, console);
-    if (agent && proc_start(agent)) {
-        agent_program = proc_object(agent);
-        kprintf("proc: %llu (%s) waiting on its letter box, holding nothing else\n",
-                proc_id(agent), proc_name(agent));
-    }
-
-    process *courier = proc_create("courier", user_courier, console);
-    if (courier && proc_start(courier)) {
-        courier_program = proc_object(courier);
-        kprintf("proc: %llu (%s) waiting to pass things on\n",
-                proc_id(courier), proc_name(courier));
+    /* The ones that stay: the programs this system ships with. Each
+     * begins holding exactly what hello and trespass held -- a console
+     * and a letter box -- and can do nothing but wait; there is no call
+     * any of them could make that would produce the name of anything
+     * else. What each ends up able to touch is decided entirely from
+     * the outside, by pointing its program object at things. */
+    for (u32 i = 0; i < STANDARD_COUNT; i++) {
+        process *proc = proc_create(standard[i].name, standard[i].entry,
+                                    console);
+        if (!proc) {
+            kprintf("proc: could not create %s\n", standard[i].name);
+            continue;
+        }
+        if (proc_start(proc)) {
+            standard_obj[i] = proc_object(proc);
+            kprintf("proc: %llu (%s) waiting on its letter box\n",
+                    proc_id(proc), proc_name(proc));
+        }
     }
 
     obj_release(console);
@@ -853,17 +871,16 @@ void kmain(eb_boot_info *bi)
          * the record's place and petname in the graph are taken over.
          * A record with no successor is cleared: what happened is kept
          * by the journal, not by dead ends in the graph. */
-        object *heirs[2] = { agent_program, courier_program };
-        object *records[2] = { NULL, NULL };
-        bool placed[2] = { false, false };
+        object *records[STANDARD_COUNT] = { NULL };
+        bool placed[STANDARD_COUNT] = { false };
 
         for (u64 i = 0; i < obj_slots(root); i++) {
             object *s = obj_get_slot(root, i);
             if (!s || obj_type(s) != TYPE_PROGRAM || proc_is_running(s))
                 continue;
-            for (u32 k = 0; k < 2; k++)
-                if (heirs[k] && obj_name(s) && obj_name(heirs[k]) &&
-                    strcmp(obj_name(s), obj_name(heirs[k])) == 0)
+            for (u32 k = 0; k < STANDARD_COUNT; k++)
+                if (standard_obj[k] && obj_name(s) &&
+                    strcmp(obj_name(s), standard[k].name) == 0)
                     records[k] = s;
         }
 
@@ -872,21 +889,22 @@ void kmain(eb_boot_info *bi)
          * knows the new agent. Every replayed reference is also granted
          * again -- the slot is the record of the giving, and the giving
          * is done anew. */
-        for (u32 k = 0; k < 2; k++) {
-            if (!records[k] || !heirs[k]) continue;
+        for (u32 k = 0; k < STANDARD_COUNT; k++) {
+            if (!records[k] || !standard_obj[k]) continue;
             for (u64 j = 0; j < obj_slots(records[k]); j++) {
                 object *t = obj_get_slot(records[k], j);
                 if (!t) continue;
-                for (u32 k2 = 0; k2 < 2; k2++)
-                    if (t == records[k2] && heirs[k2]) t = heirs[k2];
+                for (u32 k2 = 0; k2 < STANDARD_COUNT; k2++)
+                    if (t == records[k2] && standard_obj[k2])
+                        t = standard_obj[k2];
 
                 u32 rr = obj_slot_rights(records[k], j);
-                if (j >= obj_slots(heirs[k]) &&
-                    !obj_grow_slots(heirs[k], j + 1)) break;
-                obj_set_slot(heirs[k], j, t, rr);
-                obj_set_slot_name(heirs[k], j,
+                if (j >= obj_slots(standard_obj[k]) &&
+                    !obj_grow_slots(standard_obj[k], j + 1)) break;
+                obj_set_slot(standard_obj[k], j, t, rr);
+                obj_set_slot_name(standard_obj[k], j,
                                   obj_slot_name(records[k], j));
-                proc_grant(heirs[k], t, rr);
+                proc_grant(standard_obj[k], t, rr);
             }
         }
 
@@ -899,9 +917,10 @@ void kmain(eb_boot_info *bi)
             if (!s || obj_type(s) != TYPE_PROGRAM || proc_is_running(s))
                 continue;
             bool matched = false;
-            for (u32 k = 0; k < 2; k++) {
-                if (s != records[k] || !heirs[k]) continue;
-                obj_set_slot(root, i, heirs[k], obj_slot_rights(root, i));
+            for (u32 k = 0; k < STANDARD_COUNT; k++) {
+                if (s != records[k] || !standard_obj[k]) continue;
+                obj_set_slot(root, i, standard_obj[k],
+                             obj_slot_rights(root, i));
                 placed[k] = true;
                 matched = true;
             }
@@ -911,18 +930,52 @@ void kmain(eb_boot_info *bi)
             }
         }
 
-        const char *what_for[2] = { "a program, waiting",
-                                    "a courier, waiting" };
-        for (u32 k = 0; k < 2; k++) {
-            if (!heirs[k] || placed[k]) continue;
+        for (u32 k = 0; k < STANDARD_COUNT; k++) {
+            if (!standard_obj[k] || placed[k]) continue;
 
             u64 n = obj_slots(root), spot = n;
             for (u64 i = 0; i < n; i++)
                 if (!obj_get_slot(root, i)) { spot = i; break; }
             if (spot == n && !obj_grow_slots(root, n + 1)) continue;
 
-            obj_set_slot(root, spot, heirs[k], CAP_READ | CAP_GRANT);
-            obj_set_slot_name(root, spot, what_for[k]);
+            obj_set_slot(root, spot, standard_obj[k], CAP_READ | CAP_GRANT);
+            obj_set_slot_name(root, spot, standard[k].petname);
+        }
+
+        /* Out of the box, the clock has somewhere to write: a fresh
+         * system boots with "the time" in the graph, ticking, held by
+         * the person read-only. Not a special object -- a plain text
+         * that one program keeps current, and the wiring is ordinary
+         * too: a slot on the clock's program object, granted like any
+         * other giving. Cutting that reference stops the clock; on a
+         * restored graph the replay above brings the wiring back on
+         * its own, which is why this runs only for a fresh start. */
+        if (!session) {
+            object *clock_obj = NULL;
+            for (u32 k = 0; k < STANDARD_COUNT; k++)
+                if (strcmp(standard[k].name, "clock") == 0)
+                    clock_obj = standard_obj[k];
+
+            if (clock_obj) {
+                object *face = obj_create(TYPE_TEXT, 16, 0);
+                if (face) {
+                    obj_set_name(face, "the time");
+
+                    u64 n = obj_slots(root), spot = n;
+                    for (u64 i = 0; i < n; i++)
+                        if (!obj_get_slot(root, i)) { spot = i; break; }
+                    if (spot < n || obj_grow_slots(root, n + 1)) {
+                        obj_set_slot(root, spot, face, CAP_READ);
+                        obj_set_slot_name(root, spot, "the time");
+                    }
+
+                    obj_set_slot(clock_obj, 0, face,
+                                 CAP_READ | CAP_WRITE);
+                    obj_set_slot_name(clock_obj, 0, "writes here");
+                    proc_grant(clock_obj, face, CAP_READ | CAP_WRITE);
+                    obj_release(face);
+                }
+            }
         }
 
         /* The journal. A restored graph brings its own back, found by
@@ -933,7 +986,7 @@ void kmain(eb_boot_info *bi)
         for (u64 i = 0; i < obj_slots(root); i++) {
             object *s = obj_get_slot(root, i);
             const char *nm = obj_slot_name(root, i);
-            if (s && nm && strcmp(nm, "what has happened") == 0 &&
+            if (s && nm && strcmp(nm, "log") == 0 &&
                 obj_type(s) == TYPE_TEXT) {
                 journal_adopt(s);
                 break;
@@ -945,7 +998,7 @@ void kmain(eb_boot_info *bi)
                 if (!obj_get_slot(root, i)) { at = i; break; }
             if (at < n || obj_grow_slots(root, n + 1)) {
                 obj_set_slot(root, at, journal_object(), CAP_READ);
-                obj_set_slot_name(root, at, "what has happened");
+                obj_set_slot_name(root, at, "log");
             }
         }
         journal_says("system", session ? "started; everything is as it was left"

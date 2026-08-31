@@ -40,10 +40,11 @@ user_courier:
     movq    %rax, 16(%rbp)          /* words[0]: the rights that came */
     movq    %rax, 48(%rbp)          /* the capability */
 
-    /* receive(inbox, buffer) */
+    /* receive(inbox, buffer, wait) -- and this program waits. */
     movq    $3, %rax
     movq    %r13, %rdi
     movq    %rbp, %rsi
+    xorq    %rdx, %rdx
     syscall
     cmpq    $0, %rax
     jne     .Lwait
