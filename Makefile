@@ -110,7 +110,7 @@ KERNEL := $(BUILD)/kernel.elf
 IMAGE  := $(BUILD)/esp.img
 STORE  := $(BUILD)/store.img
 
-.PHONY: all run shot fault wx stack trace-stack desktop trace-input persist agent relay \
+.PHONY: all run shot fault wx stack trace-stack desktop trace-input persist agent relay sweep \
         look debug clean info
 all: $(IMAGE)
 
@@ -164,9 +164,16 @@ $(STORE):
 	@mkdir -p $(BUILD)
 	@dd if=/dev/zero of=$@ bs=1M count=32 status=none
 
-$(BUILD)/OVMF_VARS.fd: $(OVMF_VARS)
+# Copied fresh on every run, deliberately. The firmware writes boot
+# entries into its variable store, and a stale entry pointing at an
+# image that has since been rebuilt boots into nothing: empty log,
+# black screen, looks exactly like a kernel crash and is not one. That
+# hunt has been run often enough.
+$(BUILD)/OVMF_VARS.fd: $(OVMF_VARS) FORCE
 	@mkdir -p $(BUILD)
 	@cp $(OVMF_VARS) $@
+
+FORCE:
 
 # --- running ----------------------------------------------------------
 QEMU := qemu-system-x86_64 \
@@ -363,6 +370,23 @@ relay: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 	@grep -ao 'user: .*' $(BUILD)/serial.log | sed 's/^user: //' | \
 	 sed 's/[[:space:]]*$$//' | grep -v '^$$' | sed 's/^/    /'
 	@echo "  DONE    $(BUILD)/screen-relay.png"
+
+# What the collector costs, measured. Rebuilds with the stress harness
+# (ten thousand unreachable rings of three), boots headless, and prints
+# the numbers -- including how long the machine stood still, because the
+# sweep runs with interrupts off and that duration should be a printed
+# fact, not a guess. Objects are cleaned away on both sides exactly as
+# in "fault", and for the same reason.
+sweep:
+	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
+	@$(MAKE) --no-print-directory EXTRA=-DEREBUS_STRESS_COLLECT $(IMAGE)
+	@rm -f $(STORE)
+	@$(MAKE) --no-print-directory $(STORE) $(BUILD)/OVMF_VARS.fd
+	@{ sleep 14; echo quit; } | \
+	  $(QEMU) -display none -monitor stdio \
+	          -serial file:$(BUILD)/serial.log >/dev/null 2>&1 || true
+	@grep -ao 'stress: .*' $(BUILD)/serial.log | sed 's/[[:space:]]*$$//'
+	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
 
 debug: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
 	$(QEMU) -serial stdio -s -S

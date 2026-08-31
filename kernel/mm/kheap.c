@@ -58,6 +58,7 @@ _Static_assert(sizeof(block) % ALIGN_TO == 0,
                "block header must be a multiple of the alignment");
 
 static block *first;
+static block *rover;            /* where the last search stopped */
 static virt_addr heap_end;      /* first address past the mapped window */
 static u64 used_bytes, free_bytes;
 
@@ -136,6 +137,7 @@ static bool grow(u64 need)
 void kheap_init(void)
 {
     first = NULL;
+    rover = NULL;
     heap_end = KHEAP_BASE;
     used_bytes = free_bytes = 0;
 
@@ -176,17 +178,33 @@ void *kmalloc(u64 size)
      * things down made it a lie. */
     u64 flags = irq_save();
 
+    /* Next fit, not first fit. Starting every search at the head means
+     * every allocation re-walks every block already handed out, and the
+     * total work grows with the square of the heap's population --
+     * measured, not imagined: sixty thousand allocations turned the
+     * collector's stress test into a hang before the collector ever
+     * ran. Starting where the last search stopped makes the common case
+     * one step, exactly the trick the frame allocator's hint already
+     * plays. */
     for (u32 attempt = 0; attempt < 2; attempt++) {
-        for (block *b = first; b; b = b->next) {
-            check(b, "allocation");
-            if (!b->free || b->size < size) continue;
+        block *start = rover ? rover : first;
+        block *b = start;
+        bool wrapped = false;
 
-            split(b, size);
-            b->free = 0;
-            used_bytes += b->size;
-            free_bytes -= b->size;
-            irq_restore(flags);
-            return (u8 *)b + sizeof(block);
+        while (b) {
+            check(b, "allocation");
+            if (b->free && b->size >= size) {
+                split(b, size);
+                b->free = 0;
+                used_bytes += b->size;
+                free_bytes -= b->size;
+                rover = b->next ? b->next : first;
+                irq_restore(flags);
+                return (u8 *)b + sizeof(block);
+            }
+            b = b->next;
+            if (!b && !wrapped) { b = first; wrapped = true; }
+            if (b == start) break;
         }
         if (attempt == 0 && !grow(size)) break;
     }
@@ -213,6 +231,8 @@ static void merge_forward(block *b)
     if ((u8 *)b + sizeof(block) + b->size != (u8 *)n) return;
 
     check(n, "merge");
+    if (rover == n) rover = b;   /* the rover must never point at a
+                                  * header that just stopped existing */
     b->size += sizeof(block) + n->size;
     b->next = n->next;
     if (n->next) n->next->prev = b;

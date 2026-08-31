@@ -622,6 +622,66 @@ void kmain(eb_boot_info *bi)
     else
         panic("the cycle collector failed its own test");
 
+#ifdef EREBUS_STRESS_COLLECT
+    /* What the collector costs, measured rather than assumed.
+     *
+     * It runs with interrupts off from the first count to the last
+     * free, so its duration is not an average to be smoothed over
+     * somewhere -- it is exactly how long the machine stands still.
+     * That number should be known, not guessed at, and this makes it a
+     * number the build can print. */
+    {
+        u64 t0 = time_ns();
+        u64 got = obj_collect();
+        u64 t1 = time_ns();
+        kprintf("stress: sweep of the boot graph alone: %llu us, "
+                "%llu swept\n", (t1 - t0) / 1000, got);
+
+        /* Rings of three, let go of the moment they close. Counting
+         * alone can never free a single one of them. */
+        const u64 rings = 10000;
+        u64 heap0 = kheap_bytes_used();
+        u64 built = 0;
+        t0 = time_ns();
+        for (u64 r = 0; r < rings; r++) {
+            object *a = obj_create(TYPE_LIST, 0, 1);
+            object *b = obj_create(TYPE_LIST, 0, 1);
+            object *c = obj_create(TYPE_LIST, 0, 1);
+            if (!a || !b || !c) {
+                kprintf("stress: the heap ran out at ring %llu\n", r);
+                break;
+            }
+            obj_set_slot(a, 0, b, CAP_READ);
+            obj_set_slot(b, 0, c, CAP_READ);
+            obj_set_slot(c, 0, a, CAP_READ);
+            obj_release(a);
+            obj_release(b);
+            obj_release(c);
+            built++;
+        }
+        t1 = time_ns();
+        kprintf("stress: built %llu rings of three in %llu ms, "
+                "%llu KiB of heap now unreachable\n",
+                built, (t1 - t0) / 1000000,
+                (kheap_bytes_used() - heap0) / 1024);
+
+        t0 = time_ns();
+        got = obj_collect();
+        t1 = time_ns();
+        kprintf("stress: swept %llu objects in %llu ms -- the machine "
+                "stood still for exactly that long\n",
+                got, (t1 - t0) / 1000000);
+
+        t0 = time_ns();
+        got = obj_collect();
+        t1 = time_ns();
+        kprintf("stress: swept again: %llu objects, %llu us; the heap "
+                "kept %llu bytes of the exercise\n",
+                got, (t1 - t0) / 1000,
+                kheap_bytes_used() - heap0);
+    }
+#endif
+
     kprintf("sched: %llu threads, %llu context switches so far\n",
             sched_threads(), sched_switches());
 

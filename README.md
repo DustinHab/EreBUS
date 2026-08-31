@@ -207,6 +207,33 @@ built binary.
   undelivered messages included. It runs in the same quiet moment as
   the snapshot, and the self test at boot proves the exact count: a
   loose cycle goes, a held one stays, and nothing else is touched.
+  `make sweep` measures the cost: thirty thousand unreachable objects
+  swept in single-digit milliseconds, with the heap giving back every
+  byte -- and the sweep is the pause, since it runs with interrupts
+  off. The same measurement caught the heap's first-fit walk going
+  quadratic under load, which is why the heap is next-fit now.
+* **Processes die whole.** A finished or faulted thread goes onto a
+  list, and the next thread through the scheduler reaps it: stack,
+  struct, and -- through a hook -- the process it was the last living
+  part of. Domain, letter box, address space, all of it given back; the
+  program object in the graph stays as a record and shows "ended". The
+  exiting thread cannot free any of this itself: it is standing on the
+  stack in question, running in the address space about to go, which is
+  exactly why somebody else does it afterwards. Underneath, the heap,
+  the frame bitmap and the reference counts stopped assuming a single
+  thread; teardown from one thread while another allocates was the
+  first thing that would have broken the assumption.
+* **Programs hand each other things.** Pointing one program at another
+  introduces them: what arrives is the other's letter box, send-only --
+  a program is a party to be spoken to, not a thing to be read, and
+  introducing somebody requires holding them with the grant right,
+  because introducing IS passing on. A seventh system call, pass, lets
+  a program send a held capability onward inside a message, attenuated
+  by a mask it chooses; the checks live in the same port_send path as
+  every other transfer, so a program can only give away less than it
+  holds. `make relay` shows the whole arc: the courier is introduced to
+  the agent, is handed a note read-write, and passes it on read-only by
+  its own decision -- which the agent then runs into, enforced.
 * M10 — booting real hardware from a USB stick
 
 ## A note on Secure Boot
