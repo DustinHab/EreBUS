@@ -16,11 +16,14 @@
 #include <eb/fb.h>
 #include <eb/fmt.h>
 #include <eb/gdt.h>
+#include <eb/kheap.h>
 #include <eb/panic.h>
 #include <eb/pic.h>
+#include <eb/pmm.h>
 #include <eb/serial.h>
 #include <eb/time.h>
 #include <eb/trap.h>
+#include <eb/vmm.h>
 #include <common/bootinfo.h>
 
 #define EREBUS_VERSION "0.1"
@@ -322,11 +325,71 @@ void kmain(eb_boot_info *bi)
                 "is not responding\n");
     }
 
+    /* --- memory ---------------------------------------------------- */
+
+    pmm_init(bi);
+    kprintf("pmm:  ");
+    print_size(pmm_total_frames() * PAGE_SIZE);
+    kprintf(" managed in %llu frames, ", pmm_total_frames());
+    print_size(pmm_free_frames() * PAGE_SIZE);
+    kprintf(" free\n");
+
+    if (pmm_selftest())
+        kprintf("pmm:  self test passed\n");
+    else
+        panic("the frame allocator failed its own test");
+
+    vmm_init(bi);
+
+    vmm_protections p = vmm_active_protections();
+    kprintf("vmm:  protections");
+    if (p.nx)   kprintf(" nx");
+    if (p.wp)   kprintf(" write-protect");
+    if (p.smep) kprintf(" smep");
+    if (p.smap) kprintf(" smap");
+    if (p.umip) kprintf(" umip");
+    if (!p.nx && !p.smep && !p.smap) kprintf(" none");
+    kprintf("\n");
+
+    if (vmm_selftest())
+        kprintf("vmm:  self test passed, W^X holds across the kernel image\n");
+    else
+        panic("the page tables are not what they were meant to be");
+
+    kheap_init();
+    if (kheap_selftest()) {
+        kprintf("heap: ");
+        print_size(kheap_mapped());
+        kprintf(" window mapped, self test passed\n");
+    } else {
+        panic("the kernel heap failed its own test");
+    }
+
+    u64 before_reclaim = pmm_free_frames();
+    vmm_reclaim_loader_tables(bi);
+    kprintf("pmm:  reclaimed ");
+    print_size((pmm_free_frames() - before_reclaim) * PAGE_SIZE);
+    kprintf(" of loader page tables\n");
+
     dump_ranges(bi);
 
-#ifdef EREBUS_TEST_FAULT
-    /* Built only by "make fault": writes to an address that is not
-     * mapped, to show that the fault path reports rather than reboots. */
+#if defined(EREBUS_TEST_FAULT) && EREBUS_TEST_FAULT == 2
+    /* Built by "make wx". Writes into the kernel's own code.
+     *
+     * This is the test that says whether W^X is real. The page is
+     * mapped and present, so nothing is missing; the write must fail
+     * purely because the page is read-only and CR0.WP makes that bind
+     * ring 0 as well. Without that bit the store would quietly succeed
+     * and the kernel would have just rewritten its own instructions. */
+    kprintf("kern: protection test, writing into the kernel's own code "
+            "at %p\n", (void *)__kernel_start);
+    volatile u8 *code = (volatile u8 *)__kernel_start;
+    *code = 0x90;
+    kprintf("kern: the write went through -- W^X is NOT holding\n");
+
+#elif defined(EREBUS_TEST_FAULT)
+    /* Built by "make fault": writes to an address that is not mapped,
+     * to show that the fault path reports rather than reboots. */
     kprintf("kern: fault test, writing to an unmapped address\n");
     volatile u32 *bad = (volatile u32 *)0x0000DEADBEEF000ULL;
     *bad = 0x1234;

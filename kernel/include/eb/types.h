@@ -39,9 +39,16 @@ typedef _Bool              bool;
 
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
 
-/* Provided by the linker script, bracketing the kernel image. */
+/* Provided by the linker script. The section markers are what lets the
+ * kernel map itself with different permissions per section instead of
+ * one permissive block: code executable but not writable, constants
+ * neither, data writable but never executable. */
 extern char __kernel_start[];
 extern char __kernel_end[];
+extern char __text_end[];
+extern char __rodata_start[];
+extern char __rodata_end[];
+extern char __data_start[];
 extern char __bss_start[];
 extern char __bss_end[];
 

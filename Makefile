@@ -76,6 +76,9 @@ KERN_C   := kernel/main.c \
             kernel/hw/pic.c \
             kernel/hw/time.c \
             kernel/gfx/fb.c \
+            kernel/mm/pmm.c \
+            kernel/mm/vmm.c \
+            kernel/mm/kheap.c \
             kernel/arch/x86_64/gdt.c \
             kernel/arch/x86_64/trap.c
 KERN_S   := kernel/arch/x86_64/start.S \
@@ -89,7 +92,7 @@ LOADER := $(BUILD)/BOOTX64.EFI
 KERNEL := $(BUILD)/kernel.elf
 IMAGE  := $(BUILD)/esp.img
 
-.PHONY: all run shot fault debug clean info
+.PHONY: all run shot fault wx debug clean info
 all: $(IMAGE)
 
 # --- font -------------------------------------------------------------
@@ -172,10 +175,21 @@ shot: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 # to discover by accident.
 fault:
 	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
-	@$(MAKE) --no-print-directory EXTRA=-DEREBUS_TEST_FAULT shot
+	@$(MAKE) --no-print-directory EXTRA=-DEREBUS_TEST_FAULT=1 shot
 	@mv $(BUILD)/screen.png $(BUILD)/screen-fault.png
 	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
 	@echo "  DONE    $(BUILD)/screen-fault.png"
+
+# The other half of the same idea: instead of touching memory that is
+# not there, write to memory that is there but read-only. If W^X and
+# CR0.WP are doing their job the store faults; if they are not, it
+# silently succeeds and the kernel has rewritten its own code.
+wx:
+	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
+	@$(MAKE) --no-print-directory EXTRA=-DEREBUS_TEST_FAULT=2 shot
+	@mv $(BUILD)/screen.png $(BUILD)/screen-wx.png
+	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
+	@echo "  DONE    $(BUILD)/screen-wx.png"
 
 debug: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 	$(QEMU) -serial stdio -s -S

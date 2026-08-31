@@ -61,10 +61,24 @@ From Windows, out of the project directory:
 the system. No foreign code between firmware and kernel also means no
 foreign code in the trusted base of a security-focused system.
 
-**Kernel fixed at 2 MiB, identity mapped.** UEFI maps everything one to
-one before `ExitBootServices`, so virtual and physical addresses agree.
-That keeps start-up traceable. The move into the upper half of the
-address space comes once we build our own page tables.
+**Kernel in the upper half, at -2 GiB.** The lower half belongs to user
+processes: every address space maps the kernel into the same high window
+and a different program into the low one, so a system call needs no
+change of page tables. The loader builds the first tables and jumps
+straight to the virtual entry point, which keeps the kernel's own entry
+path trivial — it wakes up already living at its own addresses.
+
+Done at milestone 3 rather than at user mode, deliberately. Retrofitting
+the split later would have touched the linker script, the loader and
+every absolute address in the tree; at that point there were seven
+source files, and three milestones on there would have been thirty.
+
+**A bitmap frame allocator, not a free list.** A free list stores its
+links inside the free pages themselves, so every allocation writes to
+memory that by definition belongs to nobody — fast, and a place where a
+stray write stays invisible until the allocator hands the same frame out
+twice. The bitmap keeps its bookkeeping in one region that can be
+checked, at a cost of one bit per frame: 16 KiB per gigabyte of memory.
 
 **Font from GNU Unifont, embedded at build time.** Exactly 8x16, no
 runtime rasteriser, no font file to read. Covers Latin plus box drawing
@@ -105,7 +119,13 @@ built binary.
   vectors, readable crash reports with register dump and call trace,
   8259 remapped, PIT tick, TSC calibrated against the PIT, timestamped
   log lines, and two independent clocks checking each other at start-up.
-* M3 — page frame allocator, our own page tables, kernel heap, NX/SMEP/SMAP
+* **M3 — done.** Kernel moved into the upper half with a direct map of
+  physical memory; bitmap frame allocator with frames zeroed before
+  reuse; the kernel's own page tables, mapped per section, replacing the
+  loader's flat ones and dropping the identity mapping with them; NX,
+  CR0.WP, SMEP, SMAP and UMIP switched on; a kernel heap that clears
+  blocks on release. Each layer verifies itself at start-up, and
+  `make wx` proves W^X by trying to write into the kernel's own code.
 * M4 — object store and capability table
 * M5 — threads, scheduling, message passing
 * M6 — user mode (ring 3), processes, separate address spaces
