@@ -44,5 +44,7 @@ i32 fb_text_width(const char *s, i32 scale);
 void fbcon_init(color fg, color bg, i32 scale);
 void fbcon_putc(char c);
 void fbcon_set_origin(i32 x, i32 y, i32 w, i32 h);
+i32  fbcon_cols(void);
+i32  fbcon_rows(void);
 
 #endif /* EB_FB_H */

@@ -1,13 +1,17 @@
 /*
  * main.c -- Einstieg in den Erebus-Kernel.
  *
- * Meilenstein 1: Übergabe vom Lader prüfen, Bildschirm und serielle
- * Schnittstelle in Betrieb nehmen, den vorgefundenen Rechner beschreiben.
- * Noch keine Unterbrechungen, keine Speicherverwaltung, keine Prozesse --
- * das kommt der Reihe nach.
+ * Meilenstein 1: Übergabe vom Lader prüfen, serielle Schnittstelle und
+ * Bildschirm in Betrieb nehmen, den vorgefundenen Rechner protokollieren.
+ * Noch keine Unterbrechungen, keine Speicherverwaltung, keine Prozesse.
+ *
+ * Die Ausgabe ist bewusst ein knappes Startprotokoll und keine
+ * Vorführung: eine Zeile je Erkenntnis, vorne die Baugruppe, die sie
+ * gemeldet hat. Ausführliches geht nur auf die serielle Schnittstelle.
  */
 #include <eb/types.h>
 #include <eb/io.h>
+#include <eb/cpu.h>
 #include <eb/fb.h>
 #include <eb/fmt.h>
 #include <eb/panic.h>
@@ -16,17 +20,8 @@
 
 #define EREBUS_VERSION "0.1"
 
-/* Farbwelt: dunkel, ruhig, wenige Akzente. */
-#define C_BG      RGB( 14,  16,  22)
-#define C_HEAD_A  RGB( 26,  31,  44)
-#define C_HEAD_B  RGB( 16,  19,  27)
-#define C_ACCENT  RGB(122, 172, 255)
-#define C_TEXT    RGB(208, 214, 226)
-#define C_DIM     RGB(118, 128, 148)
-
-/* Alle Abstände hängen an dieser Zahl, damit das Bild auf 1024x768
- * genauso aufgeht wie auf einem 4K-Panel. */
-static i32 ui;
+#define C_BG   RGB(  0,   0,   0)
+#define C_TEXT RGB(198, 198, 198)
 
 static const char *mem_type_name(u32 t)
 {
@@ -58,148 +53,169 @@ static void print_size(u64 bytes)
     else        kprintf("%llu,%llu %s", whole, frac, unit[u]);
 }
 
-static i32 header_height(void) { return 2 * 24 * ui + 54 * ui; }
-static i32 footer_height(void) { return 28 * ui; }
-
-static void draw_chrome(void)
+static void log_cpu(void)
 {
-    i32 w = (i32)fb_width(), h = (i32)fb_height();
-    i32 pad = 24 * ui;
-    i32 head = header_height();
+    cpu_info cpu;
+    cpu_detect(&cpu);
 
-    fb_clear(C_BG);
-    fb_gradient(0, 0, w, head, C_HEAD_A, C_HEAD_B);
-    fb_rect(0, head, w, ui, C_ACCENT);
+    if (cpu.brand[0]) kprintf("cpu0: %s\n", cpu.brand);
+    else              kprintf("cpu0: %s\n", cpu.vendor);
 
-    fb_text_scaled(pad, pad, "EREBUS", C_TEXT, 2 * ui);
+    kprintf("cpu0: Familie %u, Modell %u, Stufe %u; "
+            "%u Bit physisch, %u Bit virtuell\n",
+            cpu.family, cpu.model, cpu.stepping,
+            cpu.phys_bits, cpu.virt_bits);
 
-    i32 tw = fb_text_width("EREBUS", 2 * ui);
-    fb_text_scaled(pad + tw + 8 * ui, pad + 16 * ui,
-                   "Version " EREBUS_VERSION, C_DIM, ui);
+    /* Nur melden, was da ist -- eine Liste mit lauter "nein" liest
+     * niemand. Was fehlt, faellt beim Einrichten der Sperren auf. */
+    kprintf("cpu0: Merkmale");
+    if (cpu.nx)     kprintf(" NX");
+    if (cpu.smep)   kprintf(" SMEP");
+    if (cpu.smap)   kprintf(" SMAP");
+    if (cpu.umip)   kprintf(" UMIP");
+    if (cpu.pge)    kprintf(" PGE");
+    if (cpu.pse1g)  kprintf(" 1G-Seiten");
+    if (cpu.rdrand) kprintf(" RDRAND");
+    if (cpu.rdseed) kprintf(" RDSEED");
+    if (cpu.x2apic) kprintf(" x2APIC");
+    else if (cpu.apic) kprintf(" APIC");
+    if (cpu.invariant_tsc) kprintf(" gleichlaufender TSC");
+    kprintf("\n");
 
-    fb_text_scaled(pad, pad + 38 * ui,
-                   "objektbasiert · rechtegebunden · kein Unix", C_DIM, ui);
+    /* Was für die Härtung fehlt, gehört ins Protokoll -- nicht als
+     * Fehler, aber sichtbar. */
+    if (!cpu.nx || !cpu.smep || !cpu.smap) {
+        kprintf("cpu0: ohne");
+        if (!cpu.nx)   kprintf(" NX");
+        if (!cpu.smep) kprintf(" SMEP");
+        if (!cpu.smap) kprintf(" SMAP");
+        kprintf(" -- Schutzsperren nur teilweise verfügbar\n");
+    }
 
-    fb_rect(0, h - footer_height(), w, footer_height(), C_HEAD_A);
-    fb_text_scaled(pad, h - footer_height() + 6 * ui,
-                   "Meilenstein 1 — Übergabe, Bild, Speicherkarte",
-                   C_DIM, ui);
+    if (cpu.hypervisor)
+        kprintf("cpu0: virtualisierte Umgebung erkannt\n");
 }
 
-/* Vollständige Speicherkarte, nur aufs Kabel -- 122 Zeilen will man
- * nicht auf dem Bildschirm haben, aber beim Prüfen braucht man sie. */
+/* Vollständige Speicherkarte, nur aufs Kabel -- über hundert Zeilen
+ * will man nicht auf dem Bildschirm haben, beim Prüfen aber schon. */
 static void dump_ranges(const eb_boot_info *bi)
 {
     const eb_mem_range *r = (const eb_mem_range *)(virt_addr)bi->mem_ranges;
 
     kout_mute_screen(true);
-    kprintf("\n--- vollständige Speicherkarte (%llu Bereiche) ---\n",
-            bi->mem_count);
+    kprintf("\nvollständige Speicherkarte, %llu Bereiche:\n", bi->mem_count);
     for (u64 i = 0; i < bi->mem_count; i++) {
-        kprintf("  %3llu  %016llx - %016llx  %-11s  ",
+        kprintf("  %3llu  %016llx-%016llx  %-11s  ",
                 i, r[i].base, r[i].base + r[i].pages * PAGE_SIZE,
                 mem_type_name(r[i].type));
         print_size(r[i].pages * PAGE_SIZE);
         kprintf("\n");
     }
-    kprintf("--- Ende der Speicherkarte ---\n\n");
+    kprintf("\n");
     kout_mute_screen(false);
+}
+
+static void log_memory(const eb_boot_info *bi)
+{
+    const eb_mem_range *r = (const eb_mem_range *)(virt_addr)bi->mem_ranges;
+    u64 by_type[8] = { 0 }, count[8] = { 0 };
+    u64 largest = 0, largest_at = 0;
+
+    for (u64 i = 0; i < bi->mem_count; i++) {
+        u32 t = r[i].type < 8 ? r[i].type : 7;
+        u64 bytes = r[i].pages * PAGE_SIZE;
+        by_type[t] += bytes;
+        count[t]++;
+        if (r[i].type == EB_MEM_FREE && bytes > largest) {
+            largest = bytes;
+            largest_at = r[i].base;
+        }
+    }
+
+    kprintf("mem:  ");
+    print_size(by_type[EB_MEM_FREE]);
+    kprintf(" frei in %llu von %llu Bereichen\n",
+            count[EB_MEM_FREE], bi->mem_count);
+
+    kprintf("mem:  größter zusammenhängender Block ");
+    print_size(largest);
+    kprintf(" bei %p\n", (void *)(virt_addr)largest_at);
+
+    kprintf("mem:  Kernel %p-%p (", (void *)__kernel_start,
+            (void *)__kernel_end);
+    print_size(bi->kernel_size);
+    kprintf("), Lader ");
+    print_size(by_type[EB_MEM_LOADER]);
+    kprintf(", ACPI ");
+    print_size(by_type[EB_MEM_ACPI]);
+    kprintf("\n");
+
+    /* Die grossen reservierten Bereiche sind Adressraum fuer Geraete,
+     * nicht belegter Arbeitsspeicher. Ohne diesen Hinweis liest sich
+     * die Zahl wie ein Fehler. */
+    kprintf("mem:  ");
+    print_size(by_type[EB_MEM_RESERVED] + by_type[EB_MEM_MMIO]);
+    kprintf(" reservierter Adressraum für Firmware und Geräte\n");
 }
 
 void kmain(eb_boot_info *bi)
 {
     /* Zuerst die serielle Schnittstelle: sie funktioniert auch dann,
      * wenn mit dem Bildpuffer etwas nicht stimmt. */
-    serial_init();
-    if (serial_present()) kout_add_sink(serial_putc);
-
-    kprintf("\n\nErebus %s — Kernel gestartet\n", EREBUS_VERSION);
+    bool com = serial_init();
+    if (com) kout_add_sink(serial_putc);
 
     /* Die Übergabe prüfen, bevor wir irgendetwas daraus lesen. Ein
      * falsches Magic heißt: Lader und Kernel passen nicht zusammen. */
     if (!bi) {
-        kprintf("FEHLER: keine Übergabedaten (Zeiger ist null)\n");
+        kprintf("\nboot: keine Übergabedaten, Zeiger ist null\n");
         cpu_stop();
     }
     if (bi->magic != EREBUS_BOOT_MAGIC) {
-        kprintf("FEHLER: Übergabe unerwartet — Magic 0x%08x statt 0x%08x\n",
+        kprintf("\nboot: fremde Übergabe, Kennung %08x statt %08x\n",
                 bi->magic, EREBUS_BOOT_MAGIC);
         cpu_stop();
     }
     if (bi->version != EREBUS_BOOT_VERSION) {
-        kprintf("FEHLER: Lader spricht Version %u, Kernel erwartet %u\n",
+        kprintf("\nboot: Lader spricht Fassung %u, Kernel erwartet %u\n",
                 bi->version, EREBUS_BOOT_VERSION);
         cpu_stop();
     }
 
-    /* Bildschirm in Betrieb nehmen und die Konsole daraufsetzen. */
+    /* Bildschirm übernehmen und die Konsole daraufsetzen. */
     fb_init(bi);
-    ui = fb_width() >= 2400 ? 3 : (fb_width() >= 1500 ? 2 : 1);
-    draw_chrome();
+    fb_clear(C_BG);
 
-    i32 pad = 24 * ui;
-    i32 top = header_height() + 16 * ui;
-    fbcon_set_origin(pad, top,
-                     (i32)fb_width() - 2 * pad,
-                     (i32)fb_height() - top - footer_height() - 8 * ui);
-    fbcon_init(C_TEXT, C_BG, ui);
+    i32 m = (i32)fb_width() >= 1500 ? 16 : 8;
+    fbcon_set_origin(m, m,
+                     (i32)fb_width() - 2 * m, (i32)fb_height() - 2 * m);
+    fbcon_init(C_TEXT, C_BG, 0);
     kout_add_sink(fbcon_putc);
 
-    /* Ab hier geht jede Ausgabe an beide Senken. */
-    kprintf("Übergabe vom Lader gelesen und geprüft.\n\n");
+    kprintf("\n\nErebus %s (x86_64)\n\n", EREBUS_VERSION);
 
-    kprintf("Bildschirm\n");
-    kprintf("  %-14s%u x %u, %u Pixel pro Zeile\n", "Auflösung",
-            bi->fb_width, bi->fb_height, bi->fb_stride);
-    kprintf("  %-14s%p, ", "Puffer", (void *)(virt_addr)bi->fb_base);
+    kprintf("boot: Übergabe vom Lader geprüft, Fassung %u\n", bi->version);
+
+    log_cpu();
+    log_memory(bi);
+
+    kprintf("fb0:  %ux%u, 32 Bit %s, ", bi->fb_width, bi->fb_height,
+            bi->fb_format == EB_FB_RGBX8888 ? "RGBX" : "BGRX");
     print_size(bi->fb_size);
-    kprintf("\n");
-    kprintf("  %-14s%s\n\n", "Format",
-            bi->fb_format == EB_FB_RGBX8888 ? "RGBX8888" : "BGRX8888");
+    kprintf(" bei %p\n", (void *)(virt_addr)bi->fb_base);
+    kprintf("fb0:  Textkonsole %dx%d Zeichen\n", fbcon_cols(), fbcon_rows());
 
-    kprintf("Kernel\n");
-    kprintf("  %-14s%p bis %p\n", "Abbild",
-            (void *)__kernel_start, (void *)__kernel_end);
-    kprintf("  %-14s", "belegt");
-    print_size(bi->kernel_size);
-    kprintf("\n");
-    kprintf("  %-14s%p\n\n", "ACPI-Wurzel", (void *)(virt_addr)bi->acpi_rsdp);
+    if (bi->acpi_rsdp)
+        kprintf("acpi: RSDP bei %p\n", (void *)(virt_addr)bi->acpi_rsdp);
+    else
+        kprintf("acpi: kein RSDP in der Firmware-Tabelle\n");
 
-    /* Speicherkarte zusammenfassen statt alle Einträge auszuwerfen --
-     * eine typische Karte hat weit über hundert Bereiche. */
-    const eb_mem_range *ranges = (const eb_mem_range *)(virt_addr)bi->mem_ranges;
-    u64 by_type[8] = { 0 };
-    u64 count[8] = { 0 };
-    u64 largest = 0, largest_at = 0;
-
-    for (u64 i = 0; i < bi->mem_count; i++) {
-        u32 t = ranges[i].type < 8 ? ranges[i].type : 7;
-        u64 bytes = ranges[i].pages * PAGE_SIZE;
-        by_type[t] += bytes;
-        count[t]++;
-        if (ranges[i].type == EB_MEM_FREE && bytes > largest) {
-            largest = bytes;
-            largest_at = ranges[i].base;
-        }
-    }
-
-    kprintf("Speicher  (%llu Bereiche)\n", bi->mem_count);
-    for (u32 t = 0; t < 7; t++) {
-        if (count[t] == 0) continue;
-        kprintf("  %-14s", mem_type_name(t));
-        print_size(by_type[t]);
-        kprintf("   (%llu %s)\n", count[t],
-                count[t] == 1 ? "Bereich" : "Bereiche");
-    }
-    kprintf("  %-14s", "größter Block");
-    print_size(largest);
-    kprintf(" bei %p\n\n", (void *)(virt_addr)largest_at);
+    if (com) kprintf("com0: 115200 8N1\n");
 
     dump_ranges(bi);
 
-    kprintf("Bereit. Nächster Schritt: Unterbrechungen und Speicherverwaltung.\n");
+    kprintf("kern: Leerlauf, noch keine Unterbrechungssteuerung\n");
 
-    /* Nichts weiter zu tun -- schlafen legen, bis es einen Zeitgeber
-     * gibt. hlt statt einer Leerschleife, damit die CPU nicht heizt. */
+    /* hlt statt einer Leerschleife, damit die CPU nicht heizt. */
     for (;;) cpu_halt();
 }

@@ -58,6 +58,7 @@ KERN_C   := kernel/main.c \
             kernel/lib/panic.c \
             kernel/lib/harden.c \
             kernel/hw/serial.c \
+            kernel/hw/cpu.c \
             kernel/gfx/fb.c
 KERN_S   := kernel/arch/x86_64/start.S
 
@@ -122,7 +123,7 @@ $(BUILD)/OVMF_VARS.fd: $(OVMF_VARS)
 
 # --- Ausfuehren -------------------------------------------------------
 QEMU := qemu-system-x86_64 \
-  -machine q35 -m 512M -cpu qemu64 \
+  -machine q35 -m 512M -cpu max \
   -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
   -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS.fd \
   -drive format=raw,file=$(IMAGE) \

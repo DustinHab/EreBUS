@@ -58,7 +58,6 @@ static void print_u64(UINT64 v, int base)
     print(&buf[i + 1]);
 }
 
-static void print_dec(UINT64 v) { print_u64(v, 10); }
 static void print_hex(UINT64 v) { print(u"0x"); print_u64(v, 16); }
 
 /* Anhalten mit Meldung: es gibt keinen sinnvollen Rückweg aus einem
@@ -309,15 +308,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     BS->SetWatchdogTimer(0, 0, 0, NULL);
     if (ST->ConOut) ST->ConOut->ClearScreen(ST->ConOut);
 
-    print(u"Erebus -- Startlader\r\n");
+    /* Der Lader schweigt, solange alles gutgeht. Was der Rechner kann,
+     * protokolliert der Kernel -- hier zweimal dasselbe auszugeben,
+     * hiesse nur, dem Nutzer beim Start Text vorzuwerfen. */
 
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = setup_graphics();
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mi = gop->Mode->Info;
-
-    print(u"  Bild    : ");
-    print_dec(mi->HorizontalResolution); print(u"x");
-    print_dec(mi->VerticalResolution);
-    print(u" @ "); print_hex(gop->Mode->FrameBufferBase); print(u"\r\n");
 
     /* Platz für die Übergabedaten, solange es noch Firmware gibt. */
     EFI_PHYSICAL_ADDRESS bootdata = 0;
@@ -339,11 +335,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     UINT64 entry = load_elf(elf, elf_size, &kbase, &kspan);
     BS->FreePool(elf);
 
-    print(u"  Kernel  : "); print_dec(elf_size); print(u" Bytes nach ");
-    print_hex(kbase); print(u", Einsprung "); print_hex(entry); print(u"\r\n");
-
     UINT64 rsdp = find_rsdp();
-    print(u"  ACPI    : "); print_hex(rsdp); print(u"\r\n");
 
     /* Bildschirmdaten festhalten, bevor die Firmware geht. */
     bi->magic     = EREBUS_BOOT_MAGIC;
@@ -372,8 +364,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     EFI_MEMORY_DESCRIPTOR *map = NULL;
     st = BS->AllocatePool(EfiLoaderData, map_size, (VOID **)&map);
     if (EFI_ERROR(st)) halt(u"kein Speicher fuer die Speicherkarte", st);
-
-    print(u"  Firmware wird abgeschaltet ...\r\n");
 
     /* GetMemoryMap liefert einen Schlüssel, der nur gültig bleibt,
      * solange sich die Karte nicht ändert. Schlägt ExitBootServices

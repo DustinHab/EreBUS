@@ -223,6 +223,9 @@ void fbcon_set_origin(i32 x, i32 y, i32 w, i32 h)
     recalc();
 }
 
+i32 fbcon_cols(void) { return con.cols; }
+i32 fbcon_rows(void) { return con.rows; }
+
 /* scale = 0 heisst: selbst entscheiden. Auf einem 4K-Panel waere ein
  * 8x16-Zeichensatz sonst nicht mehr lesbar. */
 void fbcon_init(color fg, color bg, i32 scale)
