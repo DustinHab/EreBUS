@@ -12,6 +12,8 @@
 #include <eb/types.h>
 #include <eb/io.h>
 #include <eb/mm.h>
+#include <eb/object.h>
+#include <eb/cap.h>
 #include <eb/cpu.h>
 #include <eb/fb.h>
 #include <eb/fmt.h>
@@ -370,6 +372,25 @@ void kmain(eb_boot_info *bi)
     kprintf("pmm:  reclaimed ");
     print_size((pmm_free_frames() - before_reclaim) * PAGE_SIZE);
     kprintf(" of loader page tables\n");
+
+    /* --- objects and capabilities ---------------------------------- */
+
+    obj_store_init();
+    kprintf("obj:  store ready, %u built-in types\n", type_count());
+
+    if (obj_selftest())
+        kprintf("obj:  self test passed\n");
+    else
+        panic("the object store failed its own test");
+
+    if (cap_selftest())
+        kprintf("cap:  self test passed -- isolation, attenuation, "
+                "revocation, generations\n");
+    else
+        panic("the capability system failed its own test");
+
+    kprintf("obj:  %llu objects created during start-up, %llu still live\n",
+            obj_total_created(), obj_live_count());
 
     dump_ranges(bi);
 

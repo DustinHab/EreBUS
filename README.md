@@ -19,6 +19,12 @@ handed. There is no all-powerful state to capture ("root"), no setuid
 chain, and no way to *acquire* authority — it is only ever passed along,
 and never strengthened in the process.
 
+The absence is the argument. Look at `kernel/include/eb/object.h` and
+note what is not there: no `obj_find()`, no lookup by name, no way to
+enumerate what exists. Path traversal, symlink races, a library quietly
+reading somewhere it should not — every one of those needs a namespace
+to work in, and there is none to work in.
+
 ## Building
 
 Needs a Linux environment (here: WSL2 with Ubuntu) and
@@ -126,7 +132,15 @@ built binary.
   CR0.WP, SMEP, SMAP and UMIP switched on; a kernel heap that clears
   blocks on release. Each layer verifies itself at start-up, and
   `make wx` proves W^X by trying to write into the kernel's own code.
-* M4 — object store and capability table
+* **M4 — done.** Typed objects with reference-counted lifetimes and
+  outgoing reference slots, so the store is a graph rather than a heap
+  of blobs. Protection domains, each owning a capability table that is
+  the complete extent of what it can reach. Handles are per-domain slot
+  indices carrying a generation, so they mean nothing outside the table
+  they came from and stop working for good once revoked. Rights only
+  ever narrow on delegation. The self test checks all of that, including
+  that guessed handles resolve to nothing in a domain that was given
+  nothing.
 * M5 — threads, scheduling, message passing
 * M6 — user mode (ring 3), processes, separate address spaces
 * M7 — compositor, windows, PS/2 input

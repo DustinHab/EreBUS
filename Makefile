@@ -79,6 +79,8 @@ KERN_C   := kernel/main.c \
             kernel/mm/pmm.c \
             kernel/mm/vmm.c \
             kernel/mm/kheap.c \
+            kernel/obj/object.c \
+            kernel/obj/cap.c \
             kernel/arch/x86_64/gdt.c \
             kernel/arch/x86_64/trap.c
 KERN_S   := kernel/arch/x86_64/start.S \
