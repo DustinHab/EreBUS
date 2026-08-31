@@ -116,6 +116,38 @@ static u64 do_receive(domain *d, u64 handle, u64 user_buffer)
     return SYS_OK;
 }
 
+/* Reading and writing an object's payload, eight bytes at a time.
+ *
+ * A capability is not a permission slip to be shown at a door -- it is
+ * the only way to name the thing at all. There is no path here that
+ * takes an object and asks whether it may be read; the lookup either
+ * produces the object or it does not, and it does not when the right is
+ * missing. The check and the naming are the same step. */
+static u64 do_read(domain *d, u64 handle, u64 offset)
+{
+    object *o = cap_lookup(d, (cap_handle)handle, CAP_READ);
+    if (!o) return SYS_DENIED;
+
+    const u8 *data = (const u8 *)obj_data(o);
+    if (!data || offset + 8 > obj_size(o)) return SYS_DENIED;
+
+    u64 v = 0;
+    for (u32 i = 0; i < 8; i++) v |= (u64)data[offset + i] << (i * 8);
+    return v;
+}
+
+static u64 do_write(domain *d, u64 handle, u64 offset, u64 value)
+{
+    object *o = cap_lookup(d, (cap_handle)handle, CAP_WRITE);
+    if (!o) return SYS_DENIED;
+
+    u8 *data = (u8 *)obj_data(o);
+    if (!data || offset + 8 > obj_size(o)) return SYS_DENIED;
+
+    for (u32 i = 0; i < 8; i++) data[offset + i] = (u8)(value >> (i * 8));
+    return SYS_OK;
+}
+
 u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4);
 
 u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4)
@@ -137,6 +169,12 @@ u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4)
 
     case SYS_RECEIVE:
         return do_receive(d, a0, a1);
+
+    case SYS_READ:
+        return do_read(d, a0, a1);
+
+    case SYS_WRITE:
+        return do_write(d, a0, a1, a2);
 
     default:
         return SYS_BADCALL;

@@ -110,6 +110,11 @@ static object *seed_graph(void)
 /* The programs that run outside the kernel, from user/programs.S. */
 extern char user_hello[];
 extern char user_trespass[];
+extern char user_agent[];
+
+/* The one program that stays running. The other two make their point
+ * and end; this one waits to be handed something. */
+static object *agent_program;
 
 /* The one capability the kernel keeps on the console port: the right to
  * take messages out of it. Programs get send-only copies. */
@@ -618,18 +623,31 @@ void kmain(eb_boot_info *bi)
     };
 
     for (u32 i = 0; i < ARRAY_LEN(programs); i++) {
-        process *proc = proc_create(programs[i].name, programs[i].entry);
+        /* The entire authority these programs will ever have: permission
+         * to send to the console port, and a letter box of their own.
+         * Not to read the console, not to pass it on, and nothing else
+         * at all. */
+        process *proc = proc_create(programs[i].name, programs[i].entry,
+                                    console);
         if (!proc) { kprintf("proc: could not create %s\n", programs[i].name); continue; }
 
-        /* The entire authority this program will ever have: permission
-         * to send to the console port. Not to read it, not to pass it
-         * on, and nothing else at all. */
-        cap_insert(proc_domain(proc), console, CAP_CALL);
-
         if (proc_start(proc))
-            kprintf("proc: %llu (%s) starting in ring 3 with one capability\n",
+            kprintf("proc: %llu (%s) starting in ring 3 with two capabilities\n",
                     proc_id(proc), proc_name(proc));
     }
+
+    /* The one that stays. It begins holding exactly what the other two
+     * hold and can do nothing with it but wait -- there is no call it
+     * could make that would produce the name of anything else. What it
+     * ends up able to touch is decided entirely from the outside, later,
+     * by pointing its program object at something. */
+    process *agent = proc_create("agent", user_agent, console);
+    if (agent && proc_start(agent)) {
+        agent_program = proc_object(agent);
+        kprintf("proc: %llu (%s) waiting on its letter box, holding nothing else\n",
+                proc_id(agent), proc_name(agent));
+    }
+
     obj_release(console);
 
     /* Let them run. */
@@ -716,6 +734,27 @@ void kmain(eb_boot_info *bi)
     }
 
     if (root) {
+        /* Put the running program where it can be reached.
+         *
+         * A snapshot from an earlier boot brings back the program object
+         * of a process that no longer exists, so the slot is reused
+         * rather than added to: there is one agent because there is one
+         * agent running, and the graph should say so. */
+        if (agent_program) {
+            u64 n = obj_slots(root), at = n;
+            for (u64 i = 0; i < n; i++) {
+                object *s = obj_get_slot(root, i);
+                if (s && obj_type(s) == TYPE_PROGRAM) { at = i; break; }
+            }
+            if (at < n || obj_grow_slots(root, n + 1)) {
+                /* Read and grant, not write. Nobody edits a running
+                 * program by typing into it; what this reference is for
+                 * is being pointed at things. */
+                obj_set_slot(root, at, agent_program, CAP_READ | CAP_GRANT);
+                obj_set_slot_name(root, at, "a program, waiting");
+            }
+        }
+
         /* One capability, held by the shell, carrying everything we can
          * do. Every step from here narrows it. */
         cap_insert(kernel_domain, root, CAP_READ | CAP_WRITE | CAP_GRANT);

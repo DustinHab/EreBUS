@@ -171,6 +171,31 @@ bool cap_revoke(domain *d, cap_handle h)
     return true;
 }
 
+u32 cap_revoke_object(domain *d, object *o)
+{
+    check(d, "revoke object");
+    if (!o) return 0;
+
+    /* Taking something back from someone who holds it.
+     *
+     * By object rather than by handle, because the one doing the taking
+     * knows what it is withdrawing but has no business knowing what the
+     * other side chose to call it. The holder is not told; it simply
+     * finds, the next time it tries, that the handle it has names
+     * nothing -- which is the same answer it would get for a handle it
+     * had invented. */
+    u32 gone = 0;
+    for (u64 i = 1; i < d->capacity; i++) {
+        if (d->slots[i].target != o) continue;
+        d->slots[i].target = NULL;
+        d->slots[i].rights = 0;
+        d->used--;
+        obj_release(o);
+        gone++;
+    }
+    return gone;
+}
+
 /* ------------------------------------------------------------------ */
 /* The properties, checked                                             */
 /* ------------------------------------------------------------------ */

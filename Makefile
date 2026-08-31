@@ -45,7 +45,7 @@ COMMON_FLAGS := -ffreestanding -nostdlib -mno-red-zone \
                 -mno-mmx -mno-sse -mno-sse2 \
                 -fno-pic -fno-pie -fno-common \
                 -fno-omit-frame-pointer \
-                -std=c11 -O2 -g \
+                -std=c11 -O2 -g -MMD -MP \
                 -Wall -Wextra -Wshadow -Wvla \
                 -I$(ROOT) -I$(ROOT)/kernel/include
 
@@ -96,10 +96,12 @@ KERN_S   := kernel/arch/x86_64/start.S \
             kernel/arch/x86_64/isr.S \
             kernel/arch/x86_64/switch.S \
             kernel/arch/x86_64/entry.S \
-            kernel/user/programs.S
+            kernel/user/programs.S \
+            kernel/user/agent.S
 
 KERN_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(KERN_C)) \
             $(patsubst %.S,$(BUILD)/%.o,$(KERN_S))
+
 
 FONT   := kernel/gfx/font8x16.h
 LOADER := $(BUILD)/BOOTX64.EFI
@@ -107,7 +109,7 @@ KERNEL := $(BUILD)/kernel.elf
 IMAGE  := $(BUILD)/esp.img
 STORE  := $(BUILD)/store.img
 
-.PHONY: all run shot fault wx stack trace-stack desktop trace-input persist \
+.PHONY: all run shot fault wx stack trace-stack desktop trace-input persist agent \
         look debug clean info
 all: $(IMAGE)
 
@@ -312,6 +314,30 @@ look: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
 	@$(PY) tools/ppm2png.py $(BUILD)/screen.ppm $(OUT)
 	@echo "  DONE    $(OUT)"
 
+# The second party, start to finish.
+#
+# Boots with an empty store, walks into the running program, hands it
+# the notes, takes the write away, then takes the reference away
+# altogether. The program reports what it can see and what it may do at
+# each step -- and none of those answers are decisions it made. It asks
+# every time, and the kernel either produces the object or does not.
+#
+# The clicks are counted in hundreds because a PS/2 mouse only reports
+# how far it moved and the monitor clamps a single report; see
+# tools/look.sh.
+AGENT_TO_PROGRAM := down down down down right home \
+                    $(shell for i in $$(seq 17); do printf 'm100,7 '; done)
+AGENT_KEYS := $(AGENT_TO_PROGRAM) click m0,100 m0,50 click esc \
+              m-90,-100 m0,-58 click m100,0 m100,0 m78,0 click
+
+agent: $(IMAGE) $(BUILD)/OVMF_VARS.fd
+	@rm -f $(STORE)
+	@tools/look.sh $(BUILD)/screen-agent.png $(AGENT_KEYS) >/dev/null 2>&1
+	@echo "what the program said, in order:"
+	@grep -ao 'user: .*' $(BUILD)/serial.log | sed 's/^user: //' | \
+	 sed 's/[[:space:]]*$$//' | grep -v '^$$' | sed 's/^/    /'
+	@echo "  DONE    $(BUILD)/screen-agent.png"
+
 debug: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
 	$(QEMU) -serial stdio -s -S
 
@@ -323,3 +349,14 @@ info:
 
 clean:
 	rm -rf $(BUILD)
+
+# Header dependencies, written by the compiler as it goes. Without
+# these, editing a header changes nothing that make can see, and the
+# next build quietly links yesterday's object file against today's
+# declarations -- which does not fail, it just misbehaves.
+#
+# It goes last on purpose. An included file full of rules that arrives
+# before the first real target makes one of those rules the default
+# goal, and then "make" builds a single object file and reports success.
+DEPS := $(KERN_OBJ:.o=.d) $(BUILD)/boot.d
+-include $(DEPS)

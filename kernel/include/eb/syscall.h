@@ -18,7 +18,9 @@
 #define SYS_YIELD   1   /* yield() */
 #define SYS_SEND    2   /* send(handle, tag, word0, word1, word2) */
 #define SYS_RECEIVE 3   /* receive(handle, buffer) */
-#define SYS_MAX     4
+#define SYS_READ    4   /* read(handle, offset) -> eight bytes */
+#define SYS_WRITE   5   /* write(handle, offset, value) */
+#define SYS_MAX     6
 
 /* Results. Deliberately few and deliberately vague: telling a caller
  * exactly why a capability did not work would let it map out what it

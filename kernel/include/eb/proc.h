@@ -23,7 +23,22 @@ typedef struct process process;
 /* Creates a process from a chunk of the kernel image marked as user
  * code. The program is mapped read and execute; a stack and a small
  * data page are mapped read and write, never executable. */
-process *proc_create(const char *name, const void *entry_point);
+process *proc_create(const char *name, const void *entry_point,
+                     object *console);
+
+/* The program as it appears in the object graph. Pointing this object
+ * at something hands the program that thing -- the same gesture as
+ * anywhere else, and the only way a program comes to hold anything. */
+object *proc_object(process *p);
+bool    proc_grant(object *program, object *what, u32 rights);
+
+/* And taking it back. The program is not asked and cannot refuse; it
+ * finds out by trying. */
+bool    proc_revoke(object *program, object *what);
+
+/* Whether a program object still refers to something running. A graph
+ * restored from disk can contain one that does not. */
+bool    proc_is_running(object *program);
 
 domain     *proc_domain(process *p);
 const char *proc_name(const process *p);

@@ -40,7 +40,8 @@ typedef struct object object;
 #define TYPE_LIST    4u   /* an ordered set of references */
 #define TYPE_DOMAIN  5u   /* a protection domain */
 #define TYPE_SESSION 6u   /* where somebody was looking, and how */
-#define TYPE_BUILTIN_COUNT 7u
+#define TYPE_PROGRAM 7u   /* something running outside the kernel */
+#define TYPE_BUILTIN_COUNT 8u
 
 void obj_store_init(void);
 

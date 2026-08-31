@@ -3,6 +3,7 @@
  * the ring boundary.
  */
 #include <eb/proc.h>
+#include <eb/msg.h>
 #include <eb/syscall.h>
 #include <eb/vmm.h>
 #include <eb/pmm.h>
@@ -26,11 +27,44 @@ struct process {
     phys_addr   pml4;
     virt_addr   entry;    /* where in its own space the program starts */
     thread     *first;
+
+    /* How the rest of the system reaches it. The program object is the
+     * process as it appears in the graph: point that object at
+     * something, and the program is handed it. */
+    object     *self;
+    object     *inbox;
+    cap_handle  console_cap, inbox_cap;
 };
 
-extern void user_enter(u64 entry, u64 stack, u64 first_argument);
+extern void user_enter(u64 entry, u64 stack, u64 arg0, u64 arg1);
 
 static u64 next_pid = 1;
+
+/* Which processes are actually running.
+ *
+ * A program object can outlive the program: it is part of the graph and
+ * the graph is written to disk, so a snapshot from an earlier boot
+ * brings back an object whose payload points at a process that no
+ * longer exists. Following that pointer would be reading freed memory
+ * on the strength of something read off a disk, which is precisely the
+ * kind of trust this system is built to avoid. The pointer is checked
+ * against this list before it is ever used. */
+#define MAX_PROCESSES 32
+static process *live[MAX_PROCESSES];
+static u32      live_count;
+
+static bool is_live(const process *p)
+{
+    for (u32 i = 0; i < live_count; i++) if (live[i] == p) return true;
+    return false;
+}
+
+bool proc_is_running(object *program)
+{
+    if (!program || obj_type(program) != TYPE_PROGRAM) return false;
+    if (obj_size(program) < sizeof(process *)) return false;
+    return is_live(*(process **)obj_data(program));
+}
 static u64 process_count;
 static u64 fault_count;
 
@@ -64,7 +98,8 @@ static phys_addr addrspace_create(void)
 /* Processes                                                           */
 /* ------------------------------------------------------------------ */
 
-process *proc_create(const char *name, const void *entry_point)
+process *proc_create(const char *name, const void *entry_point,
+                     object *console)
 {
     process *p = (process *)kzalloc(sizeof(process));
     if (!p) return NULL;
@@ -115,8 +150,77 @@ process *proc_create(const char *name, const void *entry_point)
         }
     }
 
+    /* What it starts holding: permission to speak to the console, and
+     * its own letter box. Two capabilities, and nothing else in the
+     * world. */
+    p->inbox = port_create(8);
+    if (!p->inbox) return NULL;
+
+    p->console_cap = console ? cap_insert(p->dom, console, CAP_CALL) : 0;
+    p->inbox_cap = cap_insert(p->dom, p->inbox, CAP_READ);
+
+    /* And the program as it appears in the graph. Pointing this object
+     * at something is how the program comes to hold it -- the same
+     * gesture as pointing anything at anything, with the difference
+     * that this particular holder is alive. */
+    p->self = obj_create(TYPE_PROGRAM, sizeof(process *), 8);
+    if (!p->self) return NULL;
+    *(process **)obj_data(p->self) = p;
+    obj_set_name(p->self, name);
+
+    if (live_count < MAX_PROCESSES) live[live_count++] = p;
     process_count++;
     return p;
+}
+
+object *proc_object(process *p) { return p ? p->self : NULL; }
+
+/* Hands a running program a reference.
+ *
+ * It arrives as a message, which is the only way anything arrives here.
+ * The program was not holding this a moment ago and has no way to have
+ * asked for it; somebody with the authority chose to pass it on, at
+ * these rights and no more. */
+bool proc_grant(object *program, object *what, u32 rights)
+{
+    if (!program || obj_type(program) != TYPE_PROGRAM || !what) return false;
+
+    process *p = *(process **)obj_data(program);
+    if (!is_live(p) || !p->inbox) return false;
+
+    /* Whatever it held for this object before stops counting.
+     *
+     * Without this, narrowing a reference would not narrow anything: the
+     * program would simply end up holding both the old capability and
+     * the new one, and would keep using whichever was wider. Rights that
+     * can only ever be added are not rights, they are a record of every
+     * mistake anyone has made. */
+    cap_revoke_object(p->dom, what);
+
+    message m = { 0 };
+    m.tag = 0x4556494721ULL;      /* "GIVE!" */
+    m.nwords = 1;
+    m.words[0] = rights;
+
+    return port_post(p->inbox, &m, &what, &rights, 1);
+}
+
+bool proc_revoke(object *program, object *what)
+{
+    if (!program || obj_type(program) != TYPE_PROGRAM || !what) return false;
+
+    process *p = *(process **)obj_data(program);
+    if (!is_live(p) || !p->inbox) return false;
+
+    if (cap_revoke_object(p->dom, what) == 0) return false;
+
+    /* A message carrying nothing, which is the point: it says only that
+     * something has changed. The program is free to ignore it, and if it
+     * does go looking, what it finds is that the handle it kept names
+     * nothing at all. */
+    message m = { 0 };
+    m.tag = 0x4E49414741ULL;      /* "AGAIN" */
+    return port_post(p->inbox, &m, NULL, NULL, 0);
 }
 
 domain     *proc_domain(process *p)       { return p ? p->dom : NULL; }
@@ -133,10 +237,11 @@ static void user_launch(void *arg)
 {
     process *p = (process *)arg;
 
-    /* Whatever the process starts holding is handle number one in its
-     * own table: slot 1, first generation. It is told that and nothing
-     * else -- no environment, no arguments, no inherited anything. */
-    user_enter(p->entry, USER_STACK_TOP - 16, (u64)1 | ((u64)1 << 32));
+    /* The two things it starts holding, and nothing else. No
+     * environment, no arguments, no inherited anything -- a program
+     * begins with exactly what it was handed. */
+    user_enter(p->entry, USER_STACK_TOP - 16,
+               (u64)p->console_cap, (u64)p->inbox_cap);
 }
 
 bool proc_start(process *p)

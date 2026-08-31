@@ -8,6 +8,7 @@
 #include <eb/snapshot.h>
 #include <eb/msg.h>
 #include <eb/fmt.h>
+#include <eb/proc.h>
 
 #define SNAP_HISTORY_MAX 32
 #define TRAIL_MAX 12
@@ -169,9 +170,87 @@ static struct {
 } edit;
 
 /* What the palette offers. The fixed entries make something new; the
- * rest are objects already on the path, so pointing at something that
+ * rest are objects already in hand, so pointing at something that
  * exists needs no dragging and no second window. */
 #define PALETTE_FIXED 3
+#define CARRY_MAX 12
+
+/* What is being carried.
+ *
+ * Everything on the trail, and everything one step from anywhere on the
+ * trail. That is not a search and not a listing of the system: it is
+ * exactly the set of things that can be named from where we are
+ * standing, which is exactly the set of things that can be handed to
+ * anyone else. Each comes with the rights we hold on it, which is the
+ * ceiling on what we could pass on -- authority given away is authority
+ * held, never more. */
+typedef struct {
+    object *o;
+    u32     rights;
+    object *holder;      /* where it was seen, for the name on it */
+    u64     slot;
+} carried;
+
+static u32 gather(carried *out)
+{
+    u32 n = 0;
+
+    for (u32 d = 0; d < nav.depth && n < CARRY_MAX; d++) {
+        out[n].o      = nav.node[d];
+        out[n].rights = nav.rights[d];
+        out[n].holder = d ? nav.node[d - 1] : NULL;
+        out[n].slot   = d ? nav.via[d] : 0;
+        n++;
+    }
+
+    for (u32 d = 0; d < nav.depth && n < CARRY_MAX; d++) {
+        object *src = nav.node[d];
+        for (u64 i = 0; i < obj_slots(src) && n < CARRY_MAX; i++) {
+            object *t = obj_get_slot(src, i);
+            if (!t) continue;
+
+            u32 r = nav.rights[d] & obj_slot_rights(src, i);
+
+            /* Seen already by another route. Two routes to the same
+             * object are two separate holds, and what is held is both
+             * of them together. */
+            u32 j = 0;
+            while (j < n && out[j].o != t) j++;
+            if (j < n) { out[j].rights |= r; continue; }
+
+            out[n].o = t; out[n].rights = r;
+            out[n].holder = src; out[n].slot = i;
+            n++;
+        }
+    }
+    return n;
+}
+
+/* What we hold on something we can name from here -- which is not the
+ * same as what we hold on the thing pointing at it. */
+static u32 held_on(object *t)
+{
+    carried c[CARRY_MAX];
+    u32 n = gather(c);
+    for (u32 i = 0; i < n; i++) if (c[i].o == t) return c[i].rights;
+    return focus_rights();
+}
+
+/* What it takes to change the outgoing references of the thing in
+ * focus.
+ *
+ * For most objects that is the right to write it. For a running program
+ * it is the right to grant: a program's references are not contents to
+ * be edited, they are the list of what it has been handed, and adding
+ * to that list is giving something away. Writing into a program is a
+ * different act entirely, and not one this shell offers. */
+static bool can_shape(void)
+{
+    object *f = focus();
+    if (!f || nav.at_generation != 0) return false;
+    if (obj_type(f) == TYPE_PROGRAM) return (focus_rights() & CAP_GRANT) != 0;
+    return (focus_rights() & CAP_WRITE) != 0;
+}
 
 static void edit_cancel(void)
 {
@@ -531,8 +610,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     text_at(rx + PAD, top + PAD, sw - PAD, "where it leads", C_FAINT);
 
     ty = top + PAD + ROW + 4;
-    bool may_shape = (focus_rights() & CAP_WRITE) != 0 &&
-                     nav.at_generation == 0;
+    bool may_shape = can_shape();
 
     u64 slots = obj_slots(f);
     u64 used = 0;
@@ -573,8 +651,13 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
             static const u32 bit[3] = { CAP_READ, CAP_WRITE, CAP_GRANT };
             static const char letter[3] = { 'r', 'w', 'g' };
 
+            /* A letter is clickable when we could actually put it
+             * there, which is a question about our hold on the target,
+             * not about the reference. Letters that cannot be granted
+             * are shown but not offered -- better than offering them and
+             * refusing afterwards. */
             bool on = (slot_rights & bit[b]) != 0;
-            bool can = may_shape && (focus_rights() & bit[b]);
+            bool can = may_shape && (on || (held_on(t) & bit[b]));
             bool lit = is_hovered(HOT_RIGHT, (u32)(i * 8 + b));
 
             char one[2] = { on ? letter[b] : '-', 0 };
@@ -644,22 +727,32 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
                 ty += ROW;
             }
 
-            if (nav.depth > 0 && ty < bottom - ROW) {
+            carried carry[CARRY_MAX];
+            u32 carried_count = gather(carry);
+
+            if (carried_count > 0 && ty < bottom - ROW) {
                 text_at(rx + PAD, ty, sw - PAD,
                         "  or something you already hold:", C_FAINT);
                 ty += ROW;
             }
-            for (u32 d = 0; d < nav.depth && ty < bottom - ROW; d++) {
-                char nm[40];
-                label_of(d ? nav.node[d - 1] : NULL, d ? nav.via[d] : 0,
-                         nav.node[d], nm, sizeof(nm));
+            for (u32 c = 0; c < carried_count && ty < bottom - ROW; c++) {
+                char nm[40], r[4];
+                label_of(carry[c].holder, carry[c].slot, carry[c].o,
+                         nm, sizeof(nm));
+                rights_text(carry[c].rights, r);
 
-                bool on = is_hovered(HOT_PALETTE, PALETTE_FIXED + d);
+                bool on = is_hovered(HOT_PALETTE, PALETTE_FIXED + c);
                 if (on) fb_rect(rx, ty - 3, right_w, ROW, C_PANEL_HI);
-                text_at(rx + PAD + 2 * GLYPH_W, ty, sw - PAD, nm,
+
+                /* The rights come along on the label. What is being
+                 * offered is not the object but a particular hold on
+                 * it, and the difference is the whole point. */
+                text_at(rx + PAD + 2 * GLYPH_W, ty, sw - PAD, r,
+                        (carry[c].rights & CAP_WRITE) ? C_WRITE : C_READONLY);
+                text_at(rx + PAD + 7 * GLYPH_W, ty, sw - PAD, nm,
                         on ? C_TEXT : C_DIM);
                 hot_add(rx, ty - 3, right_w, ROW, HOT_PALETTE,
-                        PALETTE_FIXED + d);
+                        PALETTE_FIXED + c);
                 ty += ROW;
             }
         }
@@ -938,8 +1031,17 @@ static void draw_all(void)
     u32 at = put(line, 0, type_name(obj_type(focus())));
     at = put(line, at, "  ");
     at = put(line, at, r);
-    at = put(line, at, (focus_rights() & CAP_WRITE) ? "  you may change this"
-                                                    : "  read only");
+    /* What can be done here, said plainly. A running program is the one
+     * case where the answer is neither of the usual two: its contents
+     * are not for editing, but what it holds is for giving. */
+    if (obj_type(focus()) == TYPE_PROGRAM)
+        at = put(line, at, (focus_rights() & CAP_GRANT)
+                           ? "  you may hand it things"
+                           : "  you may only watch it");
+    else
+        at = put(line, at, (focus_rights() & CAP_WRITE)
+                           ? "  you may change this"
+                           : "  read only");
     line[at] = 0;
     text_at(sw / 2 + PAD, 14, sw - PAD, line,
             (focus_rights() & CAP_WRITE) ? C_WRITE : C_READONLY);
@@ -1252,19 +1354,30 @@ static void act_on(const hot_region *r)
         u64 slot = r->index / 8;
         u32 which = r->index % 8;
         if (which > 2 || slot >= obj_slots(focus())) break;
-        if (!(focus_rights() & CAP_WRITE)) break;
+        if (!can_shape()) break;
+
+        object *target = obj_get_slot(focus(), slot);
+        u32 ceiling = held_on(target);
 
         u32 now = obj_slot_rights(focus(), slot);
         u32 next = (now & bit[which]) ? (now & ~bit[which])
-                                      : (now | (bit[which] & focus_rights()));
-        obj_set_slot(focus(), slot, obj_get_slot(focus(), slot), next);
+                                      : (now | (bit[which] & ceiling));
+        obj_set_slot(focus(), slot, target, next);
+
+        /* A running program is holding this right now, so narrowing the
+         * reference has to reach it. Otherwise the letters on the screen
+         * would say one thing and the capability in its table another,
+         * and the screen would be the one that was lying. */
+        if (obj_type(focus()) == TYPE_PROGRAM && target)
+            proc_grant(focus(), target, next);
+
         nav.changes++;
         nav.redraw = true;
         break;
     }
 
     case HOT_NAME: {
-        if (!(focus_rights() & CAP_WRITE)) break;
+        if (!can_shape()) break;
         edit.kind = EDIT_NAME;
         edit.slot = r->index;
         edit.len = 0;
@@ -1277,8 +1390,15 @@ static void act_on(const hot_region *r)
         break;
     }
 
-    case HOT_CLEAR:
-        if (!(focus_rights() & CAP_WRITE)) break;
+    case HOT_CLEAR: {
+        if (!can_shape()) break;
+
+        /* Taking it back from a program, before the reference that
+         * recorded the giving disappears. */
+        object *target = obj_get_slot(focus(), r->index);
+        if (obj_type(focus()) == TYPE_PROGRAM && target)
+            proc_revoke(focus(), target);
+
         /* Letting go of a reference. If it was the last one the object
          * is gone, and if it was not, the object is still perfectly
          * reachable by whoever else points at it. Nothing here has to
@@ -1289,6 +1409,7 @@ static void act_on(const hot_region *r)
         nav.changes++;
         nav.redraw = true;
         break;
+    }
 
     case HOT_ADD:
         edit.kind = (edit.kind == EDIT_PICK) ? EDIT_NONE : EDIT_PICK;
@@ -1296,7 +1417,7 @@ static void act_on(const hot_region *r)
         break;
 
     case HOT_PALETTE: {
-        if (!(focus_rights() & CAP_WRITE)) break;
+        if (!can_shape()) break;
 
         object *f = focus();
         u64 slot = 0;
@@ -1311,6 +1432,11 @@ static void act_on(const hot_region *r)
         object *made = NULL;
         const char *suggest = "";
         bool created = false;
+        char borrowed[40];
+
+        /* Something made here is held outright -- there is nobody it
+         * could have been narrowed by. */
+        u32 give = CAP_READ | CAP_WRITE | CAP_GRANT;
 
         if (r->index == 0)      { made = obj_create(TYPE_TEXT, 512, 0);
                                   suggest = "a note"; created = true; }
@@ -1319,16 +1445,33 @@ static void act_on(const hot_region *r)
         else if (r->index == 2) { made = obj_create(TYPE_LIST, 0, 4);
                                   suggest = "a list"; created = true; }
         else {
-            u32 d = r->index - PALETTE_FIXED;
-            if (d >= nav.depth) break;
-            made = nav.node[d];
-            suggest = "the same thing";
+            carried carry[CARRY_MAX];
+            u32 n = gather(carry);
+            u32 c = r->index - PALETTE_FIXED;
+            if (c >= n) break;
+
+            made = carry[c].o;
+            give = carry[c].rights;
+            label_of(carry[c].holder, carry[c].slot, made,
+                     borrowed, sizeof(borrowed));
+            suggest = borrowed;
         }
         if (!made) break;
 
-        /* What the new reference permits cannot exceed what we hold.
-         * A reference is only worth what the holder could pass on. */
-        obj_set_slot(f, slot, made, focus_rights());
+        /* What the new reference permits cannot exceed what we hold on
+         * the thing it points at. Not on the thing doing the pointing --
+         * those are different objects and the confusion between them is
+         * how authority leaks. */
+        obj_set_slot(f, slot, made, give);
+
+        /* If what we just pointed at something is a running program,
+         * pointing at it is exactly how it comes to hold the thing.
+         * There is no separate act of sharing -- the reference is the
+         * grant, and the program is told about it the only way anything
+         * reaches a program, which is by message. */
+        if (obj_type(f) == TYPE_PROGRAM)
+            proc_grant(f, made, give);
+
         if (created) obj_release(made);      /* the slot holds it now */
 
         edit.kind = EDIT_NAME;

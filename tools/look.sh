@@ -69,6 +69,9 @@ cp /usr/share/OVMF/OVMF_VARS_4M.fd "$BUILD/OVMF_VARS.fd"
                 ;;
             m*,*)
                 echo "mouse_move ${k#m}" | tr ',' ' '
+                # The same pause as above, and for the same reason: two
+                # reports sent back to back can outrun the controller.
+                sleep 0.1
                 ;;
             click)
                 echo "mouse_button 1"

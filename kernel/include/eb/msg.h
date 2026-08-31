@@ -61,6 +61,16 @@ bool port_try_receive(domain *to, cap_handle port, message *out);
 
 u64 port_pending(object *port);
 
+/* The primitive underneath port_send: puts a message into a port with
+ * the objects it carries given directly rather than as handles.
+ *
+ * Only the kernel uses this, and only where there is no holder whose
+ * authority could be checked -- handing a program something it was
+ * never holding in the first place. port_send is this plus the checks,
+ * which is where the checks belong: on the path a program can take. */
+bool port_post(object *port, const message *m,
+               object **carried, const u32 *rights, u32 ncaps);
+
 bool msg_selftest(void);
 
 #endif /* EB_MSG_H */

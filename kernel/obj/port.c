@@ -70,6 +70,47 @@ u64 port_pending(object *p)
 
 /* ------------------------------------------------------------------ */
 
+bool port_post(object *p, const message *m,
+               object **carried, const u32 *rights, u32 ncaps)
+{
+    if (!p || obj_type(p) != TYPE_PORT || !m) return false;
+    if (ncaps > MSG_MAX_CAPS) return false;
+
+    u64 flags = irq_save();
+    port_state *s = state_of(p);
+
+    if (s->count >= s->capacity) {
+        irq_restore(flags);
+        return false;
+    }
+
+    queued *q = &ring_of(s)[s->tail];
+    q->tag    = m->tag;
+    q->nwords = m->nwords;
+    q->ncaps  = ncaps;
+    for (u32 i = 0; i < m->nwords; i++) q->words[i] = m->words[i];
+    for (u32 i = 0; i < ncaps; i++) {
+        q->caps[i] = carried[i];
+        q->rights[i] = rights[i];
+        obj_retain(carried[i]);   /* the queue holds it while in flight */
+    }
+
+    s->tail = (s->tail + 1) % s->capacity;
+    s->count++;
+
+    /* Wake one waiter, if any is parked here. */
+    thread *woken = NULL;
+    if (s->nwaiters > 0) {
+        woken = s->waiters[0];
+        for (u32 i = 1; i < s->nwaiters; i++) s->waiters[i - 1] = s->waiters[i];
+        s->nwaiters--;
+    }
+    irq_restore(flags);
+
+    if (woken) sched_wake(woken);
+    return true;
+}
+
 bool port_send(domain *from, cap_handle h, const message *m)
 {
     if (!m || m->nwords > MSG_MAX_WORDS || m->ncaps > MSG_MAX_CAPS)
@@ -97,39 +138,8 @@ bool port_send(domain *from, cap_handle h, const message *m)
         rights[i] = pass;
     }
 
-    u64 flags = irq_save();
-    port_state *s = state_of(p);
-
-    if (s->count >= s->capacity) {
-        irq_restore(flags);
-        return false;
-    }
-
-    queued *q = &ring_of(s)[s->tail];
-    q->tag    = m->tag;
-    q->nwords = m->nwords;
-    q->ncaps  = m->ncaps;
-    for (u32 i = 0; i < m->nwords; i++) q->words[i] = m->words[i];
-    for (u32 i = 0; i < m->ncaps; i++) {
-        q->caps[i] = attach[i];
-        q->rights[i] = rights[i];
-        obj_retain(attach[i]);   /* the queue holds it while in flight */
-    }
-
-    s->tail = (s->tail + 1) % s->capacity;
-    s->count++;
-
-    /* Wake one waiter, if any is parked here. */
-    thread *woken = NULL;
-    if (s->nwaiters > 0) {
-        woken = s->waiters[0];
-        for (u32 i = 1; i < s->nwaiters; i++) s->waiters[i - 1] = s->waiters[i];
-        s->nwaiters--;
-    }
-    irq_restore(flags);
-
-    if (woken) sched_wake(woken);
-    return true;
+    /* The checks are done; the rest is the same work for everyone. */
+    return port_post(p, m, attach, rights, m->ncaps);
 }
 
 /* Takes the next message out. Interrupts must be off. */

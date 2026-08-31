@@ -52,6 +52,21 @@ syscall_entry:
     popq    %rbp
     popq    %r11                    /* flags for sysret */
     popq    %rcx                    /* return address for sysret */
+
+    /* Everything the kernel was free to use on the way through goes
+     * back to zero. The result is in rax and the callee-saved registers
+     * still hold what the program left in them; the rest would be
+     * whatever the C code happened to finish with, which is a handful of
+     * kernel addresses handed out on every single call. Six
+     * instructions is a small price for not telling a program where the
+     * kernel lives. */
+    xorq    %rdi, %rdi
+    xorq    %rsi, %rsi
+    xorq    %rdx, %rdx
+    xorq    %r8,  %r8
+    xorq    %r9,  %r9
+    xorq    %r10, %r10
+
     movq    %gs:8, %rsp             /* back onto the user stack */
     swapgs
     sysretq
@@ -64,7 +79,7 @@ syscall_entry:
  * the stack frame an interrupt would have left behind and return from
  * an interrupt that never happened.
  *
- * user_enter(u64 entry, u64 stack, u64 first_argument)               */
+ * user_enter(u64 entry, u64 stack, u64 arg0, u64 arg1)               */
 /* ------------------------------------------------------------------ */
 
     .globl user_enter
@@ -73,7 +88,8 @@ user_enter:
     cli
     movq    %rdi, %r14              /* entry point */
     movq    %rsi, %r13              /* user stack */
-    movq    %rdx, %r15              /* the capability it starts with */
+    movq    %rdx, %r15              /* first capability */
+    movq    %rcx, %r12              /* second capability */
 
     swapgs                          /* GS belongs to user land now */
 
@@ -83,7 +99,8 @@ user_enter:
     pushq   $0x23                   /* CS: user code, ring 3 */
     pushq   %r14                    /* RIP */
 
-    movq    %r15, %rdi              /* the one thing it starts holding */
+    movq    %r15, %rdi              /* what it starts holding */
+    movq    %r12, %rsi
 
     /* Everything else goes to zero.
      *
@@ -96,7 +113,6 @@ user_enter:
     xorq    %rbx, %rbx
     xorq    %rcx, %rcx
     xorq    %rdx, %rdx
-    xorq    %rsi, %rsi
     xorq    %rbp, %rbp
     xorq    %r8,  %r8
     xorq    %r9,  %r9

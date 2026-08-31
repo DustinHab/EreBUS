@@ -69,6 +69,12 @@ cap_handle cap_delegate(domain *from, cap_handle h, domain *to, u32 mask);
  * never resolves again, even after the slot is reused. */
 bool cap_revoke(domain *d, cap_handle h);
 
+/* Takes an object away from a domain, however many handles it holds for
+ * it. Returns how many were dropped. This is the withdrawing side of a
+ * grant: the holder keeps whatever number it was given, and that number
+ * stops naming anything. */
+u32 cap_revoke_object(domain *d, object *o);
+
 bool cap_selftest(void);
 
 #endif /* EB_CAP_H */
