@@ -1526,8 +1526,17 @@ static void handle_keys(void)
             continue;
         }
         case KEY_RIGHT:
-        case KEY_ENTER:
             follow(nav.selected);
+            continue;
+        case KEY_ENTER:
+            /* In a text one is writing, enter makes a line; anywhere
+             * else it follows, like the right arrow. A table row can
+             * only be added by someone who can press enter. */
+            if (obj_type(focus()) == TYPE_TEXT &&
+                (focus_rights() & CAP_WRITE) && nav.at_generation == 0)
+                type_into_focus('\n');
+            else
+                follow(nav.selected);
             continue;
         case KEY_LEFT:
             go_back();

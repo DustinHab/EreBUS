@@ -117,7 +117,11 @@ FONT   := kernel/gfx/font8x16.h
 LOADER := $(BUILD)/BOOTX64.EFI
 KERNEL := $(BUILD)/kernel.elf
 IMAGE  := $(BUILD)/esp.img
-STORE  := $(BUILD)/store.img
+# The test rig's disk and firmware store, deliberately not the live
+# machine's. tools/vm.sh runs the machine the person actually uses, on
+# build/store.img; everything make starts is a test and works on its
+# own copies, so a running VM and a test run never write the same file.
+STORE  := $(BUILD)/teststore.img
 
 .PHONY: all run shot fault wx stack trace-stack desktop trace-input persist agent relay sweep \
         look debug clean info
@@ -178,7 +182,7 @@ $(STORE):
 # image that has since been rebuilt boots into nothing: empty log,
 # black screen, looks exactly like a kernel crash and is not one. That
 # hunt has been run often enough.
-$(BUILD)/OVMF_VARS.fd: $(OVMF_VARS) FORCE
+$(BUILD)/test-vars.fd: $(OVMF_VARS) FORCE
 	@mkdir -p $(BUILD)
 	@cp $(OVMF_VARS) $@
 
@@ -188,19 +192,19 @@ FORCE:
 QEMU := qemu-system-x86_64 \
   -machine q35 -m 512M -cpu max \
   -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
-  -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS.fd \
+  -drive if=pflash,format=raw,file=$(BUILD)/test-vars.fd \
   -drive format=raw,file=$(IMAGE) \
   -vga none -device VGA,edid=on,xres=$(XRES),yres=$(YRES) \
   -drive id=store,file=$(STORE),format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
   -net none
 
-run: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
+run: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 	$(QEMU) -serial stdio
 
 # Start headless, let it settle, grab the screen, quit. Going through
 # the monitor is the only way to get an image without a window.
-shot: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
+shot: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 	@rm -f $(BUILD)/screen.ppm $(BUILD)/serial.log
 	@{ sleep 9; echo "screendump $(BUILD)/screen.ppm"; sleep 2; echo quit; } | \
 	  $(QEMU) -display none -monitor stdio \
@@ -262,7 +266,7 @@ trace-stack:
 # QEMU's monitor, and photographs the result. Typing is the only way to
 # show that input reaches a window and that the other views of the same
 # object follow along.
-desktop: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
+desktop: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 	@rm -f $(BUILD)/screen.ppm
 	@{ sleep 8; \
 	   for k in t y p e d spc l i v e; do \
@@ -276,7 +280,7 @@ desktop: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
 
 # Which interrupt vectors actually reach the processor while keys are
 # being sent. 0x21 is line 1 (keyboard), 0x2c is line 12 (mouse).
-trace-input: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
+trace-input: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 	@rm -f $(BUILD)/qemu.log
 	@{ sleep 8; echo "sendkey a"; echo "sendkey b"; echo "sendkey c"; \
 	   sleep 2; echo quit; } | \
@@ -290,7 +294,7 @@ trace-input: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
 # Boots with an empty store, types into a window, waits for the graph to
 # settle and be written; then boots a second time and photographs what
 # comes back. Nothing was saved by anyone, and nothing was opened.
-persist: $(IMAGE) $(BUILD)/OVMF_VARS.fd
+persist: $(IMAGE) $(BUILD)/test-vars.fd
 	@rm -f $(STORE)
 	@$(MAKE) --no-print-directory $(STORE)
 	@echo "  RUN 1   typing, then leaving it alone"
@@ -320,7 +324,7 @@ persist: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 KEYS ?=
 OUT  ?= $(BUILD)/screen-look.png
 
-look: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
+look: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 	@rm -f $(BUILD)/screen.ppm
 	@{ sleep 9; \
 	   for k in $(KEYS); do echo "sendkey $$k"; sleep 0.3; done; \
@@ -347,7 +351,7 @@ AGENT_TO_PROGRAM := down down down down right home \
 AGENT_KEYS := $(AGENT_TO_PROGRAM) click m0,100 m0,50 click esc \
               m-90,-100 m0,-58 click m100,0 m100,0 m78,0 click
 
-agent: $(IMAGE) $(BUILD)/OVMF_VARS.fd
+agent: $(IMAGE) $(BUILD)/test-vars.fd
 	@rm -f $(STORE)
 	@tools/look.sh $(BUILD)/screen-agent.png $(AGENT_KEYS) >/dev/null 2>&1
 	@echo "what the program said, in order:"
@@ -379,7 +383,7 @@ RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,100 m0,100 m0,69 click \
               $(RELAY_HOME) m0,100 m0,39 click \
               m0,100 m0,100 m0,100 m0,100 m0,82 click ret
 
-relay: $(IMAGE) $(BUILD)/OVMF_VARS.fd
+relay: $(IMAGE) $(BUILD)/test-vars.fd
 	@rm -f $(STORE)
 	@tools/look.sh $(BUILD)/screen-relay.png $(RELAY_KEYS) >/dev/null 2>&1
 	@echo "what the programs said, in order:"
@@ -397,14 +401,14 @@ sweep:
 	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
 	@$(MAKE) --no-print-directory EXTRA=-DEREBUS_STRESS_COLLECT $(IMAGE)
 	@rm -f $(STORE)
-	@$(MAKE) --no-print-directory $(STORE) $(BUILD)/OVMF_VARS.fd
+	@$(MAKE) --no-print-directory $(STORE) $(BUILD)/test-vars.fd
 	@{ sleep 14; echo quit; } | \
 	  $(QEMU) -display none -monitor stdio \
 	          -serial file:$(BUILD)/serial.log >/dev/null 2>&1 || true
 	@grep -ao 'stress: .*' $(BUILD)/serial.log | sed 's/[[:space:]]*$$//'
 	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
 
-debug: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
+debug: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 	$(QEMU) -serial stdio -s -S
 
 info:

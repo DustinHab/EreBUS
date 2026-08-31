@@ -1,12 +1,14 @@
 /*
- * settings.c -- the system, set by sentences.
+ * settings.c -- the system, set by a table.
  *
  * The whole configuration machinery is: one text object, and this file
- * reading it. Parsing is line by line and deliberately forgiving --
- * a line either says something about a matter this file knows, or it
- * is prose and stays prose. Later lines override earlier ones, so the
- * text accumulates decisions the way the journal accumulates events,
- * and the appending editor is exactly the right tool for it.
+ * reading it. Each row is a matter and its value, split at the bar.
+ * The matter is matched exactly against the left column -- a row sets
+ * what it names and nothing else, so no value, note or slip of the
+ * keyboard can reach a different setting by containing the wrong word.
+ * The value stays free wording, because "1 second" and "where i left"
+ * are worth more than an enum. Lines without a bar are prose and have
+ * no effect. Should a matter appear twice, the later row is believed.
  *
  * Nothing here is privileged about the object itself. It is reachable
  * like anything else, snapshotted like anything else, and shown
@@ -116,44 +118,70 @@ static bool line_number(const char *line, u64 len, u64 *out)
     return false;
 }
 
+/* Whether the left column says exactly this matter, spaces aside. */
+static bool matter_is(const char *line, u64 a, u64 b, const char *word)
+{
+    u64 wl = strlen(word);
+    if (b - a != wl) return false;
+    for (u64 i = 0; i < wl; i++)
+        if (line[a + i] != word[i]) return false;
+    return true;
+}
+
 static void read_line(values *v, const char *line, u64 len)
 {
+    /* The matter is the left column and nothing else. A row sets only
+     * what its own first column names -- exactly, not by resemblance --
+     * and a line without the bar is prose and stays prose. Inside the
+     * value the wording remains free ("1 second", "where i left"): the
+     * column decides WHAT is being set, the words decide what it is
+     * set TO, and neither can reach across into the other's job. */
+    u64 bar = 0;
+    while (bar < len && line[bar] != '|') bar++;
+    if (bar == len) return;
+
+    u64 a = 0, b = bar;
+    while (a < b && line[a] == ' ') a++;
+    while (b > a && line[b - 1] == ' ') b--;
+
+    const char *val = line + bar + 1;
+    u64 vlen = len - bar - 1;
     u64 n;
 
-    if (line_has(line, len, "save")) {
-        if (line_number(line, len, &n)) {
+    if (matter_is(line, a, b, "save")) {
+        if (line_number(val, vlen, &n)) {
             if (n > 60) n = 60;
             v->save_quiet_ns = n * 1000000000ULL;
         }
-    } else if (line_has(line, len, "clock")) {
-        if (line_has(line, len, "on time")) {
+    } else if (matter_is(line, a, b, "clock")) {
+        if (line_has(val, vlen, "on time")) {
             v->clock_offset_min = 0;
-        } else if (line_number(line, len, &n)) {
+        } else if (line_number(val, vlen, &n)) {
             if (n > 23) n = 23;
-            if (line_has(line, len, "ahead"))  v->clock_offset_min = (i64)n * 60;
-            if (line_has(line, len, "behind")) v->clock_offset_min = -(i64)n * 60;
+            if (line_has(val, vlen, "ahead"))  v->clock_offset_min = (i64)n * 60;
+            if (line_has(val, vlen, "behind")) v->clock_offset_min = -(i64)n * 60;
         }
-    } else if (line_has(line, len, "pointer")) {
-        if (line_has(line, len, "slow"))        { v->pointer_num = 1; v->pointer_den = 2; }
-        else if (line_has(line, len, "quick") ||
-                 line_has(line, len, "fast"))   { v->pointer_num = 2; v->pointer_den = 1; }
-        else if (line_has(line, len, "normal")) { v->pointer_num = 1; v->pointer_den = 1; }
-    } else if (line_has(line, len, "hints")) {
-        if (line_has(line, len, "hidden")) v->hints = false;
-        if (line_has(line, len, "shown"))  v->hints = true;
-    } else if (line_has(line, len, "theme") ||
-               line_has(line, len, "colors")) {
-        if (line_has(line, len, "light")) v->light = true;
-        if (line_has(line, len, "dark"))  v->light = false;
-    } else if (line_has(line, len, "slice")) {
-        if (line_number(line, len, &n)) {
+    } else if (matter_is(line, a, b, "pointer")) {
+        if (line_has(val, vlen, "slow"))        { v->pointer_num = 1; v->pointer_den = 2; }
+        else if (line_has(val, vlen, "quick") ||
+                 line_has(val, vlen, "fast"))   { v->pointer_num = 2; v->pointer_den = 1; }
+        else if (line_has(val, vlen, "normal")) { v->pointer_num = 1; v->pointer_den = 1; }
+    } else if (matter_is(line, a, b, "hints")) {
+        if (line_has(val, vlen, "hidden")) v->hints = false;
+        if (line_has(val, vlen, "shown"))  v->hints = true;
+    } else if (matter_is(line, a, b, "theme") ||
+               matter_is(line, a, b, "colors")) {
+        if (line_has(val, vlen, "light")) v->light = true;
+        if (line_has(val, vlen, "dark"))  v->light = false;
+    } else if (matter_is(line, a, b, "slice")) {
+        if (line_number(val, vlen, &n)) {
             if (n < 10)  n = 10;
             if (n > 500) n = 500;
             v->slice_ms = (u32)n;
         }
-    } else if (line_has(line, len, "start")) {
-        if (line_has(line, len, "home")) v->start_home = true;
-        if (line_has(line, len, "left")) v->start_home = false;
+    } else if (matter_is(line, a, b, "start")) {
+        if (line_has(val, vlen, "home")) v->start_home = true;
+        if (line_has(val, vlen, "left")) v->start_home = false;
     }
 }
 
