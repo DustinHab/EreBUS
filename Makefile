@@ -97,7 +97,8 @@ KERN_S   := kernel/arch/x86_64/start.S \
             kernel/arch/x86_64/switch.S \
             kernel/arch/x86_64/entry.S \
             kernel/user/programs.S \
-            kernel/user/agent.S
+            kernel/user/agent.S \
+            kernel/user/courier.S
 
 KERN_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(KERN_C)) \
             $(patsubst %.S,$(BUILD)/%.o,$(KERN_S))
@@ -109,7 +110,7 @@ KERNEL := $(BUILD)/kernel.elf
 IMAGE  := $(BUILD)/esp.img
 STORE  := $(BUILD)/store.img
 
-.PHONY: all run shot fault wx stack trace-stack desktop trace-input persist agent \
+.PHONY: all run shot fault wx stack trace-stack desktop trace-input persist agent relay \
         look debug clean info
 all: $(IMAGE)
 
@@ -337,6 +338,31 @@ agent: $(IMAGE) $(BUILD)/OVMF_VARS.fd
 	@grep -ao 'user: .*' $(BUILD)/serial.log | sed 's/^user: //' | \
 	 sed 's/[[:space:]]*$$//' | grep -v '^$$' | sed 's/^/    /'
 	@echo "  DONE    $(BUILD)/screen-agent.png"
+
+# One program hands another a capability, weakened on the way.
+#
+# A note is made and filled, the courier is introduced to the agent
+# (which delivers a send-only capability to the agent's letter box), and
+# the note is handed to the courier read-write. The courier passes it on
+# read-only -- its own decision, enforced by the kernel -- and the agent
+# duly reads it and fails to change it. No step here involves the shell
+# doing the delegating; two programs did.
+RELAY_HOME := home $(shell for i in $$(seq 17); do printf 'm100,0 '; done)
+RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,49 click m0,22 click ret \
+              down down down down down down right p a s s spc i t left \
+              up right \
+              $(RELAY_HOME) m0,100 m0,15 click \
+              m0,100 m0,100 m0,42 click ret \
+              $(RELAY_HOME) m0,100 m0,39 click \
+              m0,100 m0,100 m0,62 click ret
+
+relay: $(IMAGE) $(BUILD)/OVMF_VARS.fd
+	@rm -f $(STORE)
+	@tools/look.sh $(BUILD)/screen-relay.png $(RELAY_KEYS) >/dev/null 2>&1
+	@echo "what the programs said, in order:"
+	@grep -ao 'user: .*' $(BUILD)/serial.log | sed 's/^user: //' | \
+	 sed 's/[[:space:]]*$$//' | grep -v '^$$' | sed 's/^/    /'
+	@echo "  DONE    $(BUILD)/screen-relay.png"
 
 debug: $(IMAGE) $(STORE) $(BUILD)/OVMF_VARS.fd
 	$(QEMU) -serial stdio -s -S

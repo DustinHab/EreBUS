@@ -226,12 +226,41 @@ object *proc_object(process *p) { return p ? p->self : NULL; }
  * The program was not holding this a moment ago and has no way to have
  * asked for it; somebody with the authority chose to pass it on, at
  * these rights and no more. */
+/* What handing `what` to a program actually delivers.
+ *
+ * For most objects: the object, at the rights the giver chose. For a
+ * running program: its letter box, send-only. Pointing one program at
+ * another cannot mean handing over the other's insides -- a program is
+ * not a thing to be read, it is a party to be spoken to, and the letter
+ * box is the only door it has. A program that has ended is a record,
+ * not a recipient, and handing someone a record of a conversation that
+ * can no longer happen is handing them nothing. */
+static bool grant_translate(object **what, u32 *rights)
+{
+    if (obj_type(*what) != TYPE_PROGRAM) return true;
+
+    /* Introducing one program to another is passing the second one on,
+     * and passing on is what the grant right is. Holding a program
+     * without it means holding a thing to look at, not a contact to
+     * hand around. */
+    if (!(*rights & CAP_GRANT)) return false;
+
+    process *q = *(process **)obj_data(*what);
+    if (!is_live(q) || !q->inbox) return false;
+
+    *what = q->inbox;
+    *rights = CAP_CALL;
+    return true;
+}
+
 bool proc_grant(object *program, object *what, u32 rights)
 {
     if (!program || obj_type(program) != TYPE_PROGRAM || !what) return false;
 
     process *p = *(process **)obj_data(program);
     if (!is_live(p) || !p->inbox) return false;
+
+    if (!grant_translate(&what, &rights)) return false;
 
     /* Whatever it held for this object before stops counting.
      *
@@ -256,6 +285,12 @@ bool proc_revoke(object *program, object *what)
 
     process *p = *(process **)obj_data(program);
     if (!is_live(p) || !p->inbox) return false;
+
+    /* Withdrawing needs no right that giving needed: taking back what
+     * one handed out is always allowed, so the translation runs with
+     * the check pre-satisfied. */
+    u32 any = CAP_GRANT;
+    if (!grant_translate(&what, &any)) return false;
 
     if (cap_revoke_object(p->dom, what) == 0) return false;
 

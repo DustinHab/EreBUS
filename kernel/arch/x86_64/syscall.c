@@ -148,6 +148,29 @@ static u64 do_write(domain *d, u64 handle, u64 offset, u64 value)
     return SYS_OK;
 }
 
+/* Passing a held capability onward, inside a message.
+ *
+ * This is delegation from below: not the shell handing something to a
+ * program, but one program handing something to another. The checks
+ * are not here -- they are in port_send, on the same path every other
+ * capability transfer takes. The sender must hold the right to grant
+ * what it passes, and what arrives is the intersection of what it held
+ * with what it offered. A program can only ever give away less than it
+ * has, exactly like everyone else. */
+static u64 do_pass(domain *d, u64 port, u64 tag, u64 cap, u64 mask, u64 w0)
+{
+    message m = { 0 };
+    m.tag = tag;
+    m.nwords = 1;
+    m.words[0] = w0;
+    m.ncaps = 1;
+    m.caps[0] = (cap_handle)cap;
+    m.cap_mask[0] = (u32)mask;
+
+    if (!port_send(d, (cap_handle)port, &m)) return SYS_DENIED;
+    return SYS_OK;
+}
+
 u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4);
 
 u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4)
@@ -175,6 +198,9 @@ u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4)
 
     case SYS_WRITE:
         return do_write(d, a0, a1, a2);
+
+    case SYS_PASS:
+        return do_pass(d, a0, a1, a2, a3, a4);
 
     default:
         return SYS_BADCALL;

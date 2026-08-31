@@ -5,10 +5,12 @@
 
 /* The whole system call interface.
  *
- * Four calls. There is nothing here to open a file with, no way to ask
- * for anything by name, and no call that grants authority. A program
- * begins holding whatever capabilities it was handed and can only ever
- * use those, pass them on weakened, or let them go.
+ * Seven calls. There is nothing here to open a file with, no way to ask
+ * for anything by name, and no call that grants authority out of thin
+ * air. A program begins holding whatever capabilities it was handed and
+ * can only ever use those, pass them on weakened, or let them go --
+ * pass is the one call that moves authority, and it can only ever move
+ * less than the caller holds.
  *
  * The size of this list is the point. Every system call is a place
  * where untrusted input crosses into the kernel, and the surest way to
@@ -20,7 +22,8 @@
 #define SYS_RECEIVE 3   /* receive(handle, buffer) */
 #define SYS_READ    4   /* read(handle, offset) -> eight bytes */
 #define SYS_WRITE   5   /* write(handle, offset, value) */
-#define SYS_MAX     6
+#define SYS_PASS    6   /* pass(port, tag, capability, mask, word) */
+#define SYS_MAX     7
 
 /* Results. Deliberately few and deliberately vague: telling a caller
  * exactly why a capability did not work would let it map out what it

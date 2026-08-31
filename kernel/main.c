@@ -111,10 +111,13 @@ static object *seed_graph(void)
 extern char user_hello[];
 extern char user_trespass[];
 extern char user_agent[];
+extern char user_courier[];
 
-/* The one program that stays running. The other two make their point
- * and end; this one waits to be handed something. */
+/* The programs that stay running. hello and trespass make their point
+ * and end; these two wait to be handed things -- and the courier, once
+ * it can reach somebody, hands them on. */
 static object *agent_program;
+static object *courier_program;
 
 /* The one capability the kernel keeps on the console port: the right to
  * take messages out of it. Programs get send-only copies. */
@@ -653,16 +656,23 @@ void kmain(eb_boot_info *bi)
                     proc_id(proc), proc_name(proc));
     }
 
-    /* The one that stays. It begins holding exactly what the other two
-     * hold and can do nothing with it but wait -- there is no call it
-     * could make that would produce the name of anything else. What it
-     * ends up able to touch is decided entirely from the outside, later,
-     * by pointing its program object at something. */
+    /* The ones that stay. Each begins holding exactly what the other
+     * two held and can do nothing with it but wait -- there is no call
+     * either could make that would produce the name of anything else.
+     * What they end up able to touch is decided entirely from the
+     * outside, later, by pointing their program objects at things. */
     process *agent = proc_create("agent", user_agent, console);
     if (agent && proc_start(agent)) {
         agent_program = proc_object(agent);
         kprintf("proc: %llu (%s) waiting on its letter box, holding nothing else\n",
                 proc_id(agent), proc_name(agent));
+    }
+
+    process *courier = proc_create("courier", user_courier, console);
+    if (courier && proc_start(courier)) {
+        courier_program = proc_object(courier);
+        kprintf("proc: %llu (%s) waiting to pass things on\n",
+                proc_id(courier), proc_name(courier));
     }
 
     obj_release(console);
@@ -751,25 +761,36 @@ void kmain(eb_boot_info *bi)
     }
 
     if (root) {
-        /* Put the running program where it can be reached.
+        /* Put the running programs where they can be reached.
          *
-         * A snapshot from an earlier boot brings back the program object
-         * of a process that no longer exists, so the slot is reused
-         * rather than added to: there is one agent because there is one
-         * agent running, and the graph should say so. */
-        if (agent_program) {
+         * A snapshot from an earlier boot brings back the program
+         * objects of processes that no longer exist. Those slots are
+         * cleared first and refilled: the graph should hold exactly the
+         * programs that are running, not one dead record per boot. */
+        for (u64 i = 0; i < obj_slots(root); i++) {
+            object *s = obj_get_slot(root, i);
+            if (s && obj_type(s) == TYPE_PROGRAM && !proc_is_running(s)) {
+                obj_set_slot(root, i, NULL, 0);
+                obj_set_slot_name(root, i, NULL);
+            }
+        }
+
+        object *progs[2] = { agent_program, courier_program };
+        const char *what_for[2] = { "a program, waiting",
+                                    "a courier, waiting" };
+        for (u32 pi = 0; pi < 2; pi++) {
+            if (!progs[pi]) continue;
+
             u64 n = obj_slots(root), at = n;
-            for (u64 i = 0; i < n; i++) {
-                object *s = obj_get_slot(root, i);
-                if (s && obj_type(s) == TYPE_PROGRAM) { at = i; break; }
-            }
-            if (at < n || obj_grow_slots(root, n + 1)) {
-                /* Read and grant, not write. Nobody edits a running
-                 * program by typing into it; what this reference is for
-                 * is being pointed at things. */
-                obj_set_slot(root, at, agent_program, CAP_READ | CAP_GRANT);
-                obj_set_slot_name(root, at, "a program, waiting");
-            }
+            for (u64 i = 0; i < n; i++)
+                if (!obj_get_slot(root, i)) { at = i; break; }
+            if (at == n && !obj_grow_slots(root, n + 1)) continue;
+
+            /* Read and grant, not write. Nobody edits a running program
+             * by typing into it; what these references are for is being
+             * pointed at things. */
+            obj_set_slot(root, at, progs[pi], CAP_READ | CAP_GRANT);
+            obj_set_slot_name(root, at, what_for[pi]);
         }
 
         /* One capability, held by the shell, carrying everything we can
