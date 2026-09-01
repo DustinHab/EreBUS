@@ -37,6 +37,9 @@ bool    proc_grant(object *program, object *what, u32 rights);
 bool    proc_grant_word(object *program, object *what, u32 rights,
                         u64 word);
 
+/* A bare number into the program's letter box, no capability. */
+bool    proc_post_number(object *program, u64 tag, u64 w0);
+
 /* And taking it back. The program is not asked and cannot refuse; it
  * finds out by trying. */
 bool    proc_revoke(object *program, object *what);

@@ -33,12 +33,16 @@ void pipe_prepare(struct domain *k);
  * or no peer is named. */
 bool pipe_post(object *o);
 
-/* Asks the peer to run a text: it travels as a recipe, runs over
- * there under the interpreter's own time budget, and its answer
- * comes home as a journal line and a small text in arrivals. One
- * ask at a time. The far machine refuses unless its settings say
+/* Hands a task to the desk. A task whose first line says
+ * "split P from LO to HI" is divided into parts and dealt to the
+ * machines that answered the scan willing, their numeric answers
+ * summed; any other text is one recipe, asked of the settings'
+ * peer. Either way it runs over there under the interpreter's own
+ * time budget, and the result is written back into the task itself
+ * when `writable` says the sender may -- otherwise it is laid into
+ * arrivals. The far machines refuse unless their settings say
  * "work | welcomed". */
-bool pipe_ask(object *o);
+bool pipe_ask(object *o, bool writable);
 
 /* The list arrivals are laid in, adopted or created by main. */
 void pipe_arrivals_set(object *list);

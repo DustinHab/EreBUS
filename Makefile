@@ -105,6 +105,7 @@ KERN_C   := kernel/main.c \
             kernel/net/pipe.c \
             kernel/net/net.c \
             kernel/user/runner.c \
+            kernel/user/foreman.c \
             kernel/arch/x86_64/syscall.c \
             kernel/arch/x86_64/gdt.c \
             kernel/arch/x86_64/trap.c
@@ -166,8 +167,8 @@ $(BUILD)/%.o: %.S
 	@echo "  AS      $<"
 	@$(CC) $(KERN_FLAGS) -c $< -o $@
 
-# The one C file that runs in ring 3. It lives in the kernel image but
-# is mapped read-only into every process, so it may not lean on the
+# The C files that run in ring 3. They live in the kernel image but
+# are mapped read-only into every process, so they may not lean on the
 # kernel's rodata: no stack protector (the guard is a kernel symbol)
 # and no jump tables (they are rodata with absolute addresses).
 $(BUILD)/kernel/user/runner.o: kernel/user/runner.c $(FONT)
@@ -175,6 +176,12 @@ $(BUILD)/kernel/user/runner.o: kernel/user/runner.c $(FONT)
 	@echo "  CC      kernel/user/runner.c (ring 3)"
 	@$(CC) $(KERN_FLAGS) -fno-stack-protector -fno-jump-tables \
 	       -c kernel/user/runner.c -o $@
+
+$(BUILD)/kernel/user/foreman.o: kernel/user/foreman.c $(FONT)
+	@mkdir -p $(dir $@)
+	@echo "  CC      kernel/user/foreman.c (ring 3)"
+	@$(CC) $(KERN_FLAGS) -fno-stack-protector -fno-jump-tables \
+	       -c kernel/user/foreman.c -o $@
 
 $(KERNEL): $(KERN_OBJ) kernel/arch/x86_64/linker.ld
 	@echo "  LINK    $@"
@@ -379,8 +386,8 @@ look: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 AGENT_TO_PROGRAM := down down down down right home \
                     $(shell for i in $$(seq 17); do printf 'm100,7 '; done)
 AGENT_KEYS := $(AGENT_TO_PROGRAM) click \
-              m0,100 m0,100 m0,100 m0,100 m0,29 click esc \
-              m-94,-100 m0,-100 m0,-100 m0,-100 m0,-30 click \
+              m0,100 m0,100 m0,100 m0,100 m0,73 click esc \
+              m-94,-100 m0,-100 m0,-100 m0,-100 m0,-100 m0,26 click \
               m100,0 m100,0 m78,0 click
 
 agent: $(IMAGE) $(BUILD)/test-vars.fd
@@ -400,25 +407,26 @@ agent: $(IMAGE) $(BUILD)/test-vars.fd
 # duly reads it and fails to change it. No step here involves the shell
 # doing the delegating; two programs did.
 # The coordinates track the root's slot layout: seed objects in 0-3,
-# the standard programs in 4-11, the time in 12, the log in 13, the
-# settings in 14, the activity in 15, so the note made here becomes
-# slot 16. When the seed graph changes, this changes. They also track
-# the add palette: five fixed offers, then a header and the eight
-# startable programs (nine rows), then a header and the carries --
-# when the palette gains a row, every carry click below it moves by
-# a row's 22 pixels.
+# the standard programs in 4-13 (foreman last), the time in 14, the
+# log in 15, the settings in 16, the activity in 17, the arrivals in
+# 18, so the note made here becomes slot 19. When the seed graph
+# changes, this changes. They also track the add palette: seven fixed
+# offers, then a header and the ten startable programs, then a header
+# and the carries -- when the palette gains a row, every carry click
+# below it moves by a row's 22 pixels, and a carry sitting after the
+# foreman's slot moves once more.
 RELAY_HOME := home $(shell for i in $$(seq 17); do printf 'm100,0 '; done)
-RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,100 m0,100 m0,100 m0,10 click \
+RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,100 m0,100 m0,100 m0,33 click \
               m0,22 click ret \
               down down down down down down down down down down down \
               down down down down down right \
               p a s s spc i t left \
-              up up up up up up up up up up up up up right \
+              up up up up up up up up up up up up up up right \
               $(RELAY_HOME) m0,100 m0,15 click \
-              m0,100 m0,100 m0,100 m0,100 m0,100 m0,28 click ret \
+              m0,100 m0,100 m0,100 m0,100 m0,100 m0,72 click ret \
               $(RELAY_HOME) m0,100 m0,39 click \
               m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 \
-              m0,12 click ret
+              m0,78 click ret
 
 relay: $(IMAGE) $(BUILD)/test-vars.fd
 	@rm -f $(STORE)

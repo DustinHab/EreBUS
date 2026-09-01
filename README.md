@@ -501,6 +501,35 @@ built binary.
   is never invisible. The journal opens at its end -- the newest
   line is why one came -- and stays pinned there as lines arrive,
   until scrolling back up to read history unpins it.
+* **The desk deals the work out.** Far work grew from one ask at a
+  time into a queue that divides: a task whose first line says
+  "split P from LO to HI" is cut into parts, each carrying its own
+  stretch of the range -- a visiting script's first wait reads the
+  low end as m, its second the high end -- and the desk deals the
+  parts round-robin to the machines that answered the scan willing,
+  collects their numbers, and sums them. Four parts of a sum over
+  two lent machines come back as one total, written into the task
+  itself as "= 50005000 (4 parts)"; a busy neighbour is not a
+  failure but a turn to wait for, an unreachable one costs the part
+  one retry elsewhere. The palette offers "task" ready-seeded with
+  exactly this shape. Honest limits: the desk runs one job at a
+  time, a worker lends one part at a time, the only combining rule
+  is the sum -- anything else is the recipe's to encode -- and the
+  asking machine does not lend its own processor to its own parts
+  yet.
+* **The foreman, and the desk's door.** Asking far work is now a
+  capability: the wire's port takes a task under the WORK tag, from
+  any program that was handed it, which makes automatic
+  distribution something the graph can say -- who holds the wire
+  can send work out, and nobody else. The foreman is the program
+  that uses it: point tasks at it and each is handed to the desk,
+  watched until the answer stands written inside it, and announced
+  -- no click after the pointing. A task whose first line carries
+  "again N" is handed in anew every N seconds, the old answers left
+  behind as history, which turns a task into a standing order: a
+  measurement, a sum, a check, recomputed across the machines on
+  the wire while nobody watches. The foreman holds the wire and
+  what it is given, and nothing else.
 * **What a result is worth.** An answer is a claim by the machine
   that answered, nothing more. Nothing here proves the arithmetic
   was actually done: there are no attestations, no redundant runs,
@@ -524,9 +553,10 @@ built binary.
   identity: RSA/ECDSA signatures and a root store
 * Identity under the pipe's knock — remembering who a machine was
   the last time, so an impostor answering the knock is caught
-* Work at scale — several jobs in flight and several lent
-  processors at once, and repeated answers compared by the system
-  instead of by hand
+* Work at scale, further — several desk jobs advancing at once, a
+  worker lending more than one part at a time, the asking machine
+  lending its own processor too, and repeated answers compared by
+  the system instead of by hand
 
 ## A note on Secure Boot
 

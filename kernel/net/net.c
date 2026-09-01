@@ -1059,7 +1059,20 @@ static void net_thread(void *arg)
     for (;;) {
         message m;
         if (port_try_receive(kdom, service_receive, &m)) {
-            if (m.ncaps >= 1) {
+            if (m.ncaps >= 1 && m.tag == 0x4B524F57ULL /* "WORK" */) {
+                /* A task for the desk. The capability decides how the
+                 * answer can come back: writable, and it is written
+                 * into the task; readable only, and it goes to
+                 * arrivals. */
+                object *o = cap_lookup(kdom, m.caps[0],
+                                       CAP_READ | CAP_WRITE);
+                bool writable = (o != NULL);
+                if (!o) o = cap_lookup(kdom, m.caps[0], CAP_READ);
+                if (o && obj_type(o) == TYPE_TEXT)
+                    pipe_ask(o, writable);
+                cap_revoke(kdom, m.caps[0]);
+                if (m.ncaps > 1) cap_revoke(kdom, m.caps[1]);
+            } else if (m.ncaps >= 1) {
                 /* The capability names the object and carries the
                  * right; the lookup is the only door, and it opens
                  * for read-and-write or not at all. */

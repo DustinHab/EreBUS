@@ -25,7 +25,9 @@ object *runner_launch(object *script);
 
 /* Starts the interpreter on a visiting text, for the pipe: the words
  * read-only, a reply port send-only, and a time budget the
- * interpreter itself enforces. Holds nothing else. */
-object *work_launch(object *script, object *reply, u64 budget_seconds);
+ * interpreter itself enforces. Holds nothing else. A divided job's
+ * range rides along: lo on the way-home gift, hi as a bare number. */
+object *work_launch(object *script, object *reply, u64 budget_seconds,
+                    i64 lo, i64 hi);
 
 #endif /* EB_STANDARD_H */

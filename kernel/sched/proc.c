@@ -382,6 +382,23 @@ bool proc_grant(object *program, object *what, u32 rights)
     return proc_grant_word(program, what, rights, 0);
 }
 
+/* A bare number into a program's letter box -- no capability, just a
+ * word under a tag. How a visiting script learns the far end of its
+ * range. */
+bool proc_post_number(object *program, u64 tag, u64 w0)
+{
+    if (!program || obj_type(program) != TYPE_PROGRAM) return false;
+    if (!proc_is_running(program)) return false;
+    process *p = ((program_ref *)obj_data(program))->p;
+    if (!p->inbox) return false;
+
+    message m = { 0 };
+    m.tag = tag;
+    m.nwords = 1;
+    m.words[0] = w0;
+    return port_post(p->inbox, &m, NULL, NULL, 0, "the desk");
+}
+
 bool proc_revoke(object *program, object *what)
 {
     if (!program || obj_type(program) != TYPE_PROGRAM || !what) return false;

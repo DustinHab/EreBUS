@@ -57,12 +57,20 @@
 
 #define CHUNK_MAX 1024
 #define CARRY_MAX_BYTES 65536
-#define INNER_MAX (24 + CHUNK_MAX)
+#define INNER_MAX (40 + CHUNK_MAX)     /* the widest inner packet: an ask */
 
 /* Far work. A recipe fits one sealed datagram; the budget is what the
  * asking side grants and the interpreter over there enforces. */
 #define RECIPE_MAX   1024
 #define ASK_BUDGET_S 20
+
+/* The desk: how many jobs may queue, how many parts a job may be
+ * divided into, how many asks fly at once, how many machines are
+ * remembered as candidates. */
+#define DESK_JOBS 4
+#define PART_MAX  8
+#define FASK_MAX  4
+#define CAND_MAX  8
 
 /* What an answer says about its job. */
 #define A_OK     0                   /* here is the result */
@@ -221,6 +229,24 @@ static void wr64(u8 *p, u64 v)
     wr32(p, (u32)v);
     wr32(p + 4, (u32)(v >> 32));
 }
+
+static u32 put(char *buf, u32 at, const char *s)
+{
+    while (*s) buf[at++] = *s++;
+    return at;
+}
+
+static u32 put_dec(char *buf, u32 at, u64 v)
+{
+    char tmp[24];
+    u32 n = 0;
+    if (v == 0) tmp[n++] = '0';
+    while (v) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n) buf[at++] = tmp[--n];
+    return at;
+}
+
+static void lay_answer(u32 no, const u8 *text);
 
 static u8 wire_kind_of(type_id t)
 {
@@ -390,31 +416,78 @@ static void knock_send(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Far work                                                            */
+/* Far work: the desk                                                  */
 /* ------------------------------------------------------------------ */
 
 /* A text can be asked of another machine: it travels as a recipe,
  * runs over there in the interpreter with a way home and a clock and
  * nothing else, and what it answers comes back correlated by job.
- * The far machine only works at all when its settings welcome it. */
+ * The far machine only works at all when its settings welcome it.
+ *
+ * The desk is where such asks queue. A task whose first line says
+ * "split P from LO to HI" is divided: P parts, each carrying its
+ * stretch of the range, handed round-robin to the machines that
+ * answered the scan willing -- and the parts' answers, numbers by
+ * contract, are summed into one. A task without the line is one
+ * part, asked of the settings' peer, its answer taken as it is.
+ * Either way the result is written back into the task itself when
+ * the task came writable, and laid into arrivals when it did not.
+ * Programs reach the desk through the wire, which makes asking far
+ * work a capability like everything else here. */
 
 static domain *pipe_kdom;
 
 void pipe_prepare(domain *k) { pipe_kdom = k; }
 
-/* The ask we have out, if any. */
+/* Part states. */
+#define P_PEND 0
+#define P_RUN  1
+#define P_DONE 2
+
+/* Job states. */
+#define DJ_FRESH 0
+#define DJ_SCAN  1
+#define DJ_RUN   2
+
+typedef struct {
+    bool    used;
+    u32     no;
+    object *task;                  /* retained until the job ends */
+    bool    writable;
+    u8      state;
+    u64     scan_until_ns;
+    u64     deadline_ns;
+
+    u32     parts;
+    i64     lo, hi;
+    u32     len;
+    u8      recipe[RECIPE_MAX];
+
+    u8      pstate[PART_MAX];
+    u32     ptries[PART_MAX];
+    u64     pwait_ns[PART_MAX];    /* not before */
+    i64     presult[PART_MAX];
+    u8      raw[24];               /* a lone part's answer, as said */
+
+    u8      cand[CAND_MAX][4];
+    u16     cand_port[CAND_MAX];
+    u32     cand_count;
+    u32     next_cand;
+} desk_job;
+
+static desk_job desk[DESK_JOBS];
+static u32 desk_no;
+
+/* The asks in flight, at most one per part. */
 static struct {
     bool active;
+    u8   ip[4];
+    u16  port;
     u64  id;
-    u32  no;                         /* the human's number for it */
+    u32  job, part;
     u32  tries;
-    u64  last_ns;
-    u64  started_ns;
-    u32  len;
-    u8   data[RECIPE_MAX];
-} ask;
-
-static u32 ask_no;
+    u64  last_ns, started_ns;
+} fask[FASK_MAX];
 
 /* The job we are running for someone else, if any. One at a time:
  * a worker is a neighbour lending a hand, not a queue. */
@@ -467,19 +540,109 @@ static void answer_send(sealrec *s, u64 id, u8 status, const u8 text[24])
     seal_send(s, pkt, 40);
 }
 
-static void ask_send(sealrec *s)
+/* One part's stretch of the job's range: the range is dealt like
+ * cards, the first parts taking the leftovers. */
+static void part_range(const desk_job *j, u32 part, i64 *lo, i64 *hi)
 {
-    u8 pkt[24 + RECIPE_MAX];
-    wr32(pkt, MAGIC);
-    pkt[4] = K_ASK; pkt[5] = pkt[6] = pkt[7] = 0;
-    wr64(pkt + 8, ask.id);
-    wr32(pkt + 16, ask.len);
-    wr32(pkt + 20, ASK_BUDGET_S);
-    memcpy(pkt + 24, ask.data, ask.len);
-    seal_send(s, pkt, 24 + ask.len);
+    if (j->parts <= 1 || j->hi < j->lo) { *lo = j->lo; *hi = j->hi; return; }
+    u64 n = (u64)(j->hi - j->lo + 1);
+    u64 base = n / j->parts, rem = n % j->parts;
+    u64 from = (u64)part * base + (part < rem ? part : rem);
+    u64 count = base + (part < rem ? 1 : 0);
+    *lo = j->lo + (i64)from;
+    *hi = *lo + (i64)(count ? count - 1 : 0);
 }
 
-bool pipe_ask(object *o)
+static void fask_send(sealrec *s, u32 fi)
+{
+    desk_job *j = &desk[fask[fi].job];
+    i64 plo, phi;
+    part_range(j, fask[fi].part, &plo, &phi);
+
+    u8 pkt[40 + RECIPE_MAX];
+    wr32(pkt, MAGIC);
+    pkt[4] = K_ASK; pkt[5] = pkt[6] = pkt[7] = 0;
+    wr64(pkt + 8, fask[fi].id);
+    wr32(pkt + 16, j->len);
+    wr32(pkt + 20, ASK_BUDGET_S);
+    wr64(pkt + 24, (u64)plo);
+    wr64(pkt + 32, (u64)phi);
+    memcpy(pkt + 40, j->recipe, j->len);
+    seal_send(s, pkt, 40 + j->len);
+}
+
+/* Appends "= <answer>" to the task, the way a hand would write the
+ * result under the sum. Failing quietly would hide the outcome, so a
+ * page with no room says so in the journal instead. */
+static void task_append(object *task, const char *tail)
+{
+    u8 *d = (u8 *)obj_data(task);
+    if (!d) return;
+    u64 size = obj_size(task);
+    u64 len = 0;
+    while (len < size && d[len]) len++;
+
+    u64 need = 3;
+    for (u32 i = 0; tail[i]; i++) need++;
+    if (len + need + 1 > size) {
+        journal_says("pipe", "the task has no room for its answer");
+        return;
+    }
+
+    if (len && d[len - 1] != '\n') d[len++] = '\n';
+    d[len++] = '=';
+    d[len++] = ' ';
+    for (u32 i = 0; tail[i]; i++) d[len++] = (u8)tail[i];
+    d[len++] = '\n';
+    d[len] = 0;
+    obj_touch(task);
+}
+
+static void desk_clear_fasks(u32 job)
+{
+    for (u32 i = 0; i < FASK_MAX; i++)
+        if (fask[i].active && fask[i].job == job) fask[i].active = false;
+}
+
+static void job_end(desk_job *j, bool ok, const char *text,
+                    const char *why)
+{
+    if (ok) {
+        char line[64];
+        u32 at = put(line, 0, " answers: ");
+        at = put(line, at, text);
+        line[at] = 0;
+        job_says(j->no, line);
+        kprintf("pipe: job %u answers: %s\n", j->no, text);
+
+        if (j->writable) task_append(j->task, text);
+        else             lay_answer(j->no, (const u8 *)text);
+    } else {
+        char line[64];
+        u32 at = put(line, 0, ": ");
+        at = put(line, at, why);
+        line[at] = 0;
+        job_says(j->no, line);
+        kprintf("pipe: job %u failed: %s\n", j->no, why);
+
+        char fb[64];
+        u32 fat = put(fb, 0, "nothing (");
+        fat = put(fb, fat, why);
+        fat = put(fb, fat, ")");
+        fb[fat] = 0;
+        if (j->writable) task_append(j->task, fb);
+    }
+
+    desk_clear_fasks((u32)(j - desk));
+    if (j->task) obj_release(j->task);
+    j->task = NULL;
+    j->used = false;
+}
+
+/* Takes a task in: parses its first line for a split, strips old
+ * answers off its tail, and queues it. The one entry the chip, the
+ * wire and the foreman all use. */
+bool pipe_ask(object *o, bool writable)
 {
     if (!o) return false;
 
@@ -492,39 +655,108 @@ bool pipe_ask(object *o)
         journal_says("pipe", "only a text can be asked");
         return false;
     }
-    if (!settings_peer(NULL, NULL)) {
-        journal_says("pipe", "no peer is named in the settings");
-        return false;
-    }
-    if (ask.active) {
-        journal_says("pipe", "still waiting on the last job");
+
+    desk_job *j = NULL;
+    for (u32 i = 0; i < DESK_JOBS; i++)
+        if (!desk[i].used) { j = &desk[i]; break; }
+    if (!j) {
+        journal_says("pipe", "the desk is full; it will take more "
+                             "later");
         return false;
     }
 
     const u8 *d = (const u8 *)obj_data(o);
     u64 size = obj_size(o);
-    u32 len = 0;
+    u64 len = 0;
     if (d) while (len < size && d[len]) len++;
+
+    /* Old answers are history, not part of the recipe: trailing lines
+     * that begin "= " are left behind. */
+    for (;;) {
+        u64 end = len;
+        while (end > 0 && d[end - 1] == '\n') end--;
+        u64 start = end;
+        while (start > 0 && d[start - 1] != '\n') start--;
+        if (end > start + 1 && d[start] == '=' && d[start + 1] == ' ')
+            len = start;
+        else
+            break;
+    }
+    while (len > 0 && d[len - 1] == '\n') len--;
     if (len == 0) {
         journal_says("pipe", "there is nothing in it to ask");
         return false;
     }
-    if (len > RECIPE_MAX) {
+
+    /* The first line may divide the work: "split P from LO to HI".
+     * The numbers are read wherever they stand in the line. */
+    u64 eol = 0;
+    while (eol < len && d[eol] != '\n') eol++;
+
+    u32 parts = 1;
+    i64 lo = 0, hi = 0;
+    u64 recipe_at = 0;
+    bool split = (eol >= 5 && d[0]=='s' && d[1]=='p' && d[2]=='l' &&
+                  d[3]=='i' && d[4]=='t');
+    if (split) {
+        i64 nums[3];
+        u32 got = 0;
+        for (u64 i = 5; i < eol && got < 3; i++) {
+            bool neg = (d[i] == '-' && i + 1 < eol &&
+                        d[i+1] >= '0' && d[i+1] <= '9');
+            if (neg) i++;
+            if (d[i] < '0' || d[i] > '9') continue;
+            i64 v = 0;
+            while (i < eol && d[i] >= '0' && d[i] <= '9')
+                v = v * 10 + (d[i++] - '0');
+            nums[got++] = neg ? -v : v;
+        }
+        if (got < 3 || nums[0] < 1) {
+            journal_says("pipe", "the split line wants: "
+                                 "split P from LO to HI");
+            return false;
+        }
+        parts = (u32)(nums[0] > PART_MAX ? PART_MAX : nums[0]);
+        lo = nums[1];
+        hi = nums[2];
+        recipe_at = eol + 1;
+    }
+
+    if (recipe_at >= len) {
+        journal_says("pipe", "the task has no recipe under its line");
+        return false;
+    }
+    u64 rlen = len - recipe_at;
+    if (rlen > RECIPE_MAX) {
         journal_says("pipe", "that recipe is too long to send");
         return false;
     }
 
-    memcpy(ask.data, d, len);
-    ask.len = len;
-    rand_bytes((u8 *)&ask.id, 8);
-    ask.no = ++ask_no;
-    ask.tries = 0;
-    ask.last_ns = 0;
-    ask.started_ns = time_ns();
-    ask.active = true;
+    memset(j, 0, sizeof(*j));
+    memcpy(j->recipe, d + recipe_at, rlen);
+    j->len = (u32)rlen;
+    j->parts = parts;
+    j->lo = lo;
+    j->hi = hi;
+    j->writable = writable;
+    j->no = ++desk_no;
+    j->state = DJ_FRESH;
+    j->task = o;
+    obj_retain(o);
+    j->used = true;
 
-    job_says(ask.no, " asked of the peer");
-    kprintf("pipe: job %u asked, %u bytes of recipe\n", ask.no, len);
+    if (parts > 1) {
+        char line[48];
+        u32 at = put(line, 0, ": divided into ");
+        at = put_dec(line, at, parts);
+        at = put(line, at, " parts");
+        line[at] = 0;
+        job_says(j->no, line);
+    } else {
+        job_says(j->no, " asked of the peer");
+    }
+    kprintf("pipe: job %u queued, %u bytes, %u part%s\n",
+            j->no, j->len, parts, parts == 1 ? "" : "s");
     return true;
 }
 
@@ -815,10 +1047,12 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
      * second job: while it runs it is ignored, once answered the
      * old answer is repeated. Fresh asks are taken only when the
      * settings welcome work, and one at a time. */
-    if (kind == K_ASK && len >= 24) {
+    if (kind == K_ASK && len >= 40) {
         u32 rlen = rd32(p + 16);
         u64 budget = rd32(p + 20);
-        if (rlen == 0 || rlen > RECIPE_MAX || 24 + rlen > len) return;
+        i64 wlo = (i64)rd64(p + 24);
+        i64 whi = (i64)rd64(p + 32);
+        if (rlen == 0 || rlen > RECIPE_MAX || 40 + rlen > len) return;
 
         if (workj.active && id == workj.id) return;
         if (gave.valid && id == gave.id) {
@@ -840,7 +1074,7 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
 
         object *script = obj_create(TYPE_TEXT, rlen + 512, 0);
         if (!script) return;
-        memcpy(obj_data(script), p + 24, rlen);
+        memcpy(obj_data(script), p + 40, rlen);
         obj_set_name(script, "visiting work");
 
         object *reply = port_create(4);
@@ -848,7 +1082,7 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         cap_handle h = cap_insert(pipe_kdom, reply, CAP_READ);
 
         if (budget == 0 || budget > 60) budget = ASK_BUDGET_S;
-        object *prog = work_launch(script, reply, budget);
+        object *prog = work_launch(script, reply, budget, wlo, whi);
         obj_release(script);             /* the program holds its words */
         if (!prog) {
             cap_revoke(pipe_kdom, h);
@@ -873,51 +1107,111 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         return;
     }
 
-    /* What became of our job. */
+    /* What became of one of our parts. */
     if (kind == K_ANSWER && len >= 40) {
-        if (!ask.active || id != ask.id) return;
+        u32 fi = FASK_MAX;
+        for (u32 i = 0; i < FASK_MAX; i++)
+            if (fask[i].active && fask[i].id == id) { fi = i; break; }
+        if (fi == FASK_MAX) return;
+
+        u32 ji = fask[fi].job, part = fask[fi].part;
+        fask[fi].active = false;
+        if (ji >= DESK_JOBS || !desk[ji].used) return;
+        desk_job *j = &desk[ji];
         u8 status = p[5];
 
         if (status == A_OK) {
-            char line[48];
-            u32 at = 0;
-            const char *pre = "job ";
-            while (*pre) line[at++] = *pre++;
-            char dg[10];
-            u32 nd = 0;
-            u32 v = ask.no;
-            if (v == 0) dg[nd++] = '0';
-            while (v && nd < 10) { dg[nd++] = (char)('0' + v % 10); v /= 10; }
-            while (nd && at < 46) line[at++] = dg[--nd];
-            const char *mid = " answers: ";
-            while (*mid && at < 47) line[at++] = *mid++;
-            for (u32 i = 0; i < 24 && p[16 + i] && at < 47; i++)
-                line[at++] = (char)((p[16 + i] >= 0x20 &&
-                                     p[16 + i] < 0x7F) ? p[16 + i] : ' ');
-            line[at] = 0;
-            journal_says("pipe", line);
-
+            /* The text, and -- for a divided job -- the number it
+             * spells. Parts answer numbers by contract; a part that
+             * answers words ends the job honestly. */
             char tz[25];
             u32 ti = 0;
-            while (ti < 24 && p[16 + ti]) { tz[ti] = (char)p[16 + ti]; ti++; }
+            while (ti < 24 && p[16 + ti]) {
+                u8 c = p[16 + ti];
+                tz[ti++] = (char)((c >= 0x20 && c < 0x7F) ? c : ' ');
+            }
             tz[ti] = 0;
-            kprintf("pipe: job %u answers: %s\n", ask.no, tz);
 
-            lay_answer(ask.no, p + 16);
-        } else if (status == A_NOWORK) {
-            job_says(ask.no, ": that machine takes no work");
-            kprintf("pipe: job %u refused: no work taken\n", ask.no);
-        } else if (status == A_LATE) {
-            job_says(ask.no, ": it ran out of time");
-            kprintf("pipe: job %u ran out of time\n", ask.no);
-        } else if (status == A_BUSY) {
-            job_says(ask.no, ": the far side is busy");
-            kprintf("pipe: job %u refused: busy\n", ask.no);
-        } else {
-            job_says(ask.no, ": it ended without an answer");
-            kprintf("pipe: job %u ended silent\n", ask.no);
+            i64 v = 0;
+            bool neg = false, num = ti > 0;
+            u32 di = 0;
+            if (tz[0] == '-') { neg = true; di = 1; num = ti > 1; }
+            for (; di < ti; di++) {
+                if (tz[di] < '0' || tz[di] > '9') { num = false; break; }
+                v = v * 10 + (tz[di] - '0');
+            }
+            if (neg) v = -v;
+
+            if (j->parts > 1 && !num) {
+                job_end(j, false, NULL,
+                        "a part answered words, not a number");
+                return;
+            }
+
+            j->pstate[part] = P_DONE;
+            j->presult[part] = v;
+            memcpy(j->raw, p + 16, 24);
+
+            u32 done = 0;
+            for (u32 i = 0; i < j->parts; i++)
+                if (j->pstate[i] == P_DONE) done++;
+            if (done < j->parts) return;
+
+            if (j->parts == 1) {
+                job_end(j, true, tz, NULL);
+            } else {
+                i64 total = 0;
+                for (u32 i = 0; i < j->parts; i++)
+                    total += j->presult[i];
+
+                char text[48];
+                u32 at = 0;
+                u64 mag = total < 0 ? (u64)-total : (u64)total;
+                char dg[24];
+                u32 nd = 0;
+                if (mag == 0) dg[nd++] = '0';
+                while (mag) { dg[nd++] = (char)('0' + mag % 10); mag /= 10; }
+                if (total < 0) text[at++] = '-';
+                while (nd) text[at++] = dg[--nd];
+                at = put(text, at, " (");
+                at = put_dec(text, at, j->parts);
+                at = put(text, at, " parts)");
+                text[at] = 0;
+                job_end(j, true, text, NULL);
+            }
+            return;
         }
-        ask.active = false;
+
+        if (status == A_BUSY) {
+            /* A busy neighbour is not a failure; the part waits its
+             * turn and the round-robin tries elsewhere meanwhile. */
+            j->pstate[part] = P_PEND;
+            j->pwait_ns[part] = time_ns() + 2 * SECOND;
+            return;
+        }
+
+        if (status == A_NOWORK) {
+            /* That machine is out. Strike it; with nobody left the
+             * job says so. */
+            for (u32 c = 0; c < j->cand_count; c++) {
+                if (!ip4_same(j->cand[c], fask[fi].ip)) continue;
+                for (u32 k = c; k + 1 < j->cand_count; k++)
+                    memcpy(j->cand[k], j->cand[k + 1], 4);
+                j->cand_count--;
+                break;
+            }
+            if (j->cand_count == 0) {
+                job_end(j, false, NULL, "nobody takes the work");
+                return;
+            }
+            j->pstate[part] = P_PEND;
+            j->pwait_ns[part] = time_ns();
+            return;
+        }
+
+        job_end(j, false, NULL,
+                status == A_LATE ? "it ran out of time"
+                                 : "it ended without an answer");
         return;
     }
 }
@@ -1069,18 +1363,18 @@ void pipe_service(void)
     if (in.active && time_ns() - in.started_ns > 10 * SECOND)
         in.active = false;
 
-    /* An unanswered knock is repeated, then given up on -- and with
-     * it goes whatever was waiting to travel. */
+    /* An unanswered knock is repeated, then given up on. A send that
+     * waited on it goes with it; the desk's parts keep their own
+     * clocks and simply try another machine. */
     if (knock.active) {
         u64 now = time_ns();
         if (!knock.last_ns || now - knock.last_ns >= 2 * SECOND) {
             if (knock.tries >= 3) {
                 knock.active = false;
-                if (out.busy || ask.active) {
+                if (out.busy) {
                     journal_says("pipe", "nobody answered the knock");
                     kprintf("pipe: the knock went unanswered\n");
                     out.busy = false;
-                    ask.active = false;
                 }
             } else {
                 knock.tries++;
@@ -1142,28 +1436,145 @@ void pipe_service(void)
         }
     }
 
-    /* The ask we have out: knock first, then repeat the ask a few
-     * times, then wait out the budget before calling it lost. */
-    if (ask.active) {
-        u8 apeer[4];
-        u16 app;
-        if (!settings_peer(apeer, &app)) {
-            ask.active = false;
-        } else {
-            sealrec *s = seal_by_ip(apeer);
+    /* The desk walks its first queued job: find hands, deal parts,
+     * keep the deadline. One job at a time -- the ones behind it
+     * wait their turn, which is also what the journal promised. */
+    {
+        desk_job *j = NULL;
+        for (u32 i = 0; i < DESK_JOBS; i++)
+            if (desk[i].used) { j = &desk[i]; break; }
+
+        if (j && j->state == DJ_FRESH) {
             u64 now = time_ns();
-            if (!s) {
-                knock_begin(apeer, app);
-            } else if (now - ask.started_ns >
-                       (u64)(ASK_BUDGET_S + 15) * SECOND) {
-                job_says(ask.no, ": no answer came");
-                kprintf("pipe: job %u heard nothing back\n", ask.no);
-                ask.active = false;
-            } else if (ask.tries < 3 &&
-                       (!ask.last_ns || now - ask.last_ns >= 2 * SECOND)) {
-                ask.tries++;
-                ask.last_ns = now;
-                ask_send(s);
+            j->deadline_ns = now +
+                (60 + (u64)j->parts * (ASK_BUDGET_S + 10)) * SECOND;
+            if (j->parts == 1) {
+                u8 peer[4];
+                u16 pp;
+                if (!settings_peer(peer, &pp)) {
+                    job_end(j, false, NULL,
+                            "no peer is named in the settings");
+                    j = NULL;
+                } else {
+                    memcpy(j->cand[0], peer, 4);
+                    j->cand_port[0] = pp;
+                    j->cand_count = 1;
+                    j->state = DJ_RUN;
+                }
+            } else {
+                /* Divided work goes to whoever is willing; the scan
+                 * asks the wire who that is. */
+                pipe_scan();
+                j->scan_until_ns = now + 4 * SECOND;
+                j->state = DJ_SCAN;
+            }
+        }
+
+        if (j && j->state == DJ_SCAN && time_ns() >= j->scan_until_ns) {
+            j->cand_count = 0;
+            u32 nf = pipe_found_count();
+            for (u32 i = 0; i < nf && j->cand_count < CAND_MAX; i++) {
+                u8 fip[4];
+                char nm[24];
+                bool wk;
+                if (!pipe_found_at(i, fip, nm, &wk, NULL)) break;
+                if (!wk) continue;
+                memcpy(j->cand[j->cand_count], fip, 4);
+                j->cand_port[j->cand_count] = PIPE_PORT;
+                j->cand_count++;
+            }
+            if (j->cand_count == 0) {
+                u8 peer[4];
+                u16 pp;
+                if (settings_peer(peer, &pp)) {
+                    memcpy(j->cand[0], peer, 4);
+                    j->cand_port[0] = pp;
+                    j->cand_count = 1;
+                }
+            }
+            if (j->cand_count == 0) {
+                job_end(j, false, NULL, "nobody on the wire takes work");
+                j = NULL;
+            } else {
+                char line[48];
+                u32 at = put(line, 0, "the desk deals to ");
+                at = put_dec(line, at, j->cand_count);
+                at = put(line, at, j->cand_count == 1 ? " machine"
+                                                      : " machines");
+                line[at] = 0;
+                journal_says("pipe", line);
+                j->state = DJ_RUN;
+            }
+        }
+
+        if (j && j->state == DJ_RUN) {
+            u64 now = time_ns();
+            if (now > j->deadline_ns) {
+                job_end(j, false, NULL,
+                        "the work did not come back in time");
+            } else {
+                for (u32 pi = 0; pi < j->parts; pi++) {
+                    if (j->pstate[pi] != P_PEND) continue;
+                    if (now < j->pwait_ns[pi]) continue;
+                    if (j->cand_count == 0) break;
+
+                    u32 fi = FASK_MAX;
+                    for (u32 i = 0; i < FASK_MAX; i++)
+                        if (!fask[i].active) { fi = i; break; }
+                    if (fi == FASK_MAX) break;
+
+                    u32 c = j->next_cand % j->cand_count;
+                    j->next_cand++;
+                    fask[fi].active = true;
+                    memcpy(fask[fi].ip, j->cand[c], 4);
+                    fask[fi].port = j->cand_port[c];
+                    rand_bytes((u8 *)&fask[fi].id, 8);
+                    fask[fi].job = (u32)(j - desk);
+                    fask[fi].part = pi;
+                    fask[fi].tries = 0;
+                    fask[fi].last_ns = 0;
+                    fask[fi].started_ns = now;
+                    j->pstate[pi] = P_RUN;
+                }
+            }
+        }
+    }
+
+    /* Each flying part: knock while the way is not sealed, repeat
+     * the ask a few times, and give the attempt up when its machine
+     * stays quiet -- the part then waits for another turn, once,
+     * before the job calls it lost. */
+    for (u32 i = 0; i < FASK_MAX; i++) {
+        if (!fask[i].active) continue;
+        desk_job *j = &desk[fask[i].job];
+        if (!j->used) { fask[i].active = false; continue; }
+        u64 now = time_ns();
+        bool give_up = false;
+
+        sealrec *s = seal_by_ip(fask[i].ip);
+        if (!s) {
+            knock_begin(fask[i].ip, fask[i].port);
+            give_up = (now - fask[i].started_ns > 8 * SECOND);
+        } else if (now - fask[i].started_ns >
+                   (u64)(ASK_BUDGET_S + 10) * SECOND) {
+            give_up = true;
+        } else if (fask[i].tries < 3 &&
+                   (!fask[i].last_ns ||
+                    now - fask[i].last_ns >= 2 * SECOND)) {
+            fask[i].tries++;
+            fask[i].last_ns = now;
+            fask_send(s, i);
+        }
+
+        if (give_up) {
+            u32 part = fask[i].part;
+            fask[i].active = false;
+            j->ptries[part]++;
+            if (j->ptries[part] >= 2) {
+                job_end(j, false, NULL, "no answer came");
+            } else {
+                j->pstate[part] = P_PEND;
+                j->pwait_ns[part] = now + SECOND;
             }
         }
     }

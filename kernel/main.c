@@ -126,6 +126,7 @@ extern char user_sums[];
 extern char user_watch[];
 extern char user_wipe[];
 extern char user_fetch[];
+extern void user_foreman(u64 console, u64 inbox);
 
 /* What the system ships with. hello and trespass make their point at
  * start-up and end; these stay, each doing one thing to whatever it is
@@ -146,6 +147,7 @@ static const struct {
     { "watch",   user_watch,   "watch" },
     { "wipe",    user_wipe,    "wipe" },
     { "fetch",   user_fetch,   "fetch" },
+    { "foreman", (char *)user_foreman, "foreman" },
 };
 #define STANDARD_COUNT ((u32)ARRAY_LEN(standard))
 
@@ -168,11 +170,14 @@ const char *standard_name(u32 i)
 }
 
 /* What some programs are born holding beyond the voice and the letter
- * box. fetch gets the wire, send-only -- recorded on its object like
- * every giving, so the graph itself says who can reach outside. */
+ * box. fetch and the foreman get the wire, send-only -- recorded on
+ * their objects like every giving, so the graph itself says who can
+ * reach outside. */
 static void standard_wire(const char *name, object *prog)
 {
-    if (!prog || strcmp(name, "fetch") != 0 || !net_port()) return;
+    if (!prog || !net_port()) return;
+    if (strcmp(name, "fetch") != 0 && strcmp(name, "foreman") != 0)
+        return;
     obj_set_slot(prog, 0, net_port(), CAP_CALL);
     obj_set_slot_name(prog, 0, "the wire");
     proc_grant(prog, net_port(), CAP_CALL);
@@ -225,8 +230,11 @@ object *runner_launch(object *script)
  * budget rides on the first gift and the interpreter enforces it,
  * which is what makes running a stranger's text tolerable: the
  * language is the jail, and this hands the visitor a cell with a
- * clock in it and nothing else. */
-object *work_launch(object *script, object *reply, u64 budget_seconds)
+ * clock in it and nothing else. A divided job also brings its range:
+ * the low end rides on the way home, the high end follows as a bare
+ * number, so the script's first two waits read them as m. */
+object *work_launch(object *script, object *reply, u64 budget_seconds,
+                    i64 lo, i64 hi)
 {
     if (!script || obj_type(script) != TYPE_TEXT || !reply ||
         !console_port)
@@ -244,7 +252,8 @@ object *work_launch(object *script, object *reply, u64 budget_seconds)
 
     obj_set_slot(prog, 1, reply, CAP_CALL);
     obj_set_slot_name(prog, 1, "the way home");
-    proc_grant(prog, reply, CAP_CALL);
+    proc_grant_word(prog, reply, CAP_CALL, (u64)lo);
+    proc_post_number(prog, 0x424D554EULL /* "NUMB" */, (u64)hi);
 
     kprintf("proc: %llu (work) running a visiting text\n", proc_id(p));
     return prog;
@@ -337,7 +346,17 @@ static const char lang_text[] =
     "holding the way home as its first gift -- wait, then\n"
     "answer sends the result back. it must finish inside\n"
     "its budget, and the far machine only works at all\n"
-    "when its settings say \"work | welcomed\".\n";
+    "when its settings say \"work | welcomed\".\n"
+    "\n"
+    "a first line \"split P from LO to HI\" divides such\n"
+    "a task among the machines that answer the scan\n"
+    "willing: each part runs with its own stretch -- the\n"
+    "first wait says the low end as m, the second wait\n"
+    "the high end -- and the parts' numbers are summed.\n"
+    "the answer is written back into the task. point a\n"
+    "task at the foreman program and it is seen through\n"
+    "without another click; \"again N\" in the first line\n"
+    "hands it in anew every n seconds.\n";
 
 /* Finds the language page -- a reference named "the language" on the
  * root or one list below it -- or makes one, preferring to live in

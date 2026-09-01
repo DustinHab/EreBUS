@@ -539,7 +539,15 @@ void user_runner(u64 console, u64 inbox)
         if (next == FLOW_WAIT) {
             if (msg_receive(inbox, buf) == 0) {
                 if (msg_ncaps(buf) > 0) it = msg_u64(buf, MSG_CAP0);
-                v['m' - 'a'] = (i64)msg_u64(buf, MSG_WORD0);
+                /* m carries the message's number. For a gift that is
+                 * the word riding along with it -- a far job's range
+                 * arrives this way -- and for a plain message it is
+                 * the first word, which is how tell-to-tell speech
+                 * already reads. */
+                u64 tag = msg_u64(buf, 0);
+                v['m' - 'a'] = (tag == 0x4556494721ULL)
+                             ? (i64)msg_u64(buf, MSG_WORD0 + 8)
+                             : (i64)msg_u64(buf, MSG_WORD0);
                 ln++;
             } else {
                 r_yield();                 /* try the same line again */

@@ -402,7 +402,7 @@ static bool cut_marked(u8 *d, u64 size, u64 *len)
 /* What the palette offers. The fixed entries make something new; the
  * rest are objects already in hand, so pointing at something that
  * exists needs no dragging and no second window. */
-#define PALETTE_FIXED 6
+#define PALETTE_FIXED 7
 #define CARRY_MAX 24
 
 /* What a picture is born as: room enough to draw in, small enough to
@@ -1839,7 +1839,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         if (edit.kind == EDIT_PICK) {
             static const char *fixed[PALETTE_FIXED] = {
                 "  text", "  bytes", "  list", "  picture", "  script",
-                "  page"
+                "  page", "  task"
             };
             for (u32 p = 0; p < PALETTE_FIXED; p++) {
                 if (CROW_ON) {
@@ -3501,7 +3501,8 @@ static void act_on(const hot_region *r)
          * peer, the same chooser opens -- picking a machine asks it. */
         if (focus_rights() & CAP_READ) {
             if (settings_peer(NULL, NULL)) {
-                pipe_ask(focus());
+                pipe_ask(focus(), (focus_rights() & CAP_WRITE) &&
+                                  nav.at_generation == 0);
             } else {
                 sendto_open = true;
                 sendto_ask = true;
@@ -3534,8 +3535,11 @@ static void act_on(const hot_region *r)
         if (!pipe_found_at(r->index, fip, fname, NULL, NULL)) break;
         peer_write(fip);
         if (focus_rights() & CAP_READ) {
-            if (sendto_ask) pipe_ask(focus());
-            else            pipe_post(focus());
+            if (sendto_ask)
+                pipe_ask(focus(), (focus_rights() & CAP_WRITE) &&
+                                  nav.at_generation == 0);
+            else
+                pipe_post(focus());
         }
         sendto_open = false;
         nav.redraw = true;
@@ -3805,6 +3809,34 @@ static void act_on(const hot_region *r)
                     pdta[i] = (u8)ask[i];
             }
             suggest = "page";
+            created = true;
+        }
+        else if (r->index == 6) {
+            /* Work to be divided among machines. The first line says
+             * how; the recipe below runs over there, each part on
+             * its stretch of the range, and the answer is written
+             * back in. This one sums the numbers from 1 to 10000. */
+            made = obj_create(TYPE_TEXT, 1024, 0);
+            if (made) {
+                static const char seed[] =
+                    "split 4 from 1 to 10000\n"
+                    "wait\n"
+                    "set a m\n"
+                    "wait\n"
+                    "set b m\n"
+                    "set s 0\n"
+                    "add s a\n"
+                    "add a 1\n"
+                    "if a > b\n"
+                    "skip 1\n"
+                    "back 4\n"
+                    "answer s\n"
+                    "stop\n";
+                u8 *tdta = (u8 *)obj_data(made);
+                for (u32 i = 0; i < sizeof(seed); i++)
+                    tdta[i] = (u8)seed[i];
+            }
+            suggest = "task";
             created = true;
         }
         else if (r->index < PALETTE_FIXED + standard_count()) {

@@ -1,19 +1,15 @@
 #!/bin/sh
-# pipe-work.sh -- two machines, one lends its processor.
-#
-# A welcomes work in its settings; B writes a recipe in the language,
-# stands on it, presses ask, and the answer comes home: 6 times 7,
-# computed over there, journalled here as "job 1 answers: 42". A
-# second recipe loops forever and proves the budget: the interpreter
-# on A ends it, and B hears "it ran out of time". No machine trusts
-# the other with anything but a text and a way home.
+# pipe-foreman.sh -- point a task at the foreman; the rest is nobody's
+# click. The foreman hands the task to the desk through the wire, the
+# desk deals the parts to the willing machine, and the answer appears
+# inside the task -- the foreman watching it says so aloud.
 
 cd "$(dirname "$0")/.."
 BUILD=build
 
 rm -f $BUILD/peerstore.img $BUILD/peer-vars.fd $BUILD/peer-serial.log \
       $BUILD/peer-esp.img $BUILD/teststore.img $BUILD/serial.log \
-      $BUILD/work-a.ppm $BUILD/work-b.ppm
+      $BUILD/foreman-b.ppm
 dd if=/dev/zero of=$BUILD/peerstore.img bs=1M count=32 status=none
 dd if=/dev/zero of=$BUILD/teststore.img bs=1M count=32 status=none
 cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/peer-vars.fd
@@ -36,16 +32,14 @@ keys() {
     done
 }
 
-# --- machine A: claim 10.9.9.20, welcome work, and wait ------------------
+# --- machine A: claim 10.9.9.20, welcome work, wait -----------------
 {
     sleep 12
     keys tab tab tab t h e m e ret \
          ret a d d r e s s spc shift-backslash spc \
          1 0 dot 9 dot 9 dot 2 0 \
          ret w o r k spc shift-backslash spc w e l c o m e d
-    sleep 115
-    echo "screendump $BUILD/work-a.ppm"
-    sleep 2
+    sleep 110
     echo quit
 } | qemu-system-x86_64 -machine q35 -m 512M -cpu max \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
@@ -55,16 +49,15 @@ keys() {
   -drive id=store,file=$BUILD/peerstore.img,format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
   -device e1000,netdev=n0 \
-  -netdev socket,id=n0,listen=127.0.0.1:8011 \
+  -netdev socket,id=n0,listen=127.0.0.1:8012 \
   -display none -monitor stdio \
   -serial file:$BUILD/peer-serial.log >/dev/null 2>&1 &
 A_JOB=$!
 
 sleep 3
 
-# --- machine B: claim 10.9.9.21, point at A, then ask twice --------------
-# Recipe one: wait for the way home, compute 6*7, answer it, stop.
-# Recipe two: wait, then loop forever -- the budget must end it.
+# --- machine B: address and peer; a task and a foreman from the
+# palette; the task pointed at the foreman. Then hands off. --------
 {
     sleep 12
     keys tab tab tab t h e m e ret \
@@ -76,28 +69,19 @@ sleep 3
          home m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m0,100 m0,100 m0,100 m0,100 m0,100 m0,33 click \
-         m0,22 click ret \
-         right \
-         w a i t ret \
-         s e t spc a spc 6 ret \
-         m u l spc a spc 7 ret \
-         a n s w e r spc a ret \
-         s t o p ret \
-         home m100,20 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
-         m100,0 m100,0 m100,0 m100,0 m45,0 click
-    sleep 10
-    keys left \
+         m0,154 click ret \
          home m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m0,100 m0,100 m0,100 m0,100 m0,100 m0,55 click \
-         m0,22 click ret \
+         m0,100 m0,100 m0,100 m0,96 click ret \
          right \
-         w a i t ret \
-         b a c k spc 0 ret \
-         home m100,20 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
-         m100,0 m100,0 m100,0 m100,0 m45,0 click
+         home m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
+         m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
+         m0,100 m0,37 click \
+         m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 \
+         m0,100 m0,2 click ret
     sleep 45
-    echo "screendump $BUILD/work-b.ppm"
+    echo "screendump $BUILD/foreman-b.ppm"
     sleep 2
     echo quit
 } | qemu-system-x86_64 -machine q35 -m 512M -cpu max \
@@ -108,18 +92,17 @@ sleep 3
   -drive id=store,file=$BUILD/teststore.img,format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
   -device e1000,netdev=n0 \
-  -netdev socket,id=n0,connect=127.0.0.1:8011 \
+  -netdev socket,id=n0,connect=127.0.0.1:8012 \
   -display none -monitor stdio \
   -serial file:$BUILD/serial.log >/dev/null 2>&1
 
 wait $A_JOB 2>/dev/null
 
-python3 tools/ppm2png.py $BUILD/work-a.ppm $BUILD/work-a.png 2>/dev/null
-python3 tools/ppm2png.py $BUILD/work-b.ppm $BUILD/work-b.png 2>/dev/null
+python3 tools/ppm2png.py $BUILD/foreman-b.ppm $BUILD/foreman-b.png 2>/dev/null
 
-echo "--- asker (B) ---"
+echo "--- what the foreman said (B) ---"
+grep -ao 'user: .*' $BUILD/serial.log | tail -6
+echo "--- the desk (B) ---"
 grep -a 'pipe: job' $BUILD/serial.log
-echo "--- worker (A) ---"
-grep -a 'pipe: running\|pipe: the job\|pipe: turned\|(work)' $BUILD/peer-serial.log
-echo "--- what the visiting scripts said on A ---"
-grep -ao 'user: .*' $BUILD/peer-serial.log | tail -4
+echo "--- the worker (A) ---"
+grep -ac 'pipe: running a job' $BUILD/peer-serial.log | sed 's/^/    jobs run: /'
