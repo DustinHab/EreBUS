@@ -23,6 +23,7 @@
  * travels readable, and the page says "http" so nobody mistakes it.
  */
 #include <eb/net.h>
+#include <eb/crypto.h>
 #include <eb/msg.h>
 #include <eb/thread.h>
 #include <eb/journal.h>
@@ -45,6 +46,12 @@ static bool       running;
 
 object *net_port(void) { return service_port; }
 bool    net_up(void)   { return running; }
+
+/* How the last page came, for the shell to show a seal or its absence. */
+static bool last_secure;
+static bool last_verified;
+bool net_last_secure(void)   { return last_secure; }
+bool net_last_verified(void) { return last_verified; }
 
 /* ------------------------------------------------------------------ */
 /* Small tools                                                         */
@@ -167,7 +174,11 @@ static void dhcp_input(const u8 *p, u32 len)
     }
 }
 
-/* The one tcp conversation. */
+/* The one tcp conversation. Arriving application bytes land in a ring
+ * the reader drains; this is what lets a stream be pulled at whatever
+ * pace suits, which plain http did not need but tls does -- records
+ * arrive and must be handed up a few at a time. */
+#define TCP_RING 49152
 static struct {
     bool active;
     u8   remote_ip[4];
@@ -179,9 +190,11 @@ static struct {
     bool peer_done;                 /* their fin arrived */
     bool reset;
 
-    u8  *body;                      /* where arriving bytes go */
-    u32  body_max, body_len;
+    u8   ring[TCP_RING];
+    u32  head, tail;                /* tail - head bytes are waiting */
 } tcb;
+
+static u32 ring_used(void) { return tcb.tail - tcb.head; }
 
 static void tcp_emit(u8 flags, const void *payload, u32 len);
 
@@ -223,12 +236,12 @@ static void tcp_input(const u8 *seg, u32 len)
      * and on a link this short, sufficient. */
     if (dlen > 0) {
         if (seq == tcb.rcv_nxt) {
-            u32 room = tcb.body_max - tcb.body_len;
+            u32 room = TCP_RING - ring_used();
             u32 take = dlen < room ? dlen : room;
             for (u32 i = 0; i < take; i++)
-                tcb.body[tcb.body_len + i] = data[i];
-            tcb.body_len += take;
-            tcb.rcv_nxt += dlen;                        /* count it all */
+                tcb.ring[(tcb.tail + i) % TCP_RING] = data[i];
+            tcb.tail += take;
+            tcb.rcv_nxt += take;      /* only what we kept is acknowledged */
         }
         tcp_emit(0x10, NULL, 0);
     }
@@ -346,7 +359,7 @@ static void net_pump(void)
 }
 
 /* A short breath: look at the wire, let everyone else run. */
-static void net_breathe(void)
+void net_breathe(void)
 {
     net_pump();
     sched_yield();
@@ -644,21 +657,68 @@ static bool tcp_say(u8 flags, const void *payload, u32 len, u32 grows)
     return false;
 }
 
-static bool http_fetch(const u8 *addr, const char *host, u32 hlen,
-                       const char *path, u32 plen,
-                       u8 *body, u32 body_max, u32 *body_len)
+/* --- the tcp stream, for http and tls alike ----------------------- */
+
+bool tcp_open(const u8 addr[4], u16 port)
 {
     memset(&tcb, 0, sizeof(tcb));
     tcb.active = true;
     for (u32 i = 0; i < 4; i++) tcb.remote_ip[i] = addr[i];
     tcb.local_port = tcp_port_next++;
-    tcb.remote_port = 80;
+    tcb.remote_port = port;
     tcb.snd_nxt = (u32)(time_ns() & 0x7FFFFFFF);
     tcb.snd_una = tcb.snd_nxt;
-    tcb.body = body;
-    tcb.body_max = body_max;
 
     if (!tcp_say(0x02, NULL, 0, 1)) { tcb.active = false; return false; }
+    return true;
+}
+
+bool tcp_write(const u8 *buf, u32 len)
+{
+    u32 off = 0;
+    while (off < len) {
+        u32 seg = len - off;
+        if (seg > 1200) seg = 1200;      /* under the smallest sane mtu */
+        if (!tcp_say(0x18, buf + off, seg, seg)) return false;
+        off += seg;
+    }
+    return true;
+}
+
+/* Drains up to max application bytes, pumping the wire until some
+ * arrive, the peer finishes, or the well runs dry. Returns the count,
+ * 0 at a clean end, and -1 on reset or a stall with nothing waiting. */
+i32 tcp_read(u8 *buf, u32 max)
+{
+    u64 last = time_ns();
+    while (ring_used() == 0) {
+        if (tcb.reset) return -1;
+        if (tcb.peer_done) return 0;
+        net_breathe();
+        if (ring_used()) break;
+        if (time_ns() - last > 8 * SECOND) return -1;
+    }
+    u32 n = ring_used();
+    if (n > max) n = max;
+    for (u32 i = 0; i < n; i++) buf[i] = tcb.ring[(tcb.head + i) % TCP_RING];
+    tcb.head += n;
+    return (i32)n;
+}
+
+bool tcp_eof(void)  { return tcb.peer_done || tcb.reset; }
+
+void tcp_close(void)
+{
+    if (tcb.active && !tcb.peer_done && !tcb.reset)
+        tcp_emit(0x14, NULL, 0);         /* rst+ack: we are done here */
+    tcb.active = false;
+}
+
+static bool http_fetch(const u8 *addr, const char *host, u32 hlen,
+                       const char *path, u32 plen,
+                       u8 *body, u32 body_max, u32 *body_len)
+{
+    if (!tcp_open(addr, 80)) return false;
 
     char req[420];
     u32 at = 0;
@@ -672,22 +732,19 @@ static bool http_fetch(const u8 *addr, const char *host, u32 hlen,
     a = "\r\nUser-Agent: erebus/0.1\r\nConnection: close\r\n\r\n";
     while (*a) req[at++] = *a++;
 
-    if (!tcp_say(0x18, req, at, at)) { tcb.active = false; return false; }
+    if (!tcp_write((const u8 *)req, at)) { tcp_close(); return false; }
 
     /* Their answer, until they finish or the well runs dry. */
-    u64 last_growth = time_ns();
-    u32 seen = 0;
-    while (!tcb.peer_done && !tcb.reset && tcb.body_len < body_max) {
-        net_breathe();
-        if (tcb.body_len != seen) { seen = tcb.body_len; last_growth = time_ns(); }
-        if (time_ns() - last_growth > 8 * SECOND) break;
+    u32 len = 0;
+    while (len < body_max) {
+        i32 got = tcp_read(body + len, body_max - len);
+        if (got <= 0) break;
+        len += (u32)got;
     }
 
-    bool ok = tcb.body_len > 0;
-    *body_len = tcb.body_len;
-    if (!tcb.peer_done && !tcb.reset) tcp_emit(0x14, NULL, 0);  /* rst+ack */
-    tcb.active = false;
-    return ok;
+    *body_len = len;
+    tcp_close();
+    return len > 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -703,21 +760,25 @@ static u32 write_words(u8 *d, u32 at, u32 size, const char *s)
 }
 
 /* Splits an ask -- "host", "host/path", with or without a scheme in
- * front -- into its two parts. https is taken as "the same place,
- * asked plainly": nothing here can keep a secret, the readme says so,
- * and refusing every second link would make the door ornamental. */
+ * front -- into its parts, and says whether the scheme was https, so
+ * the fetch knows to seal the channel. A bare host is taken as plain
+ * http, which keeps the http-only corners of the web reachable; a
+ * page that wants a seal says https, and now it gets one. */
 static void split_ask(const char *ask, u32 alen,
                       char *host, u32 hmax, u32 *hlen,
-                      char *path, u32 pmax, u32 *plen)
+                      char *path, u32 pmax, u32 *plen, bool *secure)
 {
     u32 at = 0;
-    if (alen >= 7 && ask[0]=='h' && ask[1]=='t' && ask[2]=='t' &&
-        ask[3]=='p' && ask[4]==':' && ask[5]=='/' && ask[6]=='/')
-        at = 7;
-    else if (alen >= 8 && ask[0]=='h' && ask[1]=='t' && ask[2]=='t' &&
-             ask[3]=='p' && ask[4]=='s' && ask[5]==':' &&
-             ask[6]=='/' && ask[7]=='/')
+    if (secure) *secure = false;
+    if (alen >= 8 && ask[0]=='h' && ask[1]=='t' && ask[2]=='t' &&
+        ask[3]=='p' && ask[4]=='s' && ask[5]==':' &&
+        ask[6]=='/' && ask[7]=='/') {
         at = 8;
+        if (secure) *secure = true;
+    } else if (alen >= 7 && ask[0]=='h' && ask[1]=='t' && ask[2]=='t' &&
+               ask[3]=='p' && ask[4]==':' && ask[5]=='/' && ask[6]=='/') {
+        at = 7;
+    }
 
     *hlen = 0;
     *plen = 0;
@@ -741,8 +802,9 @@ static void fetch_into(object *o)
     char host[128];
     char path[256];
     u32 hlen = 0, plen = 0;
+    bool secure = false;
     split_ask((const char *)d, ask_end, host, sizeof(host), &hlen,
-              path, sizeof(path), &plen);
+              path, sizeof(path), &plen, &secure);
 
     u32 out = ask_end;
     if (out < size) d[out] = '\n';
@@ -762,15 +824,19 @@ static void fetch_into(object *o)
 
     /* Fetch, and follow where it points: a page that moved says so
      * with a number and a Location line, and stopping there would
-     * show the reader furniture tags instead of the room. */
-    for (u32 hop = 0; hop < 4; hop++) {
+     * show the reader furniture tags instead of the room. A secure ask
+     * goes through tls; the others go plainly. */
+    for (u32 hop = 0; hop < 5; hop++) {
         if (!dns_resolve(host, hlen, addr)) {
             said = "the name service does not know it.\n";
             break;
         }
-        if (!http_fetch(addr, host, hlen, path, plen,
-                        page, sizeof(page), &got)) {
-            said = "no answer from there.\n";
+        bool ok = secure
+                ? tls_get(addr, host, hlen, path, plen, page, sizeof(page), &got)
+                : http_fetch(addr, host, hlen, path, plen, page, sizeof(page), &got);
+        if (!ok) {
+            said = secure ? "the sealed channel did not open.\n"
+                          : "no answer from there.\n";
             break;
         }
 
@@ -818,7 +884,7 @@ static void fetch_into(object *o)
                 path[plen++] = where[i];
         } else {
             split_ask(where, wlen, host, sizeof(host), &hlen,
-                      path, sizeof(path), &plen);
+                      path, sizeof(path), &plen, &secure);
             if (hlen == 0) break;
         }
         got = 0;
@@ -841,10 +907,12 @@ answer:
     }
     for (u64 i = out; i < size; i++) d[i] = 0;
 
+    last_secure = secure;
+    last_verified = secure && tls_last_verified();
+
     obj_touch(o);
-    journal_says("net", got + 64 > (u32)size
-                 ? "a page came; the text holds what fit"
-                 : "a page came");
+    journal_says("net", secure ? "a sealed page came"
+                               : "a page came");
 }
 
 static void net_thread(void *arg)
@@ -890,9 +958,21 @@ bool net_start(void)
     if (!e1000_init() && !rtl8169_init() && !rtl8139_init())
         return false;
 
+    /* The seal proves its arithmetic before it is offered. A failure
+     * here does not stop the network -- plain http still works -- it
+     * only means tls stays unavailable, which is the honest outcome
+     * of primitives that cannot vouch for themselves. */
+    extern bool tls_schedule_selftest(void);
+    if (crypto_selftest() && tls_schedule_selftest())
+        kprintf("tls:  self test passed -- sha256, x25519, aes-128-gcm, "
+                "and the 1.3 key schedule\n");
+    else
+        kprintf("tls:  self test FAILED -- https disabled\n");
+
     thread_create("net", net_thread, NULL, kdom);
     running = true;
 
-    kprintf("net:  outbound only, plain http, one errand at a time\n");
+    kprintf("net:  outbound; http, and https sealed but not yet "
+            "verified; one errand at a time\n");
     return true;
 }

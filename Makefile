@@ -97,6 +97,11 @@ KERN_C   := kernel/main.c \
             kernel/net/e1000.c \
             kernel/net/rtl8139.c \
             kernel/net/rtl8169.c \
+            kernel/net/sha256.c \
+            kernel/net/x25519.c \
+            kernel/net/aes_gcm.c \
+            kernel/net/crypto_selftest.c \
+            kernel/net/tls.c \
             kernel/net/net.c \
             kernel/user/runner.c \
             kernel/arch/x86_64/syscall.c \

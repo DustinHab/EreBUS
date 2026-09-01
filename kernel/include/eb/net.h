@@ -57,4 +57,33 @@ bool    net_start(void);
 object *net_port(void);
 bool    net_up(void);
 
+/* The tcp stream underneath http and tls alike. One conversation at a
+ * time; net.c owns the state, tls.c borrows the four calls. */
+bool tcp_open(const u8 addr[4], u16 port);
+bool tcp_write(const u8 *buf, u32 len);
+i32  tcp_read(u8 *buf, u32 max);
+bool tcp_eof(void);
+void tcp_close(void);
+
+/* One turn of looking at the wire and standing aside. The waiting
+ * loops in tls.c call this between records. */
+void net_breathe(void);
+
+/* TLS 1.3 over that stream: connect to addr:443, run the handshake,
+ * send the http request sealed, and hand back the decrypted response
+ * exactly as http_fetch would hand back a plain one. The channel is
+ * sealed against reading and tampering; the server's certificate is
+ * NOT yet verified, so this proves privacy, not identity -- said in
+ * the readme, and the next milestone. */
+bool tls_get(const u8 addr[4], const char *host, u32 hlen,
+             const char *path, u32 plen, u8 *out, u32 max, u32 *got);
+bool tls_last_verified(void);   /* whether the server Finished checked out */
+
+/* How the last page arrived, for the browser to mark: sealed means it
+ * came over tls; verified means the handshake's own integrity check
+ * passed. Neither means the server's identity was proven -- that waits
+ * for certificate checking. */
+bool net_last_secure(void);
+bool net_last_verified(void);
+
 #endif /* EB_NET_H */

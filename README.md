@@ -398,9 +398,23 @@ built binary.
   the many sites that answer only over https dead-end at their own
   redirect. Making it reach that half of the web means a TLS stack,
   which is its own milestone, not a corner to cut here.
+* **TLS 1.3, the sealed half of the web.** One suite, chosen because
+  every server speaks it: X25519 for the key agreement, AES-128-GCM
+  for the record, SHA-256 for the schedule -- all written here, in
+  kernel/net, and checked at start-up against the published vectors
+  (FIPS, RFC 7748, the NIST GCM suite, and RFC 8448's worked key
+  schedule). A failure there disables https rather than pretending.
+  https links now go over a real handshake: ClientHello, the server's
+  encrypted flight, its Finished checked, ours sent, the request and
+  answer sealed. The browser marks a page "sealed" when it came that
+  way. The honest limit, said in the word chosen and in the boot log:
+  the certificate is not verified -- there is no RSA/ECDSA and no root
+  store yet -- so the channel proves privacy against eavesdroppers,
+  not the identity of who answered. Table-based AES leaks timing,
+  noted and accepted for a single-person machine speaking outward.
 * M10 — booting real hardware from a USB stick
-* TLS — the encrypted half of the web, once there is a crypto stack to
-  do it honestly
+* Certificate verification — turning the seal from privacy into
+  identity: RSA/ECDSA signatures and a root store
 
 ## A note on Secure Boot
 
