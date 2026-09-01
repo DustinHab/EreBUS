@@ -384,20 +384,23 @@ built binary.
   and the refusal for https says so. No wifi: firmware blobs and a
   crypto stack are a different project, and pretending otherwise
   would be the lie this file avoids.
-* **The html lens.** A fifth way of seeing a text: as the page it is.
-  Headings stand out, paragraphs wrap, lists get their dashes, links
-  their colour and underline -- and clicking one rewrites the ask
-  line and asks the wire, which makes any page object a browser
-  window. The raw markup stays one lens tab away. Honest ceiling: a
-  text browser -- no styles, no scripts, no images beyond their alt
-  words. The service follows moved pages, introduces itself as
-  erebus/0.1, and treats https as "the same place, asked plainly",
-  since nothing here can keep a secret and a door refusing half the
-  web's links would be ornamental. Changes written past the shell's
-  back -- by programs, by the network -- now nudge persistence too;
-  the clock's face is marked fleeting so its heartbeat is not
-  mistaken for history.
+* **The html lens: a browser.** A fifth way of seeing a text -- as the
+  page it is. Headings stand out and are ruled off, paragraphs wrap,
+  lists indent and number, quotes step in, tables set their cells
+  side by side, preformatted text keeps its spaces, links take their
+  colour. An editable address line with back and forward arrows; a go
+  button; the raw markup one lens tab away. Forms are real: text
+  fields fill in, and a button assembles the query and browses there,
+  so a search box works. The service follows redirects and introduces
+  itself as erebus/0.1. Honest ceiling, and it is a real one: a text
+  browser. No CSS, no JavaScript, no images beyond their alt words,
+  and -- the big one -- no TLS, so https links are asked plainly and
+  the many sites that answer only over https dead-end at their own
+  redirect. Making it reach that half of the web means a TLS stack,
+  which is its own milestone, not a corner to cut here.
 * M10 — booting real hardware from a USB stick
+* TLS — the encrypted half of the web, once there is a crypto stack to
+  do it honestly
 
 ## A note on Secure Boot
 

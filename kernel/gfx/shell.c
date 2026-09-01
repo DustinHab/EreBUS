@@ -14,6 +14,7 @@
 #include <eb/standard.h>
 #include <eb/net.h>
 #include <eb/html.h>
+#include <eb/string.h>
 #include <eb/time.h>
 
 #define SNAP_HISTORY_MAX 32
@@ -184,7 +185,12 @@ typedef enum {
     HOT_RUN,         /* run the focused text as a program */
     HOT_GO,          /* ask the network for the page the first line names */
     HOT_LINK,        /* a link in a rendered page: go there */
-    HOT_SCROLL       /* the page's edge: up or down a window */
+    HOT_SCROLL,      /* the page's edge: up or down a window */
+    HOT_FIELD,       /* a form field: put the writing there */
+    HOT_SUBMIT,      /* a form's button: send it */
+    HOT_BACK,        /* step back through where the browser has been */
+    HOT_FWD,         /* and forward again */
+    HOT_ADDR         /* the address itself: type a new one */
 } hot_kind;
 
 typedef struct {
@@ -770,6 +776,87 @@ static u32       link_spot_count;
 static u32       html_rows;         /* the whole flow */
 static u32       html_vis;          /* rows the window holds */
 
+/* Forms found in the page, and what has been typed into them. The
+ * values persist across redraws so typing survives the clock's tick;
+ * they reset to the markup's defaults when the page itself changes,
+ * which is noticed by the shape of the fields changing. */
+static html_form  form_defs[HTML_FORMS_MAX];
+static u32         form_count;
+static html_field  field_defs[HTML_FIELDS_MAX];
+static u32         field_count;
+static char        field_val[HTML_FIELDS_MAX][HTML_VALUE_MAX];
+static char        field_init[HTML_FIELDS_MAX][HTML_VALUE_MAX];
+static html_spot   field_spots[HTML_SPOTS_MAX];
+static u32         field_spot_count;
+static i32         field_focus = -1;
+static u32         field_shape;     /* a print of the fields, to spot change */
+static bool        addr_edit;       /* the address line is being typed */
+
+/* Where the browser has been, so it can go back. Addresses only; the
+ * bodies are re-fetched, which is honest -- the page may have moved
+ * on, and a browser that lied about that would be worse than one that
+ * asked again. */
+#define HISTORY_DEPTH 24
+static char browse_back[HISTORY_DEPTH][HTML_URL_MAX];
+static u32  browse_back_count;
+static char browse_fwd[HISTORY_DEPTH][HTML_URL_MAX];
+static u32  browse_fwd_count;
+
+static void ask_the_wire(void);
+
+/* The current ask, copied out. */
+static u32 current_ask(object *o, char *out, u32 max)
+{
+    const u8 *d = (const u8 *)obj_data(o);
+    if (!d) { out[0] = 0; return 0; }
+    u64 len = text_len(d, obj_size(o));
+    u32 n = 0;
+    while (n < len && d[n] != '\n' && n < max - 1) { out[n] = (char)d[n]; n++; }
+    out[n] = 0;
+    return n;
+}
+
+/* Replaces the focused page's ask line and asks the wire for it. The
+ * body below the line is cleared; the scroll returns to the top. */
+static void browse_to(const char *addr)
+{
+    object *f = focus();
+    if (obj_type(f) != TYPE_TEXT || nav.at_generation != 0) return;
+    if (!(focus_rights() & CAP_WRITE)) return;
+    u8 *d = (u8 *)obj_data(f);
+    u64 size = obj_size(f);
+    if (!d) return;
+
+    u32 n = 0;
+    while (addr[n] && n < size - 2) { d[n] = (u8)addr[n]; n++; }
+    d[n++] = '\n';
+    for (u64 i = n; i < size; i++) d[i] = 0;
+
+    nav.html_scroll = 0;
+    field_focus = -1;
+    addr_edit = false;
+    nav.changes++;
+    ask_the_wire();
+}
+
+/* Remembers where we stand before stepping somewhere new. */
+static void browse_remember(void)
+{
+    object *f = focus();
+    if (obj_type(f) != TYPE_TEXT) return;
+    char here[HTML_URL_MAX];
+    if (current_ask(f, here, sizeof(here)) == 0) return;
+
+    if (browse_back_count &&
+        strcmp(browse_back[browse_back_count - 1], here) == 0) return;
+    if (browse_back_count >= HISTORY_DEPTH) {
+        for (u32 i = 1; i < HISTORY_DEPTH; i++)
+            memcpy(browse_back[i - 1], browse_back[i], HTML_URL_MAX);
+        browse_back_count--;
+    }
+    memcpy(browse_back[browse_back_count++], here, HTML_URL_MAX);
+}
+
 /* Whether a text reads like a page from outside: an address alone on
  * the first line, markup somewhere below. The lens is offered either
  * way; this only decides what a text opens as. */
@@ -808,6 +895,136 @@ static void ask_parts(const u8 *d, u64 ask, char *host, u32 hmax,
         path[(*plen)++] = (char)d[at++];
 }
 
+/* A cheap print of the field set, so a page changing under us resets
+ * what was typed while typing within one page survives a redraw. */
+static u32 fields_print(void)
+{
+    u32 p = field_count * 2654435761u;
+    for (u32 i = 0; i < field_count; i++) {
+        p ^= field_defs[i].kind + 1u;
+        for (u32 j = 0; field_defs[i].name[j]; j++)
+            p = p * 31u + (u8)field_defs[i].name[j];
+    }
+    return p;
+}
+
+/* A small clickable word in the address strip. Returns its right edge. */
+static i32 strip_word(i32 x, i32 y, const char *s, bool on, hot_kind k)
+{
+    i32 n = 0;
+    while (s[n]) n++;
+    bool lit = is_hovered(k, 0);
+    if (lit) fb_rect(x - 3, y - 3, n * GLYPH_W + 6, ROW, C_EDGE);
+    text_at(x, y, x + (n + 1) * GLYPH_W, s, on ? (lit ? C_TEXT : C_WRITE)
+                                              : C_FAINT);
+    if (on) hot_add(x - 3, y - 3, n * GLYPH_W + 6, ROW, k, 0);
+    return x + n * GLYPH_W + 2 * GLYPH_W;
+}
+
+/* Turns a link -- absolute, host-relative, or relative to the room the
+ * page was in -- into the "host/path" an ask line holds. Schemes are
+ * dropped: the wire adds its own, and https means "the same place,
+ * asked plainly" here. */
+static void resolve_url(const char *base, const char *href,
+                        char *out, u32 max)
+{
+    char host[128], path[256];
+    u32 hlen, plen;
+    u32 blen = 0;
+    while (base[blen]) blen++;
+    ask_parts((const u8 *)base, blen, host, sizeof(host), &hlen,
+              path, sizeof(path), &plen);
+
+    u32 nn = 0;
+    const char *u = href;
+    if (u[0]=='h' && u[1]=='t' && u[2]=='t' && u[3]=='p') {
+        u32 skip = (u[4] == 's') ? 8 : 7;
+        while (u[skip] && nn < max - 1) out[nn++] = u[skip++];
+    } else if (u[0] == '/' && u[1] == '/') {
+        u32 skip = 2;
+        while (u[skip] && nn < max - 1) out[nn++] = u[skip++];
+    } else if (u[0] == '/') {
+        for (u32 i = 0; i < hlen && nn < max - 1; i++) out[nn++] = host[i];
+        for (u32 i = 0; u[i] && nn < max - 1; i++) out[nn++] = u[i];
+    } else {
+        u32 dir = 0;
+        for (u32 i = 0; i < plen; i++) if (path[i] == '/') dir = i + 1;
+        for (u32 i = 0; i < hlen && nn < max - 1; i++) out[nn++] = host[i];
+        if (dir == 0 && nn < max - 1) out[nn++] = '/';
+        for (u32 i = 0; i < dir && nn < max - 1; i++) out[nn++] = path[i];
+        for (u32 i = 0; u[i] && nn < max - 1; i++) out[nn++] = u[i];
+    }
+    out[nn] = 0;
+}
+
+/* Sends a form: gathers its fields into a query, hangs it off the
+ * action, and browses there. GET only, which is what search boxes
+ * speak; a page that insists on POST is answered plainly and may not
+ * like it, and that limit is the readme's to own. */
+static void submit_form(u32 field_index)
+{
+    object *f = focus();
+    if (obj_type(f) != TYPE_TEXT || nav.at_generation != 0) return;
+    if (!(focus_rights() & CAP_WRITE)) return;
+    if (field_index >= field_count) return;
+    u32 form = field_defs[field_index].form;
+
+    char query[512];
+    u32 q = 0;
+    bool first = true;
+    for (u32 i = 0; i < field_count && q < sizeof(query) - 8; i++) {
+        if (field_defs[i].form != form) continue;
+        if (field_defs[i].kind == FIELD_SUBMIT) continue;
+        if (field_defs[i].name[0] == 0) continue;
+
+        if (!first) query[q++] = '&';
+        first = false;
+        for (u32 j = 0; field_defs[i].name[j] && q < sizeof(query) - 4; j++)
+            query[q++] = field_defs[i].name[j];
+        query[q++] = '=';
+        const char *val = field_val[i];
+        for (u32 j = 0; val[j] && q < sizeof(query) - 4; j++) {
+            char c = val[j];
+            bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                         (c >= '0' && c <= '9') ||
+                         c == '-' || c == '_' || c == '.' || c == '~';
+            if (plain) query[q++] = c;
+            else if (c == ' ') query[q++] = '+';
+            else {
+                static const char hex[] = "0123456789ABCDEF";
+                query[q++] = '%';
+                query[q++] = hex[(u8)c >> 4];
+                query[q++] = hex[(u8)c & 15];
+            }
+        }
+    }
+    query[q] = 0;
+
+    char here[HTML_URL_MAX], dest[HTML_URL_MAX];
+    current_ask(f, here, sizeof(here));
+
+    const char *action = form < form_count ? form_defs[form].action : "";
+    if (action[0])
+        resolve_url(here, action, dest, sizeof(dest));
+    else
+        { u32 i = 0; while (here[i] && i < sizeof(dest) - 1) { dest[i] = here[i]; i++; } dest[i] = 0; }
+
+    /* Trim any query the action or page already carried, then hang
+     * ours on. */
+    u32 dl = 0;
+    while (dest[dl] && dest[dl] != '?') dl++;
+    if (dl < sizeof(dest) - 1) {
+        dest[dl++] = '?';
+        for (u32 i = 0; query[i] && dl < sizeof(dest) - 1; i++)
+            dest[dl++] = query[i];
+        dest[dl] = 0;
+    }
+
+    browse_remember();
+    browse_fwd_count = 0;
+    browse_to(dest);
+}
+
 static void lens_html(object *o, i32 x, i32 y, i32 w, i32 h, bool live)
 {
     const u8 *d = (const u8 *)obj_data(o);
@@ -817,16 +1034,29 @@ static void lens_html(object *o, i32 x, i32 y, i32 w, i32 h, bool live)
     u64 ask = 0;
     while (ask < len && d[ask] != '\n') ask++;
 
-    /* The address, and the word that asks the network for it. */
-    char addr[72];
-    u32 an = 0;
-    while (an < sizeof(addr) - 1 && an < ask) { addr[an] = (char)d[an]; an++; }
-    addr[an] = 0;
-    text_at(x, y, x + w - 4 * GLYPH_W, addr, C_ACCENT);
-
     bool may_ask = live && nav.at_generation == 0 && net_up() &&
                    (focus_rights() & CAP_READ) &&
                    (focus_rights() & CAP_WRITE);
+
+    /* The strip: back, forward, the address, and go. */
+    i32 sx = x;
+    if (live) {
+        sx = strip_word(sx, y, "<", browse_back_count > 0, HOT_BACK);
+        sx = strip_word(sx, y, ">", browse_fwd_count > 0, HOT_FWD);
+    }
+
+    char addr[96];
+    u32 an = 0;
+    while (an < sizeof(addr) - 1 && an < ask) { addr[an] = (char)d[an]; an++; }
+    addr[an] = 0;
+    i32 addr_w = x + w - sx - 4 * GLYPH_W;
+    if (addr_edit) fb_rect(sx - 3, y - 3, addr_w, ROW, C_PANEL_HI);
+    text_at(sx, y, sx + addr_w, addr, addr_edit ? C_TEXT : C_ACCENT);
+    if (addr_edit)
+        fb_rect(sx + (i32)an * GLYPH_W, y, 2, GLYPH_H, C_ACCENT);
+    if (may_ask)
+        hot_add(sx - 3, y - 3, addr_w, ROW, HOT_ADDR, 0);
+
     if (may_ask) {
         i32 gx = x + w - 2 * GLYPH_W - 4;
         bool lit = is_hovered(HOT_GO, 0);
@@ -844,37 +1074,71 @@ static void lens_html(object *o, i32 x, i32 y, i32 w, i32 h, bool live)
                 ? "nothing here yet. the first line asks; go fetches."
                 : "nothing here yet.", C_FAINT);
         html_rows = 0;
-        if (live) link_spot_count = 0;
+        if (live) { link_spot_count = 0; field_spot_count = 0; }
         return;
     }
+
+    html_sink sink = {
+        .urls = link_urls, .url_count = &link_count,
+        .link_spots = link_spots, .link_spot_count = &link_spot_count,
+        .forms = form_defs, .form_count = &form_count,
+        .fields = field_defs, .field_count = &field_count,
+        .field_spots = field_spots, .field_spot_count = &field_spot_count,
+        .field_values = field_val, .field_init = field_init,
+    };
 
     html_view v = {
         .src = d + ask + 1,
         .len = len - ask - 1,
         .x = x, .y = by, .w = w - 2 * GLYPH_W, .h = bh,
         .scroll = nav.html_scroll,
-        .col = { C_TEXT, C_DIM, C_FAINT, C_ACCENT },
+        .col = { C_TEXT, C_DIM, C_FAINT, C_ACCENT, C_EDGE },
     };
 
-    html_rows = html_render(&v,
-                            live ? link_urls : NULL,
-                            live ? &link_count : NULL,
-                            live ? link_spots : NULL,
-                            live ? &link_spot_count : NULL);
+    html_rows = html_render(&v, live ? &sink : NULL);
     html_vis = (u32)(bh / GLYPH_H);
 
-    /* Links carry only as far as writing does: going somewhere
-     * rewrites the ask, and a page held read-only is a page, not a
+    if (live) {
+        /* A page that changed shape is a new page: take its defaults,
+         * and let go of any field the writing was in. */
+        u32 print = fields_print();
+        if (print != field_shape) {
+            field_shape = print;
+            field_focus = -1;
+            for (u32 i = 0; i < field_count; i++)
+                memcpy(field_val[i], field_init[i], HTML_VALUE_MAX);
+        }
+    }
+
+    /* Links and buttons carry only as far as writing does: following
+     * one rewrites the ask, and a page held read-only is a page, not a
      * doorway. */
-    if (live && may_ask)
+    if (live && may_ask) {
         for (u32 i = 0; i < link_spot_count; i++)
             hot_add(link_spots[i].x, link_spots[i].y - 2,
                     link_spots[i].w, link_spots[i].h + 4, HOT_LINK, i);
-    else if (live)
-        link_spot_count = 0;
+        for (u32 i = 0; i < field_spot_count; i++) {
+            html_spot *sp = &field_spots[i];
+            u32 fi = sp->ref;
+            bool submit = fi < field_count &&
+                          field_defs[fi].kind == FIELD_SUBMIT;
+            hot_add(sp->x, sp->y, sp->w, sp->h,
+                    submit ? HOT_SUBMIT : HOT_FIELD, i);
 
-    /* The page's edge: where it stands, and the two halves that move
-     * it. Arrows do the same, faster. */
+            /* The caret sits after the writing in the field one is in. */
+            if (!submit && (i32)i == field_focus) {
+                u32 vl = 0;
+                while (field_val[fi][vl]) vl++;
+                i32 cx = sp->x + 2 + (i32)vl * GLYPH_W;
+                if (cx < sp->x + sp->w - 2)
+                    fb_rect(cx, sp->y + 3, 2, GLYPH_H, C_ACCENT);
+            }
+        }
+    } else if (live) {
+        link_spot_count = 0;
+        field_spot_count = 0;
+    }
+
     if (html_rows > html_vis) {
         i32 tx = x + w - 6;
         fb_rect(tx, by, 2, bh, C_EDGE);
@@ -2223,6 +2487,10 @@ static void follow(u64 slot)
     nav.sel_a = nav.sel_b = 0;
     nav.sel_drag = false;
     nav.html_scroll = 0;
+    field_focus = -1;
+    field_shape = 0;
+    addr_edit = false;
+    browse_back_count = browse_fwd_count = 0;
     set_lenses_for(t);
     nav.changes++;
     nav.redraw = true;
@@ -2237,6 +2505,10 @@ static void go_back(void)
     nav.sel_a = nav.sel_b = 0;
     nav.sel_drag = false;
     nav.html_scroll = 0;
+    field_focus = -1;
+    field_shape = 0;
+    addr_edit = false;
+    browse_back_count = browse_fwd_count = 0;
     set_lenses_for(focus());
     nav.changes++;
     nav.redraw = true;
@@ -2334,6 +2606,74 @@ static void handle_keys(void)
         if (edit.kind == EDIT_PICK && k.codepoint == KEY_ESCAPE) {
             edit_cancel();
             continue;
+        }
+
+        /* Typing a new address. The first line of the page is the ask;
+         * this appends to it and, on enter, sends it. A backspace eats
+         * the last letter, escape leaves the line as it was. */
+        if (addr_edit) {
+            object *f = focus();
+            u8 *d = (u8 *)obj_data(f);
+            if (obj_type(f) != TYPE_TEXT || !d ||
+                !(focus_rights() & CAP_WRITE)) {
+                addr_edit = false;
+            } else if (k.codepoint == KEY_ESCAPE) {
+                addr_edit = false; nav.redraw = true; continue;
+            } else if (k.codepoint == KEY_ENTER) {
+                addr_edit = false;
+                browse_remember();
+                browse_fwd_count = 0;
+                ask_the_wire();
+                continue;
+            } else if (k.codepoint == '\b') {
+                u64 e = 0, size = obj_size(f);
+                while (e < size && d[e] && d[e] != '\n') e++;
+                if (e > 0) {
+                    for (u64 i = e - 1; i + 1 < size; i++) d[i] = d[i + 1];
+                    d[size - 1] = 0;
+                    nav.changes++;
+                }
+                nav.redraw = true; continue;
+            } else if (k.codepoint >= 0x20 && k.codepoint < 0x7F) {
+                u64 e = 0, size = obj_size(f);
+                while (e < size && d[e] && d[e] != '\n') e++;
+                u64 len = text_len(d, size);
+                if (len + 1 < size) {
+                    for (u64 i = len + 1; i > e; i--) d[i] = d[i - 1];
+                    d[e] = (u8)k.codepoint;
+                    nav.changes++;
+                }
+                nav.redraw = true; continue;
+            } else {
+                continue;
+            }
+        }
+
+        /* Writing into a form field, when one holds the writing. Enter
+         * sends the form, escape steps out, and everything else lands
+         * in the field rather than the page. */
+        if (field_focus >= 0 && (u32)field_focus < field_spot_count) {
+            u32 fi = field_spots[field_focus].ref;
+            if (fi >= field_count || field_defs[fi].kind == FIELD_SUBMIT) {
+                field_focus = -1;
+            } else if (k.codepoint == KEY_ESCAPE) {
+                field_focus = -1; nav.redraw = true; continue;
+            } else if (k.codepoint == KEY_ENTER) {
+                u32 saved = fi; field_focus = -1; submit_form(saved); continue;
+            } else if (k.codepoint == '\b') {
+                u32 l = 0; while (field_val[fi][l]) l++;
+                if (l) field_val[fi][l - 1] = 0;
+                nav.redraw = true; continue;
+            } else if (k.codepoint >= 0x20 && k.codepoint < 0x7F) {
+                u32 l = 0; while (field_val[fi][l]) l++;
+                if (l < HTML_VALUE_MAX - 1) {
+                    field_val[fi][l] = (char)k.codepoint;
+                    field_val[fi][l + 1] = 0;
+                }
+                nav.redraw = true; continue;
+            } else {
+                continue;
+            }
         }
 
         switch (k.codepoint) {
@@ -2655,70 +2995,69 @@ static void act_on(const hot_region *r)
         nav.paint_drag = true;
         break;
 
+    case HOT_ADDR:
+        addr_edit = true;
+        field_focus = -1;
+        nav.redraw = true;
+        break;
+
     case HOT_GO:
+        addr_edit = false;
+        browse_remember();
+        browse_fwd_count = 0;
         ask_the_wire();
         break;
 
     case HOT_LINK: {
-        /* Going where the link points: the ask line is rewritten, the
-         * page below it is blanked, and the wire is asked -- the same
-         * three things a person would do by hand, in one press. */
+        /* Going where the link points: remember where we stood, then
+         * resolve the link against it and go. The same steps a person
+         * would take by hand, in one press. */
         object *f = focus();
         if (obj_type(f) != TYPE_TEXT || nav.at_generation != 0) break;
         if (!(focus_rights() & CAP_WRITE)) break;
         if (r->index >= link_spot_count) break;
-        u32 li = link_spots[r->index].link;
+        u32 li = link_spots[r->index].ref;
         if (li >= link_count) break;
 
-        u8 *d = (u8 *)obj_data(f);
-        u64 size = obj_size(f);
-        if (!d) break;
-        u64 len = text_len(d, size);
-        u64 ask = 0;
-        while (ask < len && d[ask] != '\n') ask++;
+        char here[HTML_URL_MAX], dest[HTML_URL_MAX];
+        current_ask(f, here, sizeof(here));
+        resolve_url(here, link_urls[li], dest, sizeof(dest));
+        if (dest[0] == 0) break;
 
-        char host[128], path[256];
-        u32 hlen, plen;
-        ask_parts(d, ask, host, sizeof(host), &hlen,
-                  path, sizeof(path), &plen);
-
-        const char *u = link_urls[li];
-        char na[300];
-        u32 nn = 0;
-
-        if (u[0]=='h' && u[1]=='t' && u[2]=='t' && u[3]=='p') {
-            u32 skip = (u[4] == 's') ? 8 : 7;
-            while (u[skip] && nn < sizeof(na) - 1) na[nn++] = u[skip++];
-        } else if (u[0] == '/' && u[1] == '/') {
-            u32 skip = 2;
-            while (u[skip] && nn < sizeof(na) - 1) na[nn++] = u[skip++];
-        } else if (u[0] == '/') {
-            for (u32 i = 0; i < hlen && nn < sizeof(na) - 1; i++)
-                na[nn++] = host[i];
-            for (u32 i = 0; u[i] && nn < sizeof(na) - 1; i++)
-                na[nn++] = u[i];
-        } else {
-            /* Relative to the room the page was in. */
-            u32 dir = 0;
-            for (u32 i = 0; i < plen; i++) if (path[i] == '/') dir = i + 1;
-            for (u32 i = 0; i < hlen && nn < sizeof(na) - 1; i++)
-                na[nn++] = host[i];
-            if (dir == 0 && nn < sizeof(na) - 1) na[nn++] = '/';
-            for (u32 i = 0; i < dir && nn < sizeof(na) - 1; i++)
-                na[nn++] = path[i];
-            for (u32 i = 0; u[i] && nn < sizeof(na) - 1; i++)
-                na[nn++] = u[i];
-        }
-        if (nn == 0) break;
-
-        for (u64 i = 0; i < size; i++)
-            d[i] = (i < nn) ? (u8)na[i] : (i == nn ? '\n' : 0);
-
-        nav.html_scroll = 0;
-        nav.changes++;
-        ask_the_wire();
+        browse_remember();
+        browse_fwd_count = 0;
+        browse_to(dest);
         break;
     }
+
+    case HOT_FIELD:
+        if (r->index < field_spot_count) field_focus = (i32)r->index;
+        nav.redraw = true;
+        break;
+
+    case HOT_SUBMIT:
+        if (r->index < field_spot_count)
+            submit_form(field_spots[r->index].ref);
+        break;
+
+    case HOT_BACK:
+        if (browse_back_count > 0) {
+            object *f = focus();
+            char here[HTML_URL_MAX];
+            if (obj_type(f) == TYPE_TEXT &&
+                current_ask(f, here, sizeof(here)) > 0 &&
+                browse_fwd_count < HISTORY_DEPTH)
+                memcpy(browse_fwd[browse_fwd_count++], here, HTML_URL_MAX);
+            browse_to(browse_back[--browse_back_count]);
+        }
+        break;
+
+    case HOT_FWD:
+        if (browse_fwd_count > 0) {
+            browse_remember();
+            browse_to(browse_fwd[--browse_fwd_count]);
+        }
+        break;
 
     case HOT_SCROLL: {
         u32 step = html_vis > 4 ? html_vis - 2 : 3;
