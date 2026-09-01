@@ -162,7 +162,9 @@ typedef enum {
     HOT_INDEX,       /* a row of the index: walk there */
     HOT_TAKE,        /* lift the marked letters out */
     HOT_PUT,         /* set the lifted letters down at the caret */
-    HOT_DROP         /* let the lifted letters go */
+    HOT_DROP,        /* let the lifted letters go */
+    HOT_CAPCUT,      /* one capability of a running program: take it back */
+    HOT_MODE         /* a view's name in the footer: switch to it */
 } hot_kind;
 
 typedef struct {
@@ -171,7 +173,7 @@ typedef struct {
     u32      index;
 } hot_region;
 
-#define HOT_MAX 96
+#define HOT_MAX 256
 static hot_region hots[HOT_MAX];
 static u32        hot_count;
 static i32        hovered = -1;
@@ -711,6 +713,12 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
         text_at(x, ty, x + w, "capabilities", C_DIM);
         ty += ROW;
 
+        /* Whoever may give may also take back -- any of it, the voice
+         * and the letter box included. The x sits on the same row as
+         * the authority it withdraws, like everywhere else. */
+        bool may_cut = (o == focus()) && nav.at_generation == 0 &&
+                       (focus_rights() & CAP_GRANT);
+
         u64 held = 0;
         for (u64 i = 1; i <= domain_capacity(pd) && ty < y + h; i++) {
             u32 hr = 0;
@@ -733,6 +741,14 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
             }
             line[at] = 0;
             text_at(x, ty, x + w, line, C_DIM);
+
+            if (may_cut) {
+                bool lit = is_hovered(HOT_CAPCUT, (u32)i);
+                text_at(x + w - 2 * GLYPH_W, ty, x + w, "x",
+                        lit ? C_READONLY : C_FAINT);
+                hot_add(x + w - 2 * GLYPH_W - 2, ty - 2, 2 * GLYPH_W,
+                        ROW - 2, HOT_CAPCUT, (u32)i);
+            }
             ty += ROW;
         }
         if (held == 0 && ty < y + h)
@@ -1649,10 +1665,29 @@ static void draw_all(void)
      * under it. Whoever knows their way around turns the hints off in
      * the settings, and the line keeps only the mode. */
     fb_rect(0, sh - 28, sw, 28, C_BAR);
-    at = put(line, 0, mode_name(nav.mode));
+
+    /* The four ways of looking, each its own word, each clickable --
+     * tab cycles them, but a key alone would make them a secret. The
+     * one in use is lit. */
+    i32 mx = PAD * 2;
+    for (u32 mi = 0; mi < SHELL_MODE_COUNT; mi++) {
+        const char *mn = mode_name((shell_mode)mi);
+        i32 ml = 0;
+        while (mn[ml]) ml++;
+
+        bool on = (nav.mode == (shell_mode)mi);
+        bool lit = is_hovered(HOT_MODE, mi);
+        text_at(mx, sh - 28 + 6, sw, mn,
+                on ? C_ACCENT : (lit ? C_TEXT : C_FAINT));
+        hot_add(mx - 2, sh - 28, ml * GLYPH_W + 4, 28, HOT_MODE, mi);
+        mx += (ml + 2) * GLYPH_W;
+    }
+    mx += 2 * GLYPH_W;
+
+    at = 0;
     if (settings_hints()) {
-        at = put(line, at, "   click anything you can see.   "
-                           "tab: switch view.   arrows also move.   ");
+        at = put(line, at, "click anything you can see.   "
+                           "arrows also move.   ");
         if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
             at = put(line, at, "point it at something to hand it over.");
         else if (nav.sel_a != nav.sel_b)
@@ -1665,7 +1700,7 @@ static void draw_all(void)
             at = put(line, at, "typing changes the object.");
     }
     line[at] = 0;
-    text_at(PAD * 2, sh - 28 + 6, sw - PAD, line, C_FAINT);
+    text_at(mx, sh - 28 + 6, sw - PAD, line, C_FAINT);
 
     draw_cursor();
 }
@@ -2014,6 +2049,32 @@ static void act_on(const hot_region *r)
 
     case HOT_DROP:
         held_len = 0;
+        nav.redraw = true;
+        break;
+
+    case HOT_CAPCUT: {
+        /* Taking one capability back from a running program. The row
+         * indexes the program's own table, so this reaches what was
+         * passed to it from anywhere -- by the shell, or by another
+         * program -- and the withdrawing is the same act either way. */
+        object *f = focus();
+        if (!(focus_rights() & CAP_GRANT) || nav.at_generation != 0) break;
+        domain *pd = proc_domain_of(f);
+        if (!pd) break;
+
+        u32 hr = 0;
+        object *t = domain_cap_at(pd, r->index, &hr);
+        if (!t) break;
+
+        proc_revoke(f, t);
+        nav.changes++;
+        nav.redraw = true;
+        break;
+    }
+
+    case HOT_MODE:
+        nav.mode = (shell_mode)(r->index % SHELL_MODE_COUNT);
+        nav.changes++;
         nav.redraw = true;
         break;
 
