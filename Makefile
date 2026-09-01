@@ -92,7 +92,10 @@ KERN_C   := kernel/main.c \
             kernel/obj/activity.c \
             kernel/sched/thread.c \
             kernel/sched/proc.c \
+            kernel/net/nic.c \
             kernel/net/e1000.c \
+            kernel/net/rtl8139.c \
+            kernel/net/rtl8169.c \
             kernel/net/net.c \
             kernel/user/runner.c \
             kernel/arch/x86_64/syscall.c \
@@ -367,8 +370,10 @@ look: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 # tools/look.sh.
 AGENT_TO_PROGRAM := down down down down right home \
                     $(shell for i in $$(seq 17); do printf 'm100,7 '; done)
-AGENT_KEYS := $(AGENT_TO_PROGRAM) click m0,100 m0,50 click esc \
-              m-90,-100 m0,-58 click m100,0 m100,0 m78,0 click
+AGENT_KEYS := $(AGENT_TO_PROGRAM) click \
+              m0,100 m0,100 m0,100 m0,100 m0,29 click esc \
+              m-94,-100 m0,-100 m0,-100 m0,-100 m0,-30 click \
+              m100,0 m100,0 m78,0 click
 
 agent: $(IMAGE) $(BUILD)/test-vars.fd
 	@rm -f $(STORE)

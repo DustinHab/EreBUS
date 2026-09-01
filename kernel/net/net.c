@@ -9,11 +9,12 @@
  * the errand fails with its reason written where the answer would
  * have gone.
  *
- * The machine's own address is the emulator's stable arrangement --
- * 10.0.2.15 behind a gateway at 10.0.2.2 with a name server at
- * 10.0.2.3 -- taken as given rather than negotiated. When real
- * hardware comes, DHCP joins the errand list; until then a protocol
- * whose answer is already known would be ceremony.
+ * The machine's own address is asked for, not assumed: DHCP runs
+ * once when the service comes up, and whatever network answers --
+ * the emulator's built-in landlord or a real router -- decides who
+ * this machine is, where the way out stands, and who answers names.
+ * A network that stays silent gets the emulator's well-known
+ * defaults, so the tests neither wait nor lie.
  *
  * Security is the shape of the thing, not a check inside it: the one
  * way to reach this code is a capability to its port, requests name
@@ -30,10 +31,12 @@
 #include <eb/io.h>
 #include <eb/string.h>
 
-/* The emulator's fixed little neighbourhood. */
-static const u8  ip_ours[4] = { 10, 0, 2, 15 };
-static const u8  ip_gw[4]   = { 10, 0, 2, 2 };
-static const u8  ip_dns[4]  = { 10, 0, 2, 3 };
+/* Who we are and who serves us: filled in by DHCP, or by the
+ * emulator's well-known arrangement when nobody answers. */
+static u8 ip_ours[4];
+static u8 ip_gw[4];
+static u8 ip_dns[4];
+static bool configured;
 
 static domain    *kdom;
 static object    *service_port;
@@ -79,7 +82,7 @@ static u8 frame_in[1600];
 static void eth_head(u8 *f, const u8 *dst, u16 type)
 {
     for (u32 i = 0; i < 6; i++) f[i] = dst[i];
-    const u8 *us = e1000_mac();
+    const u8 *us = nic_mac();
     for (u32 i = 0; i < 6; i++) f[6 + i] = us[i];
     f[12] = (u8)(type >> 8);
     f[13] = (u8)type;
@@ -96,13 +99,13 @@ static void arp_say(const u8 *dst_mac, const u8 *dst_ip, u16 op)
     a[2] = 8; a[3] = 0;             /* ipv4 */
     a[4] = 6; a[5] = 4;             /* address sizes */
     a[6] = 0; a[7] = (u8)op;        /* 1 asks, 2 answers */
-    const u8 *us = e1000_mac();
+    const u8 *us = nic_mac();
     for (u32 i = 0; i < 6; i++) a[8 + i] = us[i];
     for (u32 i = 0; i < 4; i++) a[14 + i] = ip_ours[i];
     for (u32 i = 0; i < 6; i++) a[18 + i] = dst_mac[i];
     for (u32 i = 0; i < 4; i++) a[24 + i] = dst_ip[i];
 
-    e1000_send(f, 14 + 28);
+    nic_send(f, 14 + 28);
 }
 
 /* ------------------------------------------------------------------ */
@@ -117,6 +120,52 @@ static struct {
     u8    dns_addr[4];
     bool  dns_done;
 } wait_dns;
+
+/* The lease being negotiated. */
+static struct {
+    bool want;
+    u32  xid;
+    bool have_offer, have_ack;
+    u8   offered[4], server[4], router[4], names[4];
+} wait_dhcp;
+
+static void dhcp_input(const u8 *p, u32 len)
+{
+    if (!wait_dhcp.want || len < 244) return;
+    if (p[0] != 2) return;                               /* not an answer */
+    u32 xid = ((u32)p[4] << 24) | ((u32)p[5] << 16) |
+              ((u32)p[6] << 8) | p[7];
+    if (xid != wait_dhcp.xid) return;
+    if (p[236] != 0x63 || p[237] != 0x82 ||
+        p[238] != 0x53 || p[239] != 0x63) return;
+
+    u8 kind = 0;
+    u8 router[4] = { 0 }, names[4] = { 0 }, server[4] = { 0 };
+
+    u32 at = 240;
+    while (at + 1 < len && p[at] != 255) {
+        u8 opt = p[at], olen = p[at + 1];
+        if (at + 2 + olen > len) break;
+        const u8 *v = p + at + 2;
+        if (opt == 53 && olen >= 1) kind = v[0];
+        if (opt == 3 && olen >= 4) for (u32 i = 0; i < 4; i++) router[i] = v[i];
+        if (opt == 6 && olen >= 4) for (u32 i = 0; i < 4; i++) names[i] = v[i];
+        if (opt == 54 && olen >= 4) for (u32 i = 0; i < 4; i++) server[i] = v[i];
+        at += 2 + olen;
+    }
+
+    if (kind == 2 && !wait_dhcp.have_offer) {            /* an offer */
+        for (u32 i = 0; i < 4; i++) {
+            wait_dhcp.offered[i] = p[16 + i];
+            wait_dhcp.server[i] = server[i];
+            wait_dhcp.router[i] = router[i];
+            wait_dhcp.names[i] = names[i];
+        }
+        wait_dhcp.have_offer = true;
+    } else if (kind == 5) {                              /* the lease */
+        wait_dhcp.have_ack = true;
+    }
+}
 
 /* The one tcp conversation. */
 static struct {
@@ -230,7 +279,7 @@ static void dns_input(const u8 *p, u32 len)
 static void net_pump(void)
 {
     for (;;) {
-        i32 got = e1000_recv(frame_in, sizeof(frame_in));
+        i32 got = nic_recv(frame_in, sizeof(frame_in));
         if (got < 14) return;
 
         u16 type = ((u16)frame_in[12] << 8) | frame_in[13];
@@ -248,7 +297,15 @@ static void net_pump(void)
         }
 
         if (type != ETH_IP || plen < 20) continue;
-        if (!ip4_eq(p + 16, ip_ours)) continue;
+
+        /* Ours, or spoken to everyone -- and while we have no address
+         * yet, everything the card accepted is worth a look, since
+         * the lease that will name us arrives before the name. */
+        static const u8 everyone4[4] = { 255, 255, 255, 255 };
+        if (!ip4_eq(p + 16, ip_ours) &&
+            !ip4_eq(p + 16, everyone4) &&
+            configured)
+            continue;
         u8 ihl = (u8)(p[0] & 0x0F) * 4;
         u16 tot = ((u16)p[2] << 8) | p[3];
         if (ihl < 20 || tot > plen) continue;
@@ -260,7 +317,9 @@ static void net_pump(void)
             tcp_input(inner, ilen);
         } else if (proto == 17 && ilen >= 8) {
             u16 sport = ((u16)inner[0] << 8) | inner[1];
+            u16 dport = ((u16)inner[2] << 8) | inner[3];
             if (sport == 53) dns_input(inner + 8, ilen - 8);
+            if (dport == 68) dhcp_input(inner + 8, ilen - 8);
         } else if (proto == 1 && ilen >= 8 && inner[0] == 8) {
             /* An echo request: answer it. Being pingable costs one
              * buffer and makes the whole path checkable from outside. */
@@ -281,7 +340,7 @@ static void net_pump(void)
             ic[0] = 0; ic[2] = 0; ic[3] = 0;
             u16 cc = csum(ic, ilen, 0);
             ic[2] = (u8)(cc >> 8); ic[3] = (u8)cc;
-            e1000_send(f, 14 + 20 + ilen);
+            nic_send(f, 14 + 20 + ilen);
         }
     }
 }
@@ -322,7 +381,7 @@ static bool ip_send(u8 proto, const u8 *dst, const u8 *payload, u32 len)
     ip[10] = (u8)(hc >> 8); ip[11] = (u8)hc;
 
     for (u32 i = 0; i < len; i++) ip[20 + i] = payload[i];
-    return e1000_send(f, 14 + 20 + len);
+    return nic_send(f, 14 + 20 + len);
 }
 
 /* The pseudo-header seed tcp and udp checksums start from. */
@@ -377,6 +436,111 @@ static void tcp_emit(u8 flags, const void *payload, u32 len)
 /* ------------------------------------------------------------------ */
 
 #define SECOND 1000000000ULL
+
+/* One DHCP message, spoken from nowhere to everyone: we have no
+ * address yet, which is the whole point of asking. */
+static void dhcp_send(u8 kind)
+{
+    static const u8 everymac[6] = { 255, 255, 255, 255, 255, 255 };
+    u8 b[320];
+    for (u32 i = 0; i < sizeof(b); i++) b[i] = 0;
+
+    b[0] = 1; b[1] = 1; b[2] = 6;                       /* ask, ethernet */
+    b[4] = (u8)(wait_dhcp.xid >> 24);
+    b[5] = (u8)(wait_dhcp.xid >> 16);
+    b[6] = (u8)(wait_dhcp.xid >> 8);
+    b[7] = (u8)wait_dhcp.xid;
+    b[10] = 0x80;                       /* answer to everyone, please */
+    const u8 *us = nic_mac();
+    for (u32 i = 0; i < 6; i++) b[28 + i] = us[i];
+    b[236] = 0x63; b[237] = 0x82; b[238] = 0x53; b[239] = 0x63;
+
+    u32 at = 240;
+    b[at++] = 53; b[at++] = 1; b[at++] = kind;   /* 1 asks, 3 takes */
+    if (kind == 3) {
+        b[at++] = 50; b[at++] = 4;
+        for (u32 i = 0; i < 4; i++) b[at++] = wait_dhcp.offered[i];
+        b[at++] = 54; b[at++] = 4;
+        for (u32 i = 0; i < 4; i++) b[at++] = wait_dhcp.server[i];
+    }
+    b[at++] = 55; b[at++] = 3;
+    b[at++] = 1; b[at++] = 3; b[at++] = 6;   /* mask, way out, names */
+    b[at++] = 255;
+    u32 blen = at < 300 ? 300 : at;          /* the old floor of bootp */
+
+    u8 *f = frame_out;
+    eth_head(f, everymac, ETH_IP);
+    u8 *ip = f + 14;
+    u16 tot = (u16)(20 + 8 + blen);
+    ip[0] = 0x45; ip[1] = 0;
+    ip[2] = (u8)(tot >> 8); ip[3] = (u8)tot;
+    ip[4] = (u8)(ip_ident >> 8); ip[5] = (u8)ip_ident;
+    ip_ident++;
+    ip[6] = 0; ip[7] = 0; ip[8] = 64; ip[9] = 17;
+    ip[10] = 0; ip[11] = 0;
+    for (u32 i = 0; i < 4; i++) ip[12 + i] = 0;
+    for (u32 i = 0; i < 4; i++) ip[16 + i] = 255;
+    u16 hc = csum(ip, 20, 0);
+    ip[10] = (u8)(hc >> 8); ip[11] = (u8)hc;
+
+    u8 *u = ip + 20;
+    u[0] = 0; u[1] = 68; u[2] = 0; u[3] = 67;
+    u16 ulen = (u16)(8 + blen);
+    u[4] = (u8)(ulen >> 8); u[5] = (u8)ulen;
+    u[6] = 0; u[7] = 0;
+    for (u32 i = 0; i < blen; i++) u[8 + i] = b[i];
+
+    nic_send(f, 14 + tot);
+}
+
+/* Asks the network who we are. Whatever answers decides; a network
+ * that stays silent gets the emulator's well-known arrangement, so a
+ * test machine neither waits long nor lies about it. */
+static void dhcp_run(void)
+{
+    wait_dhcp.want = true;
+    wait_dhcp.xid = (u32)(time_ns() ^ 0x9E3779B9u) | 1;
+
+    for (u32 try = 0; try < 3 && !wait_dhcp.have_offer; try++) {
+        dhcp_send(1);
+        u64 from = time_ns();
+        while (time_ns() - from < 2 * SECOND && !wait_dhcp.have_offer)
+            net_breathe();
+    }
+    for (u32 try = 0; try < 3 && wait_dhcp.have_offer &&
+                      !wait_dhcp.have_ack; try++) {
+        dhcp_send(3);
+        u64 from = time_ns();
+        while (time_ns() - from < 2 * SECOND && !wait_dhcp.have_ack)
+            net_breathe();
+    }
+    wait_dhcp.want = false;
+
+    if (wait_dhcp.have_ack) {
+        for (u32 i = 0; i < 4; i++) {
+            ip_ours[i] = wait_dhcp.offered[i];
+            ip_gw[i] = wait_dhcp.router[i];
+            ip_dns[i] = wait_dhcp.names[i];
+        }
+        /* A landlord who names no name servant means himself. */
+        if (ip_dns[0] == 0)
+            for (u32 i = 0; i < 4; i++) ip_dns[i] = ip_gw[i];
+        configured = true;
+        kprintf("net:  %u.%u.%u.%u by lease, way out %u.%u.%u.%u, "
+                "names from %u.%u.%u.%u\n",
+                ip_ours[0], ip_ours[1], ip_ours[2], ip_ours[3],
+                ip_gw[0], ip_gw[1], ip_gw[2], ip_gw[3],
+                ip_dns[0], ip_dns[1], ip_dns[2], ip_dns[3]);
+        return;
+    }
+
+    ip_ours[0] = 10; ip_ours[1] = 0; ip_ours[2] = 2; ip_ours[3] = 15;
+    ip_gw[0] = 10; ip_gw[1] = 0; ip_gw[2] = 2; ip_gw[3] = 2;
+    ip_dns[0] = 10; ip_dns[1] = 0; ip_dns[2] = 2; ip_dns[3] = 3;
+    configured = true;
+    kprintf("net:  nobody leases here; assuming the emulator's "
+            "10.0.2.15\n");
+}
 
 static bool gateway_find(void)
 {
@@ -583,7 +747,7 @@ static void fetch_into(object *o)
     u8 addr[4];
     u32 got = 0;
 
-    if (!e1000_up() || !gateway_find()) {
+    if (!nic_up() || !gateway_find()) {
         said = "the wire goes nowhere.\n";
     } else if (!dns_resolve(host, hlen, addr)) {
         said = "the name service does not know it.\n";
@@ -625,6 +789,8 @@ static void fetch_into(object *o)
 static void net_thread(void *arg)
 {
     (void)arg;
+    dhcp_run();
+
     for (;;) {
         message m;
         const char *from = NULL;
@@ -657,12 +823,15 @@ void net_prepare(domain *kernel)
 bool net_start(void)
 {
     if (!service_port) return false;
-    if (!e1000_init()) return false;
+
+    /* The drivers, in the order of how much silicon each one covers
+     * in practice. The first to find its chip carries the traffic. */
+    if (!e1000_init() && !rtl8169_init() && !rtl8139_init())
+        return false;
 
     thread_create("net", net_thread, NULL, kdom);
     running = true;
 
-    kprintf("net:  10.0.2.15 behind 10.0.2.2, names from 10.0.2.3, "
-            "outbound only\n");
+    kprintf("net:  outbound only, plain http, one errand at a time\n");
     return true;
 }

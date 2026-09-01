@@ -90,8 +90,17 @@ static bool     up;
 static u32 rr(u32 off)          { return *(volatile u32 *)(regs + off); }
 static void wr(u32 off, u32 v)  { *(volatile u32 *)(regs + off) = v; }
 
-const u8 *e1000_mac(void) { return mac; }
-bool      e1000_up(void)  { return up; }
+static const u8 *e1000_get_mac(void) { return mac; }
+
+static bool e1000_send(const void *frame, u32 len);
+static i32  e1000_recv(void *out, u32 max);
+
+static const nic_ops e1000_ops = {
+    .name = "e1000",
+    .mac  = e1000_get_mac,
+    .send = e1000_send,
+    .recv = e1000_recv,
+};
 
 /* One word of the EEPROM, for cards whose address registers came up
  * empty. QEMU fills them in, so this is the road not usually taken. */
@@ -186,10 +195,11 @@ bool e1000_init(void)
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
     up = true;
+    nic_register(&e1000_ops);
     return true;
 }
 
-bool e1000_send(const void *frame, u32 len)
+static bool e1000_send(const void *frame, u32 len)
 {
     if (!up || len > BUF_SIZE) return false;
 
@@ -208,7 +218,7 @@ bool e1000_send(const void *frame, u32 len)
     return true;
 }
 
-i32 e1000_recv(void *out, u32 max)
+static i32 e1000_recv(void *out, u32 max)
 {
     if (!up) return -1;
 

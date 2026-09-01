@@ -1093,12 +1093,15 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
             char one[2] = { on ? letter[b] : '-', 0 };
             i32 lx = col_rights + (i32)b * GLYPH_W;
 
-            if (lit && can) fb_rect(lx - 1, ty - 2, GLYPH_W + 2, ROW - 2,
+            if (lit && can) fb_rect(lx - 2, ty - 3, GLYPH_W + 4, ROW,
                                     C_EDGE);
             text_at(lx, ty, lx + GLYPH_W, one,
                     on ? (b == 1 ? C_WRITE : C_DIM)
                        : (can && lit ? C_TEXT : C_FAINT));
-            if (can) hot_add(lx - 1, ty - 2, GLYPH_W + 2, ROW - 2,
+            /* As tall as the row it governs: a letter that can only
+             * be hit on its exact pixels is a letter most pointers
+             * miss. */
+            if (can) hot_add(lx - 2, ty - 3, GLYPH_W + 4, ROW,
                              HOT_RIGHT, (u32)(i * 8 + b));
         }
 

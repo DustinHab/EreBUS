@@ -366,6 +366,24 @@ built binary.
   survives a reboot the way the standard programs do: its words are
   still there, so the words simply run again, regranted what the
   record held.
+* **The way out.** Enough of the internet to fetch a page: ARP, DHCP,
+  DNS over UDP, a one-conversation TCP client carrying a single
+  HTTP/1.0 request, and the machine answers pings. Who we are is
+  asked, not assumed -- whatever network answers the lease decides,
+  and a silent one gets the emulator's well-known defaults. Three
+  drivers behind one seam: Intel's 8254x (QEMU, VirtualBox, VMware),
+  the RTL8139 (proven against QEMU's model), and the RTL8168/8169
+  family that sits in most machines with a cable socket -- that last
+  one written against documentation and honest about never having met
+  its silicon. The network is a capability, not an API: the fetch
+  program is born holding "the wire", send-only, and whoever holds
+  fetch can ask for pages while whoever does not cannot knock. A
+  request is a text whose first line names the page; the answer lands
+  in the same object at the rights the capability carried. Outbound
+  only, one errand at a time, plain http -- TLS is honestly absent,
+  and the refusal for https says so. No wifi: firmware blobs and a
+  crypto stack are a different project, and pretending otherwise
+  would be the lie this file avoids.
 * M10 — booting real hardware from a USB stick
 
 ## A note on Secure Boot

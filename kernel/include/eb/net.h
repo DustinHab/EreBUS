@@ -25,12 +25,29 @@
  * stood, which is the only addressing this system has.
  */
 
-/* The card. */
-bool      e1000_init(void);
-bool      e1000_up(void);
-const u8 *e1000_mac(void);
-bool      e1000_send(const void *frame, u32 len);
-i32       e1000_recv(void *out, u32 max);
+/* One card among possible cards. Each driver knows one family; the
+ * first whose init finds silicon registers itself, and everything
+ * above speaks to whichever card answered. */
+typedef struct {
+    const char *name;
+    const u8 *(*mac)(void);
+    bool (*send)(const void *frame, u32 len);
+    i32  (*recv)(void *out, u32 max);
+} nic_ops;
+
+void        nic_register(const nic_ops *ops);
+bool        nic_up(void);
+const char *nic_name(void);
+const u8   *nic_mac(void);
+bool        nic_send(const void *frame, u32 len);
+i32         nic_recv(void *out, u32 max);
+
+/* The drivers. Intel's 8254x family covers QEMU, VirtualBox and
+ * VMware; the two Realtek families cover most machines with a cable
+ * socket. Each answers false quietly when its chip is not there. */
+bool e1000_init(void);
+bool rtl8139_init(void);
+bool rtl8169_init(void);
 
 /* The service. Prepare early -- the port has to exist before the
  * fetch program starts holding a way to it -- and start late, once
