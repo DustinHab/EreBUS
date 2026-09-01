@@ -201,7 +201,9 @@ typedef enum {
     HOT_OFF,         /* save everything and put the machine to sleep */
     HOT_END,         /* end the focused running program */
     HOT_PACK,        /* fold the focused list into one plain thing */
-    HOT_UNPACK       /* build the list back out of a bundle */
+    HOT_UNPACK,      /* build the list back out of a bundle */
+    HOT_P2REF,       /* the second pane: follow a reference */
+    HOT_P2TRAIL      /* the second pane: go back to a step */
 } hot_kind;
 
 typedef struct {
@@ -257,8 +259,14 @@ enum {
     SCR_STRUCT,      /* the structure lens */
     SCR_CONTENTS,    /* the references panel on the right */
     SCR_INDEX,       /* the index listing */
+    SCR_TEXT2,       /* the second pane's text, in the split */
     SCR_COUNT
 };
+
+/* Which area the text lens scrolls in: the second pane redirects
+ * this while it draws, so both halves of a split keep their own
+ * place in their own texts. */
+static u8 cur_text_area = SCR_TEXT;
 
 static u32 scrolls[SCR_COUNT];      /* SCR_HTML aliases nav.html_scroll */
 static u32 scr_rows[SCR_COUNT];
@@ -686,9 +694,10 @@ static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
         rows = my + 1;
     }
 
+    bool scrollable = caret || cur_text_area == SCR_TEXT2;
     u32 scroll = 0;
-    if (caret) {
-        u32 *s = &scrolls[SCR_TEXT];
+    if (scrollable) {
+        u32 *s = &scrolls[cur_text_area];
         u32 max = rows > (u32)vis ? rows - (u32)vis : 0;
 
         /* The journal opens at its end and stays pinned there while
@@ -696,11 +705,11 @@ static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
         if (o == journal_object()) {
             if (log_pinned) *s = max;
             else if (*s >= max) log_pinned = true;
-        } else if (caret_chase) {
+        } else if (caret && caret_chase) {
             if (crow < *s) *s = crow;
             else if (crow >= *s + (u32)vis) *s = crow - (u32)vis + 1;
         }
-        caret_chase = false;
+        if (caret) caret_chase = false;
         if (*s > max) *s = max;
         scroll = *s;
     }
@@ -765,7 +774,8 @@ static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
         cx++;
     }
 
-    if (caret) scroll_area(SCR_TEXT, x, y, w, h, rows, (u32)vis);
+    if (scrollable) scroll_area(cur_text_area, x, y, w, h, rows,
+                                (u32)vis);
 }
 
 /* The walk above, run backwards: which place in the text sits at this
@@ -2190,6 +2200,181 @@ static void draw_tiles_shell(i32 sw, i32 sh, i32 top, i32 bottom)
 /* ------------------------------------------------------------------ */
 /* Frame                                                               */
 /* ------------------------------------------------------------------ */
+/* Shell five: the split -- two independent walks                      */
+/* ------------------------------------------------------------------ */
+
+/* The second walk. Its references are retained while it stands on
+ * them -- the collector treats a held reference the graph does not
+ * explain as an outside holder, which is exactly what this is. The
+ * second pane reads and walks; writing, running and sending stay
+ * with the first, which is where the caret and the header's words
+ * already live. */
+static struct {
+    object *node[TRAIL_MAX];
+    u32     rights[TRAIL_MAX];
+    u32     via[TRAIL_MAX];
+    u32     depth;
+    u32     selected;
+} p2;
+
+static void p2_reset(void)
+{
+    for (u32 i = 1; i < p2.depth; i++) obj_release(p2.node[i]);
+    p2.node[0] = nav.node[0];
+    p2.rights[0] = nav.rights[0];
+    p2.depth = 1;
+    p2.selected = 0;
+    scrolls[SCR_TEXT2] = 0;
+}
+
+static void p2_follow(u64 slot)
+{
+    if (p2.depth >= TRAIL_MAX) return;
+    object *f = p2.node[p2.depth - 1];
+    if (slot >= obj_slots(f)) return;
+    object *t = obj_get_slot(f, slot);
+    if (!t) return;
+
+    u32 gained = p2.rights[p2.depth - 1] & obj_slot_rights(f, slot);
+    if (gained == 0) return;
+
+    obj_retain(t);
+    p2.via[p2.depth] = (u32)slot;
+    p2.node[p2.depth] = t;
+    p2.rights[p2.depth] = gained;
+    p2.depth++;
+    p2.selected = 0;
+    scrolls[SCR_TEXT2] = 0;
+    nav.redraw = true;
+}
+
+static void p2_back_to(u32 index)
+{
+    while (p2.depth > index + 1 && p2.depth > 1) {
+        p2.depth--;
+        obj_release(p2.node[p2.depth]);
+        p2.selected = p2.via[p2.depth];
+    }
+    scrolls[SCR_TEXT2] = 0;
+    nav.redraw = true;
+}
+
+/* One half of the split: the walked path as a line of words, the
+ * references as a narrow column, and the object through a lens. */
+static void draw_pane(i32 px, i32 pw, i32 top, i32 bottom, bool primary)
+{
+    u32 depth = primary ? nav.depth : p2.depth;
+    u32 sel   = primary ? nav.selected : p2.selected;
+
+    fb_rect(px, top, pw, bottom - top, C_PANEL);
+    if (primary)
+        fb_rect(px, top, pw, 2, C_ACCENT);
+
+    /* The path as one line: every step a word, every word a way
+     * back. */
+    i32 x = px + PAD;
+    i32 ty = top + PAD;
+    for (u32 i = 0; i < depth; i++) {
+        object *n = primary ? nav.node[i] : p2.node[i];
+        object *h = i ? (primary ? nav.node[i - 1] : p2.node[i - 1])
+                      : NULL;
+        u32 via = i ? (primary ? nav.via[i] : p2.via[i]) : 0;
+
+        char what[32];
+        label_of(h, via, n, what, sizeof(what));
+        i32 wl = 0;
+        while (what[wl]) wl++;
+
+        hot_kind hk = primary ? HOT_TRAIL : HOT_P2TRAIL;
+        bool lit = is_hovered(hk, i);
+        bool here = (i + 1 == depth);
+        if (lit && !here)
+            fb_rect(x - 3, ty - 3, wl * GLYPH_W + 6, ROW, C_EDGE);
+        text_at(x, ty, px + pw - PAD, what,
+                here ? C_TEXT : (lit ? C_TEXT : C_DIM));
+        hot_add(x - 3, ty - 3, wl * GLYPH_W + 6, ROW, hk, i);
+        x += wl * GLYPH_W;
+        if (!here) {
+            text_at(x + GLYPH_W, ty, px + pw, ">", C_FAINT);
+            x += 3 * GLYPH_W;
+        }
+        if (x > px + pw - 12 * GLYPH_W) break;   /* a long walk clips */
+    }
+    fb_rect(px + PAD, top + PAD + ROW - 2, pw - 2 * PAD, 1, C_EDGE);
+
+    /* The narrow column of references, and the lens beside it. */
+    object *f = primary ? focus() : p2.node[p2.depth - 1];
+    i32 list_w = 24 * GLYPH_W;
+    i32 ly = top + PAD + ROW + 6;
+    u32 shown = 0, total_refs = 0;
+
+    for (u64 i = 0; i < obj_slots(f); i++) {
+        object *t = obj_get_slot(f, i);
+        if (!t) continue;
+        total_refs++;
+        if (ly >= bottom - ROW) continue;
+
+        char what[24];
+        label_of(f, i, t, what, sizeof(what));
+
+        hot_kind hk = primary ? HOT_REFERENCE : HOT_P2REF;
+        bool picked = (i == sel);
+        bool lit = is_hovered(hk, (u32)i);
+        if (picked || lit)
+            fb_rect(px, ly - 3, list_w + PAD, ROW,
+                    picked ? C_PANEL_HI : C_EDGE);
+        text_at(px + PAD, ly, px + PAD + list_w, what,
+                (picked || lit) ? C_TEXT : C_DIM);
+        hot_add(px, ly - 3, list_w + PAD, ROW, hk, (u32)i);
+        ly += ROW;
+        shown++;
+    }
+    if (shown < total_refs && ly < bottom) {
+        char line[32];
+        u32 at = put(line, 0, "  and ");
+        at = put_dec(line, at, total_refs - shown);
+        at = put(line, at, " more");
+        line[at] = 0;
+        text_at(px + PAD, ly, px + PAD + list_w, line, C_FAINT);
+    }
+
+    i32 lens_x = px + PAD + list_w + PAD + 6;
+    i32 lens_w = pw - list_w - 3 * PAD - 6;
+    i32 lens_y = top + PAD + ROW + 6;
+    fb_rect(lens_x - 4, lens_y, 1, bottom - lens_y - PAD, C_EDGE);
+
+    if (primary) {
+        draw_lens(nav.lens[0], f, lens_x, lens_y, lens_w,
+                  bottom - lens_y - PAD,
+                  nav.lens[0] == LENS_TEXT || nav.lens[0] == LENS_PAINT ||
+                  nav.lens[0] == LENS_HTML);
+    } else {
+        cur_text_area = SCR_TEXT2;
+        draw_lens(default_lens(f), f, lens_x, lens_y, lens_w,
+                  bottom - lens_y - PAD, false);
+        cur_text_area = SCR_TEXT;
+    }
+}
+
+static void draw_split_shell(i32 sw, i32 sh, i32 top, i32 bottom)
+{
+    (void)sh;
+
+    /* The second walk starts at home, and starts over when the world
+     * under it changed -- another generation, another root. */
+    if (p2.depth == 0 || p2.node[0] != nav.node[0]) p2_reset();
+    if (p2.depth > 0) {
+        object *f2 = p2.node[p2.depth - 1];
+        if (p2.selected >= obj_slots(f2)) p2.selected = 0;
+    }
+
+    i32 half = sw / 2;
+    draw_pane(PAD, half - PAD - PAD / 2, top, bottom - PAD, true);
+    draw_pane(half + PAD / 2, sw - half - PAD - PAD / 2, top,
+              bottom - PAD, false);
+}
+
+/* ------------------------------------------------------------------ */
 /* Shell four: the index                                               */
 /* ------------------------------------------------------------------ */
 
@@ -2479,6 +2664,7 @@ static const char *mode_name(shell_mode m)
     case SHELL_GRAPH: return "graph";
     case SHELL_TILES: return "columns";
     case SHELL_INDEX: return "index";
+    case SHELL_SPLIT: return "split";
     default:          return "?";
     }
 }
@@ -2757,6 +2943,7 @@ static void draw_all(void)
     case SHELL_GRAPH: draw_graph_shell(sw, sh, top, bottom); break;
     case SHELL_TILES: draw_tiles_shell(sw, sh, top, bottom); break;
     case SHELL_INDEX: draw_index_shell(sw, sh, top, bottom); break;
+    case SHELL_SPLIT: draw_split_shell(sw, sh, top, bottom); break;
     default: break;
     }
 
@@ -2854,6 +3041,9 @@ static void draw_all(void)
         else if (nav.mode == SHELL_GRAPH)
             at = put(line, at, "drag the empty ground to move the map; "
                                "the wheel zooms.");
+        else if (nav.mode == SHELL_SPLIT)
+            at = put(line, at, "two walks: the left one writes, "
+                               "the right one reads.");
         else if (nav.mode == SHELL_INDEX)
             at = put(line, at, "typing searches what you can reach.");
         else if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
@@ -3905,6 +4095,15 @@ static void act_on(const hot_region *r)
             nav.changes++;
         }
         nav.redraw = true;
+        break;
+
+    case HOT_P2REF:
+        p2.selected = r->index;
+        p2_follow(r->index);
+        break;
+
+    case HOT_P2TRAIL:
+        p2_back_to(r->index);
         break;
 
     case HOT_PACK:

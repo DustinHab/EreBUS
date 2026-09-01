@@ -30,6 +30,7 @@ typedef enum {
     SHELL_GRAPH,     /* the reachable graph as nodes and edges */
     SHELL_TILES,     /* the path as columns, side by side */
     SHELL_INDEX,     /* everything reachable, one line each */
+    SHELL_SPLIT,     /* two independent walks, side by side */
     SHELL_MODE_COUNT
 } shell_mode;
 
