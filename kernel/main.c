@@ -27,6 +27,7 @@
 #include <eb/journal.h>
 #include <eb/settings.h>
 #include <eb/activity.h>
+#include <eb/standard.h>
 #include <eb/string.h>
 #include <eb/syscall.h>
 #include <eb/pic.h>
@@ -150,6 +151,31 @@ static object *standard_obj[STANDARD_COUNT];
  * take messages out of it. Programs get send-only copies. */
 static domain     *kernel_domain;
 static cap_handle  console_receive;
+
+/* Kept for starting programs after boot: every instance begins holding
+ * a way to speak into this and its own letter box, nothing else. */
+static object     *console_port;
+
+u32 standard_count(void) { return STANDARD_COUNT; }
+
+const char *standard_name(u32 i)
+{
+    return i < STANDARD_COUNT ? standard[i].name : "?";
+}
+
+object *standard_launch(u32 i)
+{
+    if (i >= STANDARD_COUNT || !console_port) return NULL;
+
+    process *p = proc_create(standard[i].name, standard[i].entry,
+                             console_port);
+    if (!p) return NULL;
+    if (!proc_start(p)) return NULL;
+
+    kprintf("proc: %llu (%s) started from the shell\n",
+            proc_id(p), proc_name(p));
+    return proc_object(p);
+}
 
 /* Prints the packed characters a message carries. Anything outside
  * printable ASCII is dropped rather than sent to the console, so a
@@ -792,7 +818,9 @@ void kmain(eb_boot_info *bi)
         }
     }
 
-    obj_release(console);
+    /* The reference stays: launching a program later needs the same
+     * console every boot-time program was given. */
+    console_port = console;
 
     /* Let them run. */
     for (u32 i = 0; i < 400; i++) sched_yield();

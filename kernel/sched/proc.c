@@ -156,6 +156,12 @@ static void addrspace_destroy(phys_addr pml4)
 process *proc_create(const char *name, const void *entry_point,
                      object *console)
 {
+    /* A full table refuses at the door. Registering nowhere and
+     * running anyway would make a process the liveness check cannot
+     * see -- running and invisible is the one combination this system
+     * must never produce. */
+    if (live_count >= MAX_PROCESSES) return NULL;
+
     process *p = (process *)kzalloc(sizeof(process));
     if (!p) return NULL;
 

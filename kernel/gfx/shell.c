@@ -11,6 +11,7 @@
 #include <eb/proc.h>
 #include <eb/journal.h>
 #include <eb/settings.h>
+#include <eb/standard.h>
 #include <eb/time.h>
 
 #define SNAP_HISTORY_MAX 32
@@ -991,6 +992,32 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
                 ty += ROW;
             }
 
+            /* The programs the system ships with, each ready to start.
+             * Making one here is the same act as making a text: a fresh
+             * thing comes to exist, and the reference being added is
+             * how it is held. It starts with a voice and a letter box;
+             * everything beyond that is given the ordinary way. */
+            u32 sc = standard_count();
+            if (sc > 0 && ty < bottom - ROW) {
+                text_at(rx + PAD, ty, sw - PAD,
+                        "  or a program, started fresh:", C_FAINT);
+                ty += ROW;
+            }
+            for (u32 p = 0; p < sc && ty < bottom - ROW; p++) {
+                bool on = is_hovered(HOT_PALETTE, PALETTE_FIXED + p);
+                if (on) fb_rect(rx, ty - 3, right_w, ROW, C_PANEL_HI);
+
+                char nm[40];
+                u32 n = put(nm, 0, "  ");
+                n = put(nm, n, standard_name(p));
+                nm[n] = 0;
+                text_at(rx + PAD + 2 * GLYPH_W, ty, sw - PAD, nm,
+                        on ? C_TEXT : C_WRITE);
+                hot_add(rx, ty - 3, right_w, ROW, HOT_PALETTE,
+                        PALETTE_FIXED + p);
+                ty += ROW;
+            }
+
             carried carry[CARRY_MAX];
             u32 carried_count = gather(carry);
 
@@ -1005,7 +1032,8 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
                          nm, sizeof(nm));
                 rights_text(carry[c].rights, r);
 
-                bool on = is_hovered(HOT_PALETTE, PALETTE_FIXED + c);
+                bool on = is_hovered(HOT_PALETTE,
+                                     PALETTE_FIXED + standard_count() + c);
                 if (on) fb_rect(rx, ty - 3, right_w, ROW, C_PANEL_HI);
 
                 /* The rights come along on the label. What is being
@@ -1016,7 +1044,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
                 text_at(rx + PAD + 7 * GLYPH_W, ty, sw - PAD, nm,
                         on ? C_TEXT : C_DIM);
                 hot_add(rx, ty - 3, right_w, ROW, HOT_PALETTE,
-                        PALETTE_FIXED + c);
+                        PALETTE_FIXED + standard_count() + c);
                 ty += ROW;
             }
         }
@@ -2329,10 +2357,21 @@ static void act_on(const hot_region *r)
                                   suggest = "bytes"; created = true; }
         else if (r->index == 2) { made = obj_create(TYPE_LIST, 0, 4);
                                   suggest = "list"; created = true; }
+        else if (r->index < PALETTE_FIXED + standard_count()) {
+            /* A fresh instance. The process holds its own program
+             * object; the slot below takes its own hold on it, so
+             * nothing is released here. Read and grant go on the
+             * reference -- running programs are watched and given to,
+             * never written into. */
+            made = standard_launch(r->index - PALETTE_FIXED);
+            if (!made) break;
+            give = CAP_READ | CAP_GRANT;
+            suggest = standard_name(r->index - PALETTE_FIXED);
+        }
         else {
             carried carry[CARRY_MAX];
             u32 n = gather(carry);
-            u32 c = r->index - PALETTE_FIXED;
+            u32 c = r->index - PALETTE_FIXED - standard_count();
             if (c >= n) break;
 
             made = carry[c].o;
