@@ -1338,7 +1338,9 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
         for (u32 i = 0; i < nfound && ty < y + h; i++) {
             u8 fip[4];
             char fname[24];
-            if (!pipe_found_at(i, fip, fname)) break;
+            bool fworks;
+            u32 fmib;
+            if (!pipe_found_at(i, fip, fname, &fworks, &fmib)) break;
 
             at = put(line, 0, "  ");
             at = put(line, at, fname);
@@ -1347,6 +1349,12 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
             at = put_dec(line, at, fip[1]); line[at++] = '.';
             at = put_dec(line, at, fip[2]); line[at++] = '.';
             at = put_dec(line, at, fip[3]);
+            if (fworks) {
+                while (at < 40) line[at++] = ' ';
+                at = put(line, at, "takes work, ");
+                at = put_dec(line, at, fmib);
+                at = put(line, at, "M free");
+            }
             line[at] = 0;
 
             bool plit = is_hovered(HOT_PEERPICK, i);
@@ -2579,7 +2587,7 @@ static void draw_all(void)
      * Drawn last so it lies over the panels and its clicks win. */
     if (sendto_open) {
         u32 nfound = pipe_found_count();
-        i32 pw2 = 40 * GLYPH_W;
+        i32 pw2 = 50 * GLYPH_W;
         i32 px = sendto_x - 4;
         if (px + pw2 > sw - PAD) px = sw - PAD - pw2;
         i32 py = 38;
@@ -2612,7 +2620,8 @@ static void draw_all(void)
         for (u32 i = 0; i < nfound; i++) {
             u8 fip[4];
             char fname[24];
-            if (!pipe_found_at(i, fip, fname)) break;
+            bool fworks;
+            if (!pipe_found_at(i, fip, fname, &fworks, NULL)) break;
 
             at = put(line, 0, "  ");
             at = put(line, at, fname);
@@ -2621,6 +2630,10 @@ static void draw_all(void)
             at = put_dec(line, at, fip[1]); line[at++] = '.';
             at = put_dec(line, at, fip[2]); line[at++] = '.';
             at = put_dec(line, at, fip[3]);
+            if (fworks) {
+                while (at < 38) line[at++] = ' ';
+                at = put(line, at, "takes work");
+            }
             line[at] = 0;
 
             bool plit = is_hovered(HOT_SENDPICK, i);
@@ -3275,7 +3288,7 @@ static void act_on(const hot_region *r)
          * into the settings as a written line. */
         u8 fip[4];
         char fname[24];
-        if (!pipe_found_at(r->index, fip, fname)) break;
+        if (!pipe_found_at(r->index, fip, fname, NULL, NULL)) break;
         peer_write(fip);
         break;
     }
@@ -3285,7 +3298,7 @@ static void act_on(const hot_region *r)
          * thing go -- or the work -- in the same breath. */
         u8 fip[4];
         char fname[24];
-        if (!pipe_found_at(r->index, fip, fname)) break;
+        if (!pipe_found_at(r->index, fip, fname, NULL, NULL)) break;
         peer_write(fip);
         if (focus_rights() & CAP_READ) {
             if (sendto_ask) pipe_ask(focus());

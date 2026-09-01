@@ -61,6 +61,11 @@ object *pipe_arrivals(void);
 void pipe_scan(void);
 bool pipe_scanning(void);
 u32  pipe_found_count(void);
-bool pipe_found_at(u32 i, u8 ip[4], char name[24]);
+
+/* One found machine: address, claimed name, whether it says it takes
+ * far work, and how much memory it says it has free. The last two
+ * may be NULL when the caller does not care. */
+bool pipe_found_at(u32 i, u8 ip[4], char name[24],
+                   bool *works, u32 *free_mib);
 
 #endif /* EB_PIPE_H */

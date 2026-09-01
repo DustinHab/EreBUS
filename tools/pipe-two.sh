@@ -46,7 +46,8 @@ keys() {
     # find the settings through the index, append the address line
     keys tab tab tab t h e m e ret \
          ret a d d r e s s spc shift-backslash spc \
-         1 0 dot 9 dot 9 dot 2 0
+         1 0 dot 9 dot 9 dot 2 0 \
+         ret w o r k spc shift-backslash spc w e l c o m e d
     sleep 45
     echo "screendump $BUILD/pipe-a.ppm"
     sleep 2

@@ -39,6 +39,7 @@
 #include <eb/msg.h>
 #include <eb/proc.h>
 #include <eb/standard.h>
+#include <eb/pmm.h>
 #include <eb/fmt.h>
 #include <eb/io.h>
 
@@ -103,6 +104,8 @@ static struct {
     bool used;
     u8   ip[4];
     char name[24];
+    bool works;                      /* says it takes far work */
+    u32  free_mib;                   /* says it has this much air */
 } found[FOUND_MAX];
 
 static u64 scan_until_ns;            /* while set, seeks go out */
@@ -128,7 +131,8 @@ u32 pipe_found_count(void)
     return n;
 }
 
-bool pipe_found_at(u32 i, u8 ip[4], char name[24])
+bool pipe_found_at(u32 i, u8 ip[4], char name[24],
+                   bool *works, u32 *free_mib)
 {
     u32 n = 0;
     for (u32 k = 0; k < FOUND_MAX; k++) {
@@ -136,6 +140,8 @@ bool pipe_found_at(u32 i, u8 ip[4], char name[24])
         if (n == i) {
             for (u32 j = 0; j < 4; j++) ip[j] = found[k].ip[j];
             for (u32 j = 0; j < 24; j++) name[j] = found[k].name[j];
+            if (works) *works = found[k].works;
+            if (free_mib) *free_mib = found[k].free_mib;
             return true;
         }
         n++;
@@ -148,7 +154,8 @@ static bool ip4_same(const u8 *a, const u8 *b)
     return a[0]==b[0] && a[1]==b[1] && a[2]==b[2] && a[3]==b[3];
 }
 
-static void found_note(const u8 *ip, const u8 *name, u32 nmax)
+static void found_note(const u8 *ip, const u8 *name, u32 nmax,
+                       bool works, u32 free_mib)
 {
     u32 slot = FOUND_MAX;
     for (u32 i = 0; i < FOUND_MAX; i++) {
@@ -166,18 +173,26 @@ static void found_note(const u8 *ip, const u8 *name, u32 nmax)
         n++;
     }
     found[slot].name[n] = 0;
+    found[slot].works = works;
+    found[slot].free_mib = free_mib;
 }
 
-/* magic, kind, pad, then the name. */
+/* magic, kind, pad, the name -- and what the machine offers: whether
+ * it takes far work, and how much air it has. Claims like the name,
+ * but useful ones: choosing a machine to ask goes better knowing who
+ * is willing. */
 static void say_who(u8 kind, const u8 dst[4], u16 dport)
 {
-    u8 pkt[32];
+    u8 pkt[40];
     wr32(pkt, MAGIC);
     pkt[4] = kind; pkt[5] = pkt[6] = pkt[7] = 0;
     char nm[24];
     settings_name(nm, sizeof(nm));
     for (u32 i = 0; i < 24; i++) pkt[8 + i] = (u8)nm[i];
-    net_udp_send(dst, PIPE_PORT, dport, pkt, 32);
+    pkt[32] = settings_work() ? 1 : 0;
+    pkt[33] = pkt[34] = pkt[35] = 0;
+    wr32(pkt + 36, (u32)(pmm_free_frames() / 256));
+    net_udp_send(dst, PIPE_PORT, dport, pkt, 40);
 }
 
 /* ------------------------------------------------------------------ */
@@ -920,7 +935,9 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         u8 self[4];
         if (net_own_address(self) && ip4_same(src, self)) return;
 
-        found_note(src, p + 8, 24);
+        bool works = (len >= 40) && (p[32] & 1);
+        u32 mib = (len >= 40) ? rd32(p + 36) : 0;
+        found_note(src, p + 8, 24, works, mib);
         if (kind == K_SEEK) say_who(K_HERE, src, sport);
         return;
     }
