@@ -99,6 +99,10 @@ static struct {
     u64  sel_a, sel_b;
     bool sel_drag;
 
+    /* Whether the button went down on a canvas, so moving keeps
+     * painting until it comes back up. */
+    bool paint_drag;
+
     u64  changes;
     bool redraw;
     i32  mouse_x, mouse_y;
@@ -135,6 +139,7 @@ static void go_to_generation(u32 index);
 static void follow(u64 slot);
 static void index_walk_to(u32 row);
 static void build_index(void);
+static bool picture_shape(object *o, u32 *w, u32 *h);
 
 /* ------------------------------------------------------------------ */
 /* What can be pointed at                                              */
@@ -168,7 +173,9 @@ typedef enum {
     HOT_DROP,        /* let the lifted letters go */
     HOT_CAPCUT,      /* one capability of a running program: take it back */
     HOT_MODE,        /* a view's name in the footer: switch to it */
-    HOT_FINDX        /* empty the search */
+    HOT_FINDX,       /* empty the search */
+    HOT_INK,         /* choose an ink */
+    HOT_CANVAS       /* a cell of a picture: paint it */
 } hot_kind;
 
 typedef struct {
@@ -265,8 +272,13 @@ static bool cut_marked(u8 *d, u64 size, u64 *len)
 /* What the palette offers. The fixed entries make something new; the
  * rest are objects already in hand, so pointing at something that
  * exists needs no dragging and no second window. */
-#define PALETTE_FIXED 3
+#define PALETTE_FIXED 4
 #define CARRY_MAX 24
+
+/* What a picture is born as: room enough to draw in, small enough to
+ * snapshot without a thought. */
+#define PICTURE_W 160
+#define PICTURE_H 100
 
 /* What is being carried.
  *
@@ -443,6 +455,17 @@ static void describe(object *o, char *out, u32 max)
         at = put_dec(out, at, obj_size(o));
         at = put(out, at, " bytes");
         break;
+    case TYPE_PICTURE: {
+        u32 pw, ph;
+        if (picture_shape(o, &pw, &ph)) {
+            at = put_dec(out, at, pw);
+            at = put(out, at, " x ");
+            at = put_dec(out, at, ph);
+        } else {
+            at = put(out, at, "picture");
+        }
+        break;
+    }
     default:
         at = put(out, at, type_name(obj_type(o)));
         break;
@@ -588,6 +611,142 @@ static u64 text_index_at(object *o, i32 row, i32 col)
         cx++;
     }
     return len;
+}
+
+/* The sixteen inks. Fixed, and deliberately not the theme's: a
+ * picture keeps its colours whatever the shell is wearing, the way a
+ * drawing on paper does not change when the desk lamp does. Ink 0 is
+ * the paper itself, which is what a blanked picture is full of. */
+static const color inks[16] = {
+    RGB(236, 233, 226), RGB( 30,  30,  33), RGB(122, 122, 126),
+    RGB(188,  62,  52), RGB(214, 122,  52), RGB(222, 186,  72),
+    RGB( 82, 160,  92), RGB( 62, 160, 150), RGB( 72, 112, 200),
+    RGB(132,  92, 190), RGB(180,  82, 150), RGB(132,  92,  62),
+    RGB(224, 162, 172), RGB(182, 182, 182), RGB( 52, 100,  62),
+    RGB( 42,  62, 112),
+};
+
+static u8 ink_current = 1;               /* dark ink on paper */
+
+/* Where the canvas was last drawn, for turning a pointer position back
+ * into a cell. One canvas is on screen at a time, like the text. */
+static struct {
+    i32 x, y, scale;
+    u32 w, h;
+} canvas;
+
+static bool picture_shape(object *o, u32 *w, u32 *h)
+{
+    const u8 *d = (const u8 *)obj_data(o);
+    if (!d || obj_size(o) < PICTURE_HEADER) return false;
+    u32 pw = (u32)d[0] | ((u32)d[1] << 8) |
+             ((u32)d[2] << 16) | ((u32)d[3] << 24);
+    u32 ph = (u32)d[4] | ((u32)d[5] << 8) |
+             ((u32)d[6] << 16) | ((u32)d[7] << 24);
+    if (pw == 0 || ph == 0) return false;
+    if ((u64)pw * ph + PICTURE_HEADER > obj_size(o)) return false;
+    *w = pw;
+    *h = ph;
+    return true;
+}
+
+static void lens_paint(object *o, i32 x, i32 y, i32 w, i32 h, bool live)
+{
+    u32 pw, ph;
+    if (!picture_shape(o, &pw, &ph)) {
+        text_at(x, y, x + w, "(no picture in these bytes)", C_FAINT);
+        return;
+    }
+    const u8 *d = (const u8 *)obj_data(o);
+
+    bool may = live && (focus_rights() & CAP_WRITE) &&
+               nav.at_generation == 0;
+
+    /* The inks, offered where the hand already is. Only when drawing
+     * is possible: a read-only picture is a picture, not a tool. */
+    i32 py = y;
+    if (may) {
+        for (u32 i = 0; i < 16; i++) {
+            i32 cx = x + (i32)i * 26;
+            bool on = (ink_current == i);
+            bool lit = is_hovered(HOT_INK, i);
+            if (on || lit)
+                fb_rect(cx - 2, py - 2, 24, 24, on ? C_ACCENT : C_DIM);
+            fb_rect(cx, py, 20, 20, inks[i]);
+            hot_add(cx - 2, py - 2, 24, 24, HOT_INK, i);
+        }
+        py += 32;
+    }
+
+    i32 scale_x = w / (i32)pw;
+    i32 scale_y = (h - (py - y) - 4) / (i32)ph;
+    i32 scale = scale_x < scale_y ? scale_x : scale_y;
+    if (scale < 1) scale = 1;
+    if (scale > 6) scale = 6;
+
+    fb_rect(x - 1, py - 1, (i32)pw * scale + 2, (i32)ph * scale + 2,
+            C_EDGE);
+    for (u32 row = 0; row < ph; row++) {
+        if (py + (i32)(row + 1) * scale > y + h) break;
+        for (u32 col = 0; col < pw; col++)
+            fb_rect(x + (i32)col * scale, py + (i32)row * scale,
+                    scale, scale,
+                    inks[d[PICTURE_HEADER + (u64)row * pw + col] & 15]);
+    }
+
+    if (may) {
+        canvas.x = x;
+        canvas.y = py;
+        canvas.scale = scale;
+        canvas.w = pw;
+        canvas.h = ph;
+        hot_add(x, py, (i32)pw * scale, (i32)ph * scale, HOT_CANVAS, 0);
+    }
+}
+
+/* Where the last stroke left off, so a fast hand draws a line rather
+ * than a trail of separate cells -- the pointer reports positions, but
+ * the gesture between them was a stroke. */
+static i32 paint_last_col = -1, paint_last_row = -1;
+
+static void paint_cell(u8 *d, u64 size, i32 col, i32 row)
+{
+    if (col < 0 || row < 0 || col >= (i32)canvas.w || row >= (i32)canvas.h)
+        return;
+    u64 at = PICTURE_HEADER + (u64)row * canvas.w + (u64)col;
+    if (at >= size || d[at] == ink_current) return;
+    d[at] = ink_current;
+    nav.changes++;
+    nav.redraw = true;
+}
+
+/* Paints under the pointer, and everything between here and the last
+ * cell of the same stroke. */
+static void paint_at_pointer(void)
+{
+    object *f = focus();
+    if (obj_type(f) != TYPE_PICTURE) return;
+    if (!(focus_rights() & CAP_WRITE) || nav.at_generation != 0) return;
+
+    u8 *d = (u8 *)obj_data(f);
+    if (!d || canvas.scale == 0) return;
+
+    i32 col = (nav.mouse_x - canvas.x) / canvas.scale;
+    i32 row = (nav.mouse_y - canvas.y) / canvas.scale;
+
+    i32 c0 = nav.paint_drag ? paint_last_col : col;
+    i32 r0 = nav.paint_drag ? paint_last_row : row;
+    if (c0 < 0 || r0 < 0) { c0 = col; r0 = row; }
+
+    i32 dc = col - c0, dr = row - r0;
+    i32 steps = (dc < 0 ? -dc : dc) > (dr < 0 ? -dr : dr)
+              ? (dc < 0 ? -dc : dc) : (dr < 0 ? -dr : dr);
+    if (steps == 0) steps = 1;
+    for (i32 i = 0; i <= steps; i++)
+        paint_cell(d, obj_size(f), c0 + dc * i / steps, r0 + dr * i / steps);
+
+    paint_last_col = col;
+    paint_last_row = row;
 }
 
 static void lens_bytes(object *o, i32 x, i32 y, i32 w, i32 h)
@@ -767,6 +926,7 @@ static void draw_lens(lens_kind k, object *o, i32 x, i32 y, i32 w, i32 h,
     case LENS_TEXT:      lens_text(o, x, y, w, h, caret); break;
     case LENS_BYTES:     lens_bytes(o, x, y, w, h); break;
     case LENS_STRUCTURE: lens_structure(o, x, y, w, h); break;
+    case LENS_PAINT:     lens_paint(o, x, y, w, h, caret); break;
     default: break;
     }
 }
@@ -777,6 +937,7 @@ static const char *lens_name(lens_kind k)
     case LENS_TEXT:      return "text";
     case LENS_BYTES:     return "bytes";
     case LENS_STRUCTURE: return "structure";
+    case LENS_PAINT:     return "picture";
     default:             return "?";
     }
 }
@@ -786,9 +947,10 @@ static const char *lens_name(lens_kind k)
 static lens_kind default_lens(object *o)
 {
     switch (obj_type(o)) {
-    case TYPE_TEXT:  return LENS_TEXT;
-    case TYPE_BYTES: return LENS_BYTES;
-    default:         return LENS_STRUCTURE;
+    case TYPE_TEXT:    return LENS_TEXT;
+    case TYPE_BYTES:   return LENS_BYTES;
+    case TYPE_PICTURE: return LENS_PAINT;
+    default:           return LENS_STRUCTURE;
     }
 }
 
@@ -867,7 +1029,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         i32 lx = mid_x + PAD + (i32)i * each;
         if (i > 0) fb_rect(lx - PAD / 2, cy, 1, ch, C_EDGE);
         draw_lens(nav.lens[i], f, lx, cy, each - PAD, ch,
-                  nav.lens[i] == LENS_TEXT);
+                  nav.lens[i] == LENS_TEXT || nav.lens[i] == LENS_PAINT);
     }
 
     /* --- where it leads ------------------------------------------ */
@@ -983,7 +1145,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
 
         if (edit.kind == EDIT_PICK) {
             static const char *fixed[PALETTE_FIXED] = {
-                "  text", "  bytes", "  list"
+                "  text", "  bytes", "  list", "  picture"
             };
             for (u32 p = 0; p < PALETTE_FIXED && ty < bottom - ROW; p++) {
                 bool on = is_hovered(HOT_PALETTE, p);
@@ -1264,7 +1426,8 @@ static void draw_tiles_shell(i32 sw, i32 sh, i32 top, i32 bottom)
                   nav.node[idx],
                   x + PAD, top + PAD + ROW + PAD,
                   w - 2 * PAD, bottom - top - ROW - 3 * PAD,
-                  last && nav.lens[0] == LENS_TEXT);
+                  last && (nav.lens[0] == LENS_TEXT ||
+                           nav.lens[0] == LENS_PAINT));
 
         x += w + gap;
     }
@@ -1830,6 +1993,9 @@ static void draw_all(void)
             at = put(line, at, "typing searches what you can reach.");
         else if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
             at = put(line, at, "point it at something to hand it over.");
+        else if (obj_type(focus()) == TYPE_PICTURE &&
+                 (focus_rights() & CAP_WRITE) && nav.at_generation == 0)
+            at = put(line, at, "pick an ink, then draw.");
         else if (nav.sel_a != nav.sel_b)
             at = put(line, at, "typing replaces the marked letters.");
         else if (obj_type(focus()) == TYPE_TEXT &&
@@ -2258,6 +2424,17 @@ static void act_on(const hot_region *r)
         nav.redraw = true;
         break;
 
+    case HOT_INK:
+        ink_current = (u8)(r->index & 15);
+        nav.redraw = true;
+        break;
+
+    case HOT_CANVAS:
+        paint_last_col = paint_last_row = -1;
+        paint_at_pointer();
+        nav.paint_drag = true;
+        break;
+
     case HOT_JOURNAL: {
         /* The line leads to the record. The walk is a real walk -- back
          * to the start, then through the reference that holds the
@@ -2376,6 +2553,19 @@ static void act_on(const hot_region *r)
                                   suggest = "bytes"; created = true; }
         else if (r->index == 2) { made = obj_create(TYPE_LIST, 0, 4);
                                   suggest = "list"; created = true; }
+        else if (r->index == 3) {
+            made = obj_create(TYPE_PICTURE,
+                              PICTURE_HEADER + PICTURE_W * PICTURE_H, 0);
+            if (made) {
+                u8 *pd = (u8 *)obj_data(made);
+                pd[0] = (u8)(PICTURE_W & 0xFF);
+                pd[1] = (u8)(PICTURE_W >> 8);
+                pd[4] = (u8)(PICTURE_H & 0xFF);
+                pd[5] = (u8)(PICTURE_H >> 8);
+            }
+            suggest = "picture";
+            created = true;
+        }
         else if (r->index < PALETTE_FIXED + standard_count()) {
             /* A fresh instance. The process holds its own program
              * object; the slot below takes its own hold on it, so
@@ -2460,10 +2650,17 @@ static void handle_mouse(void)
             i32 h = hot_at(nav.mouse_x, nav.mouse_y);
             if (h >= 0) act_on(&hots[h]);
         }
-        if (!is && was) nav.sel_drag = false;
+        if (!is && was) {
+            nav.sel_drag = false;
+            nav.paint_drag = false;
+        }
     }
 
     if (!moved) return;
+
+    /* A held button over the canvas keeps painting: the stroke is the
+     * gesture, not one cell per click. */
+    if (nav.paint_drag && (nav.buttons & 1)) paint_at_pointer();
 
     /* Dragging with the button down stretches the mark. The moving end
      * is also the caret, so letting go leaves one standing exactly at

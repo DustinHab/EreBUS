@@ -113,6 +113,7 @@ void obj_store_init(void)
     type_names[TYPE_DOMAIN] = "domain";
     type_names[TYPE_SESSION] = "session";
     type_names[TYPE_PROGRAM] = "program";
+    type_names[TYPE_PICTURE] = "picture";
     types_registered = TYPE_BUILTIN_COUNT;
 
     all_objects = NULL;

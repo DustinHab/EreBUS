@@ -41,7 +41,14 @@ typedef struct object object;
 #define TYPE_DOMAIN  5u   /* a protection domain */
 #define TYPE_SESSION 6u   /* where somebody was looking, and how */
 #define TYPE_PROGRAM 7u   /* something running outside the kernel */
-#define TYPE_BUILTIN_COUNT 8u
+#define TYPE_PICTURE 8u   /* a width, a height, and one ink per cell */
+#define TYPE_BUILTIN_COUNT 9u
+
+/* A picture's payload: two little-endian u32 for width and height,
+ * then width*height bytes, each naming one of sixteen inks. Nothing
+ * else -- a format small enough that every lens can honestly claim to
+ * show all of it. */
+#define PICTURE_HEADER 8u
 
 void obj_store_init(void);
 
