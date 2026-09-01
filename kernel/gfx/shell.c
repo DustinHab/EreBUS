@@ -206,7 +206,9 @@ typedef enum {
     HOT_P2REF,       /* the second pane: follow a reference */
     HOT_P2TRAIL,     /* the second pane: go back to a step */
     HOT_FATIN,       /* read the exchange disk's files in again */
-    HOT_FATOUT       /* write the disk list's new things out */
+    HOT_FATOUT,      /* write the disk list's new things out */
+    HOT_COPY,        /* lay a copy of the focused thing beside it */
+    HOT_TFIND        /* search inside the focused text */
 } hot_kind;
 
 typedef struct {
@@ -361,6 +363,14 @@ static void wheel_at(i32 mx, i32 my, i32 dz)
 /* Typing and pasting pull the window to the caret; plain redraws do
  * not, so reading far from the caret is not snatched away. */
 static bool caret_chase;
+
+/* Searching inside the focused text: the needle, whether the search
+ * is open, and how many places answered last frame. */
+static bool tfind_on;
+static char tfind_buf[40];
+static u32  tfind_len;
+static u32  tfind_count;
+static char to_lower(char c);
 
 /* ------------------------------------------------------------------ */
 /* Making and shaping                                                  */
@@ -728,6 +738,23 @@ static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
         marked_range(len, &lo, &hi);
     }
 
+    /* Where the search's needle lies in this text, found fresh each
+     * frame so edits and the needle stay in step. */
+    u32 fstarts[128];
+    u32 fnum = 0, fk = 0;
+    if (caret && tfind_on && tfind_len) {
+        for (u64 i = 0; i + tfind_len <= len && fnum < 128; i++) {
+            u32 j = 0;
+            while (j < tfind_len &&
+                   to_lower((char)d[i + j]) == to_lower(tfind_buf[j]))
+                j++;
+            if (j == tfind_len) fstarts[fnum++] = (u32)i;
+        }
+        tfind_count = fnum;
+    } else if (caret) {
+        tfind_count = 0;
+    }
+
     /* The caret bar is drawn only where typing would land something --
      * marking and lifting work in any readable text, the bar does not
      * pretend more than that. */
@@ -767,6 +794,12 @@ static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
 
         if (i >= lo && i < hi && on)
             fb_rect(x + cx * GLYPH_W, py, GLYPH_W, GLYPH_H, C_EDGE);
+
+        if (fnum) {
+            while (fk < fnum && i >= fstarts[fk] + tfind_len) fk++;
+            if (fk < fnum && i >= fstarts[fk] && on)
+                fb_rect(x + cx * GLYPH_W, py, GLYPH_W, GLYPH_H, C_EDGE);
+        }
 
         color c = C_TEXT;
         if (table) {
@@ -1710,6 +1743,33 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         hot_add(tab_x - 4, top + PAD - 4, w, ROW, HOT_LENS, i);
         tab_x += w + 8;
     }
+    /* The search into the focused text, at the tab row's right: a
+     * word to open it, the needle and its count while it is open. */
+    if (obj_type(f) == TYPE_TEXT) {
+        char fword[64];
+        u32 fa = put(fword, 0, "find");
+        if (tfind_on) {
+            fa = put(fword, fa, " ");
+            for (u32 i = 0; i < tfind_len && fa < 56; i++)
+                fword[fa++] = tfind_buf[i];
+            fa = put(fword, fa, "_");
+            if (tfind_len) {
+                fa = put(fword, fa, "  ");
+                fa = put_dec(fword, fa, tfind_count);
+            }
+        }
+        fword[fa] = 0;
+        i32 fw = (i32)fa * GLYPH_W;
+        i32 fx = mid_x + mid_w - PAD - fw;
+        bool flit = is_hovered(HOT_TFIND, 0);
+        if (flit || tfind_on)
+            fb_rect(fx - 4, top + PAD - 4, fw + 8, ROW,
+                    tfind_on ? C_PANEL_HI : C_EDGE);
+        text_at(fx, top + PAD, mid_x + mid_w, fword,
+                tfind_on ? C_TEXT : (flit ? C_TEXT : C_FAINT));
+        hot_add(fx - 4, top + PAD - 4, fw + 8, ROW, HOT_TFIND, 0);
+    }
+
     fb_rect(mid_x + PAD, top + PAD + ROW + 2, mid_w - 2 * PAD, 1, C_EDGE);
 
     i32 cy = top + PAD + ROW + PAD + 4;
@@ -2817,6 +2877,7 @@ static void draw_all(void)
             if (lit) fb_rect(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, C_EDGE);
             text_at(chip_x, 14, sw - PAD, "ask", lit ? C_TEXT : C_ACCENT);
             hot_add(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, HOT_ASK, 0);
+            chip_x += 5 * GLYPH_W;
         }
 
         /* A running program can be ended by whoever may give to it:
@@ -2830,6 +2891,7 @@ static void draw_all(void)
             text_at(chip_x, 14, sw - PAD, "end",
                     lit ? C_TEXT : C_READONLY);
             hot_add(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, HOT_END, 0);
+            chip_x += 5 * GLYPH_W;
         }
 
         /* A list folds into one plain thing the pipe can carry; a
@@ -2841,6 +2903,7 @@ static void draw_all(void)
             if (lit) fb_rect(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, C_EDGE);
             text_at(chip_x, 14, sw - PAD, "pack", lit ? C_TEXT : C_ACCENT);
             hot_add(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, HOT_PACK, 0);
+            chip_x += 6 * GLYPH_W;
         }
         if (ft == TYPE_BYTES && bundle_smells(focus()) &&
             (focus_rights() & CAP_READ) && nav.at_generation == 0) {
@@ -2849,13 +2912,26 @@ static void draw_all(void)
             text_at(chip_x, 14, sw - PAD, "unpack",
                     lit ? C_TEXT : C_ACCENT);
             hot_add(chip_x - 4, 11, 6 * GLYPH_W + 8, ROW, HOT_UNPACK, 0);
+            chip_x += 8 * GLYPH_W;
+        }
+
+        /* Anything readable copies: the payload for the plain kinds,
+         * the same references for a list. The copy lies down next to
+         * the original, named after it. */
+        if ((ft == TYPE_TEXT || ft == TYPE_BYTES || ft == TYPE_PICTURE ||
+             ft == TYPE_LIST) &&
+            (focus_rights() & CAP_READ) && nav.at_generation == 0) {
+            bool lit = is_hovered(HOT_COPY, 0);
+            if (lit) fb_rect(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(chip_x, 14, sw - PAD, "copy", lit ? C_TEXT : C_ACCENT);
+            hot_add(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, HOT_COPY, 0);
+            chip_x += 6 * GLYPH_W;
         }
 
         /* The exchange disk's list carries its two acts: reading the
          * disk in again, and writing the new things out. */
         if (focus() == system_disk() && focus() != NULL &&
             nav.at_generation == 0) {
-            if (ft == TYPE_LIST) chip_x += 5 * GLYPH_W;   /* past pack */
             bool lit = is_hovered(HOT_FATIN, 0);
             if (lit) fb_rect(chip_x - 4, 11, 7 * GLYPH_W + 8, ROW, C_EDGE);
             text_at(chip_x, 14, sw - PAD, "take in",
@@ -3204,6 +3280,7 @@ static void follow(u64 slot)
     scrolls[SCR_STRUCT] = scrolls[SCR_CONTENTS] = 0;
     log_pinned = true;
     caret_chase = false;
+    tfind_on = false;
     field_focus = -1;
     field_shape = 0;
     addr_edit = false;
@@ -3227,6 +3304,7 @@ static void go_back(void)
     scrolls[SCR_STRUCT] = scrolls[SCR_CONTENTS] = 0;
     log_pinned = true;
     caret_chase = false;
+    tfind_on = false;
     field_focus = -1;
     field_shape = 0;
     addr_edit = false;
@@ -3400,6 +3478,55 @@ static void handle_keys(void)
             }
         }
 
+        /* While the in-text search is open, the letters feed the
+         * needle; enter walks to the next place it lies, escape
+         * closes it. Everything else falls through unchanged. */
+        if (tfind_on && obj_type(focus()) == TYPE_TEXT) {
+            if (k.codepoint == KEY_ESCAPE) {
+                tfind_on = false;
+                nav.redraw = true;
+                continue;
+            }
+            if (k.codepoint == KEY_ENTER) {
+                object *f = focus();
+                const u8 *d = (const u8 *)obj_data(f);
+                if (d && tfind_len) {
+                    u64 len = text_len(d, obj_size(f));
+                    u64 from = nav.caret + 1;
+                    i64 hit = -1, first = -1;
+                    for (u64 i = 0; i + tfind_len <= len; i++) {
+                        u32 j = 0;
+                        while (j < tfind_len &&
+                               to_lower((char)d[i + j]) ==
+                               to_lower(tfind_buf[j]))
+                            j++;
+                        if (j == tfind_len) {
+                            if (first < 0) first = (i64)i;
+                            if (i >= from) { hit = (i64)i; break; }
+                        }
+                    }
+                    if (hit < 0) hit = first;
+                    if (hit >= 0) {
+                        nav.caret = (u64)hit;
+                        caret_chase = true;
+                        nav.redraw = true;
+                    }
+                }
+                continue;
+            }
+            if (k.codepoint == '\b') {
+                if (tfind_len) tfind_len--;
+                nav.redraw = true;
+                continue;
+            }
+            if (k.codepoint >= 0x20 && k.codepoint < 0x100 && !k.ctrl &&
+                tfind_len < sizeof(tfind_buf) - 1) {
+                tfind_buf[tfind_len++] = (char)k.codepoint;
+                nav.redraw = true;
+                continue;
+            }
+        }
+
         switch (k.codepoint) {
         case KEY_TAB:
             nav.mode = (shell_mode)((nav.mode + 1) % SHELL_MODE_COUNT);
@@ -3503,6 +3630,11 @@ static void handle_keys(void)
             if (k.codepoint == '1') { toggle_lens(LENS_TEXT); continue; }
             if (k.codepoint == '2') { toggle_lens(LENS_BYTES); continue; }
             if (k.codepoint == '3') { toggle_lens(LENS_STRUCTURE); continue; }
+            if (k.codepoint == 'f' && obj_type(focus()) == TYPE_TEXT) {
+                tfind_on = !tfind_on;
+                nav.redraw = true;
+                continue;
+            }
             continue;
         }
 
@@ -4119,6 +4251,75 @@ static void act_on(const hot_region *r)
         }
         nav.redraw = true;
         break;
+
+    case HOT_TFIND:
+        tfind_on = !tfind_on;
+        nav.redraw = true;
+        break;
+
+    case HOT_COPY: {
+        object *f = focus();
+        if (!(focus_rights() & CAP_READ) || nav.at_generation != 0)
+            break;
+
+        type_id t = obj_type(f);
+        object *made = NULL;
+        if (t == TYPE_LIST) {
+            u64 n = obj_slots(f);
+            made = obj_create(TYPE_LIST, 0, n ? n : 4);
+            if (made) for (u64 i = 0; i < n; i++) {
+                object *s = obj_get_slot(f, i);
+                if (!s) continue;
+                obj_set_slot(made, i, s, obj_slot_rights(f, i));
+                obj_set_slot_name(made, i, obj_slot_name(f, i));
+            }
+        } else if (t == TYPE_TEXT || t == TYPE_BYTES ||
+                   t == TYPE_PICTURE) {
+            made = obj_create(t, obj_size(f), 0);
+            if (made && obj_data(f))
+                memcpy(obj_data(made), obj_data(f), obj_size(f));
+        }
+        if (!made) break;
+        if (obj_name(f)) obj_set_name(made, obj_name(f));
+
+        /* Named after the original, laid down beside it. */
+        char nm[OBJ_NAME_MAX];
+        char base[20];
+        label_of(nav.depth >= 2 ? nav.node[nav.depth - 2] : NULL,
+                 nav.depth >= 2 ? nav.via[nav.depth - 1] : 0,
+                 f, base, sizeof(base));
+        u32 at2 = 0;
+        while (base[at2] && at2 < sizeof(base) - 1) { nm[at2] = base[at2]; at2++; }
+        at2 = put(nm, at2, " copy");
+        nm[at2] = 0;
+
+        object *place = NULL;
+        if (nav.depth >= 2 &&
+            (nav.rights[nav.depth - 2] & CAP_WRITE) &&
+            obj_type(nav.node[nav.depth - 2]) != TYPE_PROGRAM)
+            place = nav.node[nav.depth - 2];
+        else if ((focus_rights() & CAP_WRITE) && t == TYPE_LIST)
+            place = f;
+
+        bool placed_it = false;
+        if (place) {
+            u64 n = obj_slots(place), spot = n;
+            for (u64 i = 0; i < n; i++)
+                if (!obj_get_slot(place, i)) { spot = i; break; }
+            if (spot < n || obj_grow_slots(place, n + 1)) {
+                obj_set_slot(place, spot, made,
+                             CAP_READ | CAP_WRITE | CAP_GRANT);
+                obj_set_slot_name(place, spot, nm);
+                placed_it = true;
+            }
+        }
+        obj_release(made);
+        journal_says("system", placed_it ? "a copy lies beside it"
+                             : "nowhere writable to lay the copy");
+        nav.changes++;
+        nav.redraw = true;
+        break;
+    }
 
     case HOT_FATIN:
         if (focus() == system_disk() && system_disk()) {
