@@ -48,4 +48,7 @@ void settings_name(char *out, u32 max);
  * unless the settings say "work | welcomed". */
 bool settings_work(void);
 
+/* Whether the keyboard's keys mean their german letters. */
+bool settings_keys_german(void);
+
 #endif /* EB_SETTINGS_H */

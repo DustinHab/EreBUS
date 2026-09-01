@@ -14,6 +14,7 @@
 #include <eb/standard.h>
 #include <eb/net.h>
 #include <eb/pipe.h>
+#include <eb/bundle.h>
 #include <eb/html.h>
 #include <eb/string.h>
 #include <eb/time.h>
@@ -198,7 +199,9 @@ typedef enum {
     HOT_SENDPICK,    /* a found machine, chosen mid-send: point and go */
     HOT_ASK,         /* run the focused text on the peer's machine */
     HOT_OFF,         /* save everything and put the machine to sleep */
-    HOT_END          /* end the focused running program */
+    HOT_END,         /* end the focused running program */
+    HOT_PACK,        /* fold the focused list into one plain thing */
+    HOT_UNPACK       /* build the list back out of a bundle */
 } hot_kind;
 
 typedef struct {
@@ -2647,6 +2650,25 @@ static void draw_all(void)
                     lit ? C_TEXT : C_READONLY);
             hot_add(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, HOT_END, 0);
         }
+
+        /* A list folds into one plain thing the pipe can carry; a
+         * bundle unfolds back into a list. The words stand only
+         * where they apply, like everything in this header. */
+        if (ft == TYPE_LIST && (focus_rights() & CAP_READ) &&
+            nav.at_generation == 0) {
+            bool lit = is_hovered(HOT_PACK, 0);
+            if (lit) fb_rect(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(chip_x, 14, sw - PAD, "pack", lit ? C_TEXT : C_ACCENT);
+            hot_add(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, HOT_PACK, 0);
+        }
+        if (ft == TYPE_BYTES && bundle_smells(focus()) &&
+            (focus_rights() & CAP_READ) && nav.at_generation == 0) {
+            bool lit = is_hovered(HOT_UNPACK, 0);
+            if (lit) fb_rect(chip_x - 4, 11, 6 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(chip_x, 14, sw - PAD, "unpack",
+                    lit ? C_TEXT : C_ACCENT);
+            hot_add(chip_x - 4, 11, 6 * GLYPH_W + 8, ROW, HOT_UNPACK, 0);
+        }
     }
 
     /* Marked letters, and letters being carried. The mark offers
@@ -3892,6 +3914,57 @@ static void act_on(const hot_region *r)
         }
         nav.redraw = true;
         break;
+
+    case HOT_PACK:
+    case HOT_UNPACK: {
+        if (!(focus_rights() & CAP_READ) || nav.at_generation != 0)
+            break;
+
+        object *made = (r->kind == HOT_PACK)
+                     ? bundle_pack(focus())
+                     : bundle_unpack(focus());
+        if (!made) {
+            journal_says("system", r->kind == HOT_PACK
+                         ? "it does not fit into one bundle"
+                         : "these bytes do not unfold");
+            nav.redraw = true;
+            break;
+        }
+
+        /* The result lies down next to what it came from -- in the
+         * holder one came through -- or inside the focus when there
+         * is no holder to write into. */
+        object *place = NULL;
+        if (nav.depth >= 2 &&
+            (nav.rights[nav.depth - 2] & CAP_WRITE) &&
+            obj_type(nav.node[nav.depth - 2]) != TYPE_PROGRAM)
+            place = nav.node[nav.depth - 2];
+        else if ((focus_rights() & CAP_WRITE) &&
+                 obj_type(focus()) == TYPE_LIST)
+            place = focus();
+
+        bool placed_it = false;
+        if (place) {
+            u64 n = obj_slots(place), at2 = n;
+            for (u64 i = 0; i < n; i++)
+                if (!obj_get_slot(place, i)) { at2 = i; break; }
+            if (at2 < n || obj_grow_slots(place, n + 1)) {
+                obj_set_slot(place, at2, made, CAP_READ | CAP_WRITE);
+                obj_set_slot_name(place, at2,
+                                  r->kind == HOT_PACK ? "packed"
+                                                      : "unpacked");
+                placed_it = true;
+            }
+        }
+        obj_release(made);
+        journal_says("system", !placed_it
+                     ? "nowhere writable to lay it down"
+                     : r->kind == HOT_PACK ? "packed into one thing"
+                                           : "unfolded into a list");
+        nav.changes++;
+        nav.redraw = true;
+        break;
+    }
 
     case HOT_ADD:
         edit.kind = (edit.kind == EDIT_PICK) ? EDIT_NONE : EDIT_PICK;

@@ -42,11 +42,12 @@ typedef struct {
     u8   addr_ip[4];
     char name[24];
     bool work;
+    bool german_keys;
 } values;
 
 static values current = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                           false, { 0, 0, 0, 0 }, 0,
-                          false, { 0, 0, 0, 0 }, "erebus", false };
+                          false, { 0, 0, 0, 0 }, "erebus", false, false };
 
 object *settings_object(void) { return settings; }
 
@@ -71,7 +72,8 @@ bool settings_address(u8 ip[4])
     return true;
 }
 
-bool settings_work(void) { return current.work; }
+bool settings_work(void)        { return current.work; }
+bool settings_keys_german(void) { return current.german_keys; }
 
 void settings_name(char *out, u32 max)
 {
@@ -102,7 +104,8 @@ static const char seed[] =
     "name     | erebus\n"
     "address  | by lease\n"
     "peer     | nobody\n"
-    "work     | refused\n";
+    "work     | refused\n"
+    "keys     | english\n";
 
 bool settings_create(void)
 {
@@ -262,6 +265,10 @@ static void read_line(values *v, const char *line, u64 len)
         } else {
             v->addr_set = false;
         }
+    } else if (matter_is(line, a, b, "keys")) {
+        /* Which letters the keyboard's keys mean. */
+        if (line_has(val, vlen, "german"))  v->german_keys = true;
+        if (line_has(val, vlen, "english")) v->german_keys = false;
     } else if (matter_is(line, a, b, "work")) {
         /* Whether this machine runs texts other machines send it.
          * Refused unless the owner has written otherwise: lending
@@ -346,6 +353,11 @@ static void note_changes(const values *was, const values *now)
                      ? "work from other machines is welcomed now"
                      : "work from other machines is refused now");
 
+    if (was->german_keys != now->german_keys)
+        journal_says("settings", now->german_keys
+                     ? "the keys speak german now"
+                     : "the keys speak english now");
+
     if (was->addr_set != now->addr_set ||
         (now->addr_set && memcmp(was->addr_ip, now->addr_ip, 4) != 0))
         journal_says("settings", now->addr_set
@@ -389,7 +401,7 @@ void settings_apply(void)
 
     values next = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                     false, { 0, 0, 0, 0 }, 0,
-                    false, { 0, 0, 0, 0 }, "erebus", false };
+                    false, { 0, 0, 0, 0 }, "erebus", false, false };
 
     u64 start = 0;
     for (u64 i = 0; i <= size; i++) {

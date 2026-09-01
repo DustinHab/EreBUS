@@ -4,6 +4,7 @@
 #include <eb/ps2.h>
 #include <eb/trap.h>
 #include <eb/pic.h>
+#include <eb/settings.h>
 #include <eb/io.h>
 #include <eb/fmt.h>
 
@@ -158,7 +159,35 @@ static const char shifted[0x59] = {
     0,   '*', 0,   ' '
 };
 
-static bool shift_down, ctrl_down, alt_down;
+/* The same keys wearing their german letters: qwertz, the umlauts on
+ * the keys that carry them, and the third meanings behind the right
+ * alt. The bytes above 0x7F are latin-1, which is what the font
+ * draws and the texts store. */
+static const u8 de_plain[0x59] = {
+    0,   27,  '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 0xDF, 0xB4, '\b',
+    '\t','q', 'w', 'e', 'r', 't', 'z', 'u', 'i', 'o', 'p', 0xFC, '+', '\n',
+    0,   'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', 0xF6, 0xE4, '^',
+    0,   '#', 'y', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '-',
+    0,   '*', 0,   ' '
+};
+
+static const u8 de_shift[0x59] = {
+    0,   27,  '!', '"', 0xA7, '$', '%', '&', '/', '(', ')', '=', '?', '`', '\b',
+    '\t','Q', 'W', 'E', 'R', 'T', 'Z', 'U', 'I', 'O', 'P', 0xDC, '*', '\n',
+    0,   'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', 0xD6, 0xC4, 0xB0,
+    0,   '\'', 'Y', 'X', 'C', 'V', 'B', 'N', 'M', ';', ':', '_',
+    0,   '*', 0,   ' '
+};
+
+static const u8 de_altgr[0x59] = {
+    0,   0,   0,   0,   0,   0,   0,   0,  '{', '[', ']', '}', '\\', 0,  0,
+    0,  '@',  0,   0,   0,   0,   0,   0,   0,   0,   0,   0,  '~',  0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   0,   0,   0,   0,  0xB5, 0,   0,   0,
+    0,   0,   0,   0
+};
+
+static bool shift_down, ctrl_down, alt_down, altgr_down;
 
 static void on_keyboard(trap_frame *f)
 {
@@ -191,7 +220,7 @@ static void on_keyboard(trap_frame *f)
         case 0x51: cp = KEY_PGDN;  break;
         case 0x53: cp = KEY_DELETE; break;
         case 0x1D: ctrl_down = down; return;
-        case 0x38: alt_down = down; return;
+        case 0x38: altgr_down = down; return;   /* the right alt */
         default: return;
         }
 
@@ -216,8 +245,21 @@ static void on_keyboard(trap_frame *f)
         .down = down,
         .shift = shift_down, .ctrl = ctrl_down, .alt = alt_down,
     };
-    if (make < sizeof(plain))
-        e.codepoint = (u32)(u8)(shift_down ? shifted[make] : plain[make]);
+
+    bool de = settings_keys_german();
+    if (make < sizeof(plain)) {
+        if (de && altgr_down && de_altgr[make])
+            e.codepoint = de_altgr[make];
+        else if (de)
+            e.codepoint = shift_down ? de_shift[make] : de_plain[make];
+        else
+            e.codepoint = (u32)(u8)(shift_down ? shifted[make]
+                                               : plain[make]);
+    } else if (make == 0x56 && de) {
+        /* The extra key beside the left shift, which the us layout
+         * does not have. */
+        e.codepoint = altgr_down ? '|' : (shift_down ? '>' : '<');
+    }
 
     if (down) key_total++;
     push_key(&e);

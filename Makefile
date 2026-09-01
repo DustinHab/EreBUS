@@ -102,6 +102,7 @@ KERN_C   := kernel/main.c \
             kernel/net/aes_gcm.c \
             kernel/net/crypto_selftest.c \
             kernel/net/tls.c \
+            kernel/obj/bundle.c \
             kernel/net/pipe.c \
             kernel/net/net.c \
             kernel/user/runner.c \
