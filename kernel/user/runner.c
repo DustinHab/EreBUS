@@ -14,11 +14,15 @@
  *
  *   note ...         a remark; the line does nothing
  *   say <words>      speak up to 24 letters to the console
+ *   show x           say a variable and its value, for the writer
  *   wait             sleep until the next gift or message arrives
+ *   tell <words>     send up to 24 letters to "it", when it listens
  *   set x <n|v>      variables a..z hold signed numbers
  *   add sub mul div  arithmetic onto a variable
  *   get x <n|v>      x = eight bytes of "it", at that offset
  *   put x <n|v>      write x into "it" there
+ *   time x           x = the second of the day
+ *   rest <n|v>       sleep that many seconds
  *   if x < <n|v>     also = and >; when false, the next line is skipped
  *   skip <n>         jump n lines forward
  *   back <n>         jump n lines back
@@ -50,6 +54,7 @@
 #define NR_RECEIVE 3
 #define NR_READ    4
 #define NR_WRITE   5
+#define NR_CLOCK   7
 
 #define TAG_TEXT 0x54584554ULL
 
@@ -202,8 +207,11 @@ static i64 operand(const char *s, i32 *pos, const i64 *v, bool *ok)
     return neg ? -n : n;
 }
 
-/* Packs the rest of the line into three words for the console. */
-static void say_rest(u64 console, const char *s, i32 pos)
+/* Packs the rest of the line into three words and sends them to the
+ * given port. The console and "it" take the same shape of message, so
+ * say and tell are one act with two addresses. Answers what the
+ * kernel answered. */
+static u64 rest_of_line_to(u64 port, const char *s, i32 pos)
 {
     while (s[pos] == ' ') pos++;
     u64 w[3] = { 0, 0, 0 };
@@ -213,7 +221,53 @@ static void say_rest(u64 console, const char *s, i32 pos)
         n++;
         pos++;
     }
+    return sys5(NR_SEND, port, TAG_TEXT, w[0], w[1], w[2]);
+}
+
+/* "x = 1234", for whoever is writing the script. There is no other
+ * window into a running program's numbers, and a language for writing
+ * programs owes its writer one. */
+static void show_var(u64 console, char name, i64 val)
+{
+    u8 out[24];
+    for (u32 i = 0; i < 24; i++) out[i] = ' ';
+    out[0] = (u8)name;
+    out[2] = '=';
+
+    u64 mag = (val < 0) ? (u64)-val : (u64)val;
+    char digits[20];
+    u32 nd = 0;
+    if (mag == 0) digits[nd++] = '0';
+    while (mag) { digits[nd++] = (char)('0' + mag % 10); mag /= 10; }
+
+    u32 at = 4;
+    if (val < 0) out[at++] = '-';
+    while (nd && at < 24) out[at++] = (u8)digits[--nd];
+
+    u64 w[3] = { 0, 0, 0 };
+    for (u32 i = 0; i < 24; i++)
+        w[i / 8] |= (u64)out[i] << ((i % 8) * 8);
     r_say(console, w[0], w[1], w[2]);
+}
+
+/* The second of the day, and sleeping on it. The clock call needs no
+ * capability, so every script can know the time; resting is asking it
+ * again politely until enough of it has passed, midnight included. */
+static u64 r_clock(void)
+{
+    return sys3(NR_CLOCK, 0, 0, 0);
+}
+
+static void r_rest(i64 seconds)
+{
+    if (seconds <= 0) return;
+    if (seconds > 86399) seconds = 86399;
+    u64 from = r_clock();
+    for (;;) {
+        u64 gone = (r_clock() + 86400 - from) % 86400;
+        if ((i64)gone >= seconds) break;
+        r_yield();
+    }
 }
 
 /* What a line can tell the loop. */
@@ -239,7 +293,35 @@ static i64 exec_line(const char *s, u32 ln, u64 console,
     if (w == P8('w','a','i','t',0,0,0,0)) return FLOW_WAIT;
 
     if (w == P8('s','a','y',0,0,0,0,0)) {
-        say_rest(console, s, pos);
+        rest_of_line_to(console, s, pos);
+        return (i64)ln + 1;
+    }
+
+    if (w == P8('t','e','l','l',0,0,0,0)) {
+        u64 res = rest_of_line_to(it, s, pos);
+        v['r' - 'a'] = (res == 0) ? 0 : -1;
+        return (i64)ln + 1;
+    }
+
+    if (w == P8('s','h','o','w',0,0,0,0)) {
+        while (s[pos] == ' ') pos++;
+        if (s[pos] < 'a' || s[pos] > 'z') return FLOW_WRONG;
+        show_var(console, s[pos], v[s[pos] - 'a']);
+        return (i64)ln + 1;
+    }
+
+    if (w == P8('t','i','m','e',0,0,0,0)) {
+        while (s[pos] == ' ') pos++;
+        if (s[pos] < 'a' || s[pos] > 'z') return FLOW_WRONG;
+        v[s[pos] - 'a'] = (i64)r_clock();
+        return (i64)ln + 1;
+    }
+
+    if (w == P8('r','e','s','t',0,0,0,0)) {
+        bool ok = true;
+        i64 n = operand(s, &pos, v, &ok);
+        if (!ok) return FLOW_WRONG;
+        r_rest(n);
         return (i64)ln + 1;
     }
 

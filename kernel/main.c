@@ -60,8 +60,7 @@ static object *seed_graph(void)
     object *idea  = obj_create(TYPE_TEXT, 512, 0);
     object *raw   = obj_create(TYPE_BYTES, 64, 0);
     object *aside = obj_create(TYPE_LIST, 0, 3);
-    object *lang  = obj_create(TYPE_TEXT, 1024, 0);
-    if (!root || !notes || !idea || !raw || !aside || !lang) return NULL;
+    if (!root || !notes || !idea || !raw || !aside) return NULL;
 
     obj_set_name(root, "home");
 
@@ -79,37 +78,10 @@ static object *seed_graph(void)
         "this text is reachable twice, under two\n"
         "names, with different rights each time.\n";
 
-    /* How texts become programs. Kept as an object like everything
-     * else: readable, searchable, and one run away from being tried. */
-    static const char lang_text[] =
-        "any text can be a program. stand on it, press run.\n"
-        "\n"
-        "the first gift is the text itself. \"it\" is the\n"
-        "latest gift after that: point the running script at\n"
-        "something and the script can reach it. variables a\n"
-        "to z hold numbers. r holds how the last get or put\n"
-        "went: 0 for done, -1 for refused.\n"
-        "\n"
-        "say <words>      up to 24 letters, to the console\n"
-        "wait             sleep until the next gift\n"
-        "set x <n or v>   also: add sub mul div\n"
-        "get x <offset>   x = eight bytes of it\n"
-        "put x <offset>   eight bytes of x into it\n"
-        "if x < <n or v>  also = and >. false skips a line\n"
-        "skip <n>         n lines forward\n"
-        "back <n>         n lines back\n"
-        "note ...         a remark\n"
-        "stop             the end\n"
-        "\n"
-        "edit a running script and the next pass through a\n"
-        "line runs the new words.\n";
-
     u8 *d = (u8 *)obj_data(notes);
     for (u32 i = 0; i < sizeof(notes_text); i++) d[i] = (u8)notes_text[i];
     d = (u8 *)obj_data(idea);
     for (u32 i = 0; i < sizeof(idea_text); i++) d[i] = (u8)idea_text[i];
-    d = (u8 *)obj_data(lang);
-    for (u32 i = 0; i < sizeof(lang_text); i++) d[i] = (u8)lang_text[i];
     d = (u8 *)obj_data(raw);
     for (u32 i = 0; i < 64; i++) d[i] = (u8)(i * 37 + 5);
 
@@ -133,14 +105,10 @@ static object *seed_graph(void)
     obj_set_slot(aside, 1, root, CAP_READ);
     obj_set_slot_name(aside, 1, "back home");
 
-    obj_set_slot(aside, 2, lang, CAP_READ);
-    obj_set_slot_name(aside, 2, "the language");
-
     obj_release(notes);
     obj_release(idea);
     obj_release(raw);
     obj_release(aside);
-    obj_release(lang);
     return root;
 }
 
@@ -283,6 +251,100 @@ static void console_server(void *arg)
 /* What persistence watches over. One object here; a real system would
  * hand it the roots of everything the user owns. */
 static object *persistent_root;
+
+/* How texts become programs -- the one page of the language, kept as
+ * an object like everything else: readable, searchable, one run away
+ * from being tried. The kernel is its author, which is why this page
+ * is refreshed on every boot: it states what the system of today
+ * understands, and a page describing yesterday's language would be
+ * documentation lying about its subject. */
+static const char lang_text[] =
+    "any text can be a program. stand on it, press run.\n"
+    "\n"
+    "the first gift is the text itself. \"it\" is the\n"
+    "latest gift after that: point the running script at\n"
+    "something and the script can reach it. variables a\n"
+    "to z hold numbers. r holds how the last get, put or\n"
+    "tell went: 0 for done, -1 for refused.\n"
+    "\n"
+    "say <words>      up to 24 letters, to the console\n"
+    "tell <words>     the same, to it -- when it listens\n"
+    "show x           say a variable and its value\n"
+    "wait             sleep until the next gift\n"
+    "set x <n or v>   also: add sub mul div\n"
+    "get x <offset>   x = eight bytes of it\n"
+    "put x <offset>   eight bytes of x into it\n"
+    "time x           x = the second of the day\n"
+    "rest <n or v>    sleep that many seconds\n"
+    "if x < <n or v>  also = and >. false skips a line\n"
+    "skip <n>         n lines forward\n"
+    "back <n>         n lines back\n"
+    "note ...         a remark\n"
+    "stop             the end\n"
+    "\n"
+    "edit a running script and the next pass through a\n"
+    "line runs the new words.\n";
+
+/* Finds the language page -- a reference named "the language" on the
+ * root or one list below it -- or makes one, preferring to live in
+ * the aside next to the other explanations. Then brings its words up
+ * to date. Graphs from earlier days gain the page this way too. */
+static void ensure_language(object *root)
+{
+    object *found = NULL;
+    object *aside = NULL;
+
+    for (u64 i = 0; i < obj_slots(root) && !found; i++) {
+        object *s = obj_get_slot(root, i);
+        if (!s) continue;
+        const char *nm = obj_slot_name(root, i);
+
+        if (nm && strcmp(nm, "the language") == 0 &&
+            obj_type(s) == TYPE_TEXT) { found = s; break; }
+
+        if (obj_type(s) != TYPE_LIST) continue;
+        if (nm && strcmp(nm, "aside") == 0) aside = s;
+
+        for (u64 j = 0; j < obj_slots(s) && !found; j++) {
+            object *t = obj_get_slot(s, j);
+            const char *tn = obj_slot_name(s, j);
+            if (t && tn && strcmp(tn, "the language") == 0 &&
+                obj_type(t) == TYPE_TEXT)
+                found = t;
+        }
+    }
+
+    if (!found) {
+        object *made = obj_create(TYPE_TEXT, 1024, 0);
+        if (!made) return;
+        obj_set_name(made, "the language");
+
+        object *place = aside ? aside : root;
+        u64 n = obj_slots(place), at = n;
+        for (u64 i = 0; i < n; i++)
+            if (!obj_get_slot(place, i)) { at = i; break; }
+        if (at == n && !obj_grow_slots(place, n + 1)) {
+            obj_release(made);
+            return;
+        }
+        obj_set_slot(place, at, made, CAP_READ);
+        obj_set_slot_name(place, at, "the language");
+        obj_release(made);
+        found = made;                     /* the slot holds it now */
+    }
+
+    u8 *d = (u8 *)obj_data(found);
+    if (!d || obj_size(found) < sizeof(lang_text)) return;
+
+    bool same = true;
+    for (u32 i = 0; i < sizeof(lang_text) && same; i++)
+        if (d[i] != (u8)lang_text[i]) same = false;
+    if (same) return;
+
+    for (u64 i = 0; i < obj_size(found); i++)
+        d[i] = (i < sizeof(lang_text)) ? (u8)lang_text[i] : 0;
+    journal_says("system", "the language page speaks today's words");
+}
 
 /* Rewrites the activity table once a second. Between rewrites it only
  * yields; the table is not worth waking anyone for. */
@@ -1031,6 +1093,48 @@ void kmain(eb_boot_info *bi)
                 placed[k] = true;
                 matched = true;
             }
+
+            /* A script's record still holds the script's words, and
+             * words are all a script ever was: run them again. What
+             * else the record held is granted anew, like any replay;
+             * only a reference to another program stays a reference
+             * to the record, since a dead recipient translates to
+             * nothing. If the world is to come back as it was left,
+             * the programs the person wrote are part of the world. */
+            if (!matched && obj_name(s) && strcmp(obj_name(s), "script") == 0) {
+                object *script_words = NULL;
+                for (u64 j = 0; j < obj_slots(s); j++) {
+                    object *t = obj_get_slot(s, j);
+                    const char *jn = obj_slot_name(s, j);
+                    if (t && jn && strcmp(jn, "its words") == 0 &&
+                        obj_type(t) == TYPE_TEXT) { script_words = t; break; }
+                }
+
+                object *fresh = script_words ? runner_launch(script_words)
+                                             : NULL;
+                if (fresh) {
+                    for (u64 j = 0; j < obj_slots(s); j++) {
+                        object *t = obj_get_slot(s, j);
+                        const char *jn = obj_slot_name(s, j);
+                        if (!t || (jn && strcmp(jn, "its words") == 0))
+                            continue;
+
+                        u64 fn = obj_slots(fresh), fat = fn;
+                        for (u64 q = 0; q < fn; q++)
+                            if (!obj_get_slot(fresh, q)) { fat = q; break; }
+                        if (fat == fn && !obj_grow_slots(fresh, fn + 1))
+                            continue;
+
+                        u32 rr = obj_slot_rights(s, j);
+                        obj_set_slot(fresh, fat, t, rr);
+                        obj_set_slot_name(fresh, fat, jn);
+                        proc_grant(fresh, t, rr);
+                    }
+                    obj_set_slot(root, i, fresh, obj_slot_rights(root, i));
+                    matched = true;
+                }
+            }
+
             if (!matched) {
                 obj_set_slot(root, i, NULL, 0);
                 obj_set_slot_name(root, i, NULL);
@@ -1153,6 +1257,8 @@ void kmain(eb_boot_info *bi)
                 obj_set_slot_name(root, at, "activity");
             }
         }
+
+        ensure_language(root);
 
         journal_says("system", session ? "started; everything is as it was left"
                                        : "started fresh");

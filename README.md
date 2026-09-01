@@ -355,6 +355,17 @@ built binary.
   The interpreter is the one C file in the user section, held to the
   same discipline as the assembly programs: no globals, no string
   literals, nothing that leans on kernel memory from ring 3.
+* **Scripts speak, keep time, and come back.** tell sends the rest of
+  the line to "it" -- hand a running script another program and the
+  two are talking, kernel-checked like every send. time reads the
+  clock (the one capability-free call), rest sleeps on it, show says
+  a variable and its value, which is the window a writer of programs
+  is owed. The language page is kernel-authored and refreshed at
+  boot, so it always states what the system of today understands --
+  older graphs gain it on their next start. And a script's record
+  survives a reboot the way the standard programs do: its words are
+  still there, so the words simply run again, regranted what the
+  record held.
 * M10 — booting real hardware from a USB stick
 
 ## A note on Secure Boot
