@@ -59,8 +59,9 @@ static object *seed_graph(void)
     object *notes = obj_create(TYPE_TEXT, 512, 0);
     object *idea  = obj_create(TYPE_TEXT, 512, 0);
     object *raw   = obj_create(TYPE_BYTES, 64, 0);
-    object *aside = obj_create(TYPE_LIST, 0, 2);
-    if (!root || !notes || !idea || !raw || !aside) return NULL;
+    object *aside = obj_create(TYPE_LIST, 0, 3);
+    object *lang  = obj_create(TYPE_TEXT, 1024, 0);
+    if (!root || !notes || !idea || !raw || !aside || !lang) return NULL;
 
     obj_set_name(root, "home");
 
@@ -78,10 +79,37 @@ static object *seed_graph(void)
         "this text is reachable twice, under two\n"
         "names, with different rights each time.\n";
 
+    /* How texts become programs. Kept as an object like everything
+     * else: readable, searchable, and one run away from being tried. */
+    static const char lang_text[] =
+        "any text can be a program. stand on it, press run.\n"
+        "\n"
+        "the first gift is the text itself. \"it\" is the\n"
+        "latest gift after that: point the running script at\n"
+        "something and the script can reach it. variables a\n"
+        "to z hold numbers. r holds how the last get or put\n"
+        "went: 0 for done, -1 for refused.\n"
+        "\n"
+        "say <words>      up to 24 letters, to the console\n"
+        "wait             sleep until the next gift\n"
+        "set x <n or v>   also: add sub mul div\n"
+        "get x <offset>   x = eight bytes of it\n"
+        "put x <offset>   eight bytes of x into it\n"
+        "if x < <n or v>  also = and >. false skips a line\n"
+        "skip <n>         n lines forward\n"
+        "back <n>         n lines back\n"
+        "note ...         a remark\n"
+        "stop             the end\n"
+        "\n"
+        "edit a running script and the next pass through a\n"
+        "line runs the new words.\n";
+
     u8 *d = (u8 *)obj_data(notes);
     for (u32 i = 0; i < sizeof(notes_text); i++) d[i] = (u8)notes_text[i];
     d = (u8 *)obj_data(idea);
     for (u32 i = 0; i < sizeof(idea_text); i++) d[i] = (u8)idea_text[i];
+    d = (u8 *)obj_data(lang);
+    for (u32 i = 0; i < sizeof(lang_text); i++) d[i] = (u8)lang_text[i];
     d = (u8 *)obj_data(raw);
     for (u32 i = 0; i < 64; i++) d[i] = (u8)(i * 37 + 5);
 
@@ -105,10 +133,14 @@ static object *seed_graph(void)
     obj_set_slot(aside, 1, root, CAP_READ);
     obj_set_slot_name(aside, 1, "back home");
 
+    obj_set_slot(aside, 2, lang, CAP_READ);
+    obj_set_slot_name(aside, 2, "the language");
+
     obj_release(notes);
     obj_release(idea);
     obj_release(raw);
     obj_release(aside);
+    obj_release(lang);
     return root;
 }
 
@@ -175,6 +207,33 @@ object *standard_launch(u32 i)
     kprintf("proc: %llu (%s) started from the shell\n",
             proc_id(p), proc_name(p));
     return proc_object(p);
+}
+
+/* The interpreter, from user/runner.c -- the one C program in the
+ * user section. */
+extern void user_runner(u64 console, u64 inbox);
+
+object *runner_launch(object *script)
+{
+    if (!script || obj_type(script) != TYPE_TEXT || !console_port)
+        return NULL;
+
+    process *p = proc_create("script", (const void *)user_runner,
+                             console_port);
+    if (!p) return NULL;
+    if (!proc_start(p)) return NULL;
+
+    /* Its words: the first giving, recorded on the program object like
+     * every giving, and read-only like every set of orders should be
+     * from the inside. The text stays editable from the outside, which
+     * is exactly the difference between author and program. */
+    object *prog = proc_object(p);
+    obj_set_slot(prog, 0, script, CAP_READ);
+    obj_set_slot_name(prog, 0, "its words");
+    proc_grant(prog, script, CAP_READ);
+
+    kprintf("proc: %llu (script) running a text\n", proc_id(p));
+    return prog;
 }
 
 /* Prints the packed characters a message carries. Anything outside

@@ -92,6 +92,7 @@ KERN_C   := kernel/main.c \
             kernel/obj/activity.c \
             kernel/sched/thread.c \
             kernel/sched/proc.c \
+            kernel/user/runner.c \
             kernel/arch/x86_64/syscall.c \
             kernel/arch/x86_64/gdt.c \
             kernel/arch/x86_64/trap.c
@@ -151,6 +152,16 @@ $(BUILD)/%.o: %.S
 	@mkdir -p $(dir $@)
 	@echo "  AS      $<"
 	@$(CC) $(KERN_FLAGS) -c $< -o $@
+
+# The one C file that runs in ring 3. It lives in the kernel image but
+# is mapped read-only into every process, so it may not lean on the
+# kernel's rodata: no stack protector (the guard is a kernel symbol)
+# and no jump tables (they are rodata with absolute addresses).
+$(BUILD)/kernel/user/runner.o: kernel/user/runner.c $(FONT)
+	@mkdir -p $(dir $@)
+	@echo "  CC      kernel/user/runner.c (ring 3)"
+	@$(CC) $(KERN_FLAGS) -fno-stack-protector -fno-jump-tables \
+	       -c kernel/user/runner.c -o $@
 
 $(KERNEL): $(KERN_OBJ) kernel/arch/x86_64/linker.ld
 	@echo "  LINK    $@"
@@ -371,7 +382,7 @@ agent: $(IMAGE) $(BUILD)/test-vars.fd
 # the standard programs in 4-11, the time in 12, the log in 13, the
 # settings in 14, the activity in 15, so the note made here becomes
 # slot 16. When the seed graph changes, this changes. They also track
-# the add palette: four fixed offers, then a header and the eight
+# the add palette: five fixed offers, then a header and the eight
 # startable programs (nine rows), then a header and the carries --
 # when the palette gains a row, every carry click below it moves by
 # a row's 22 pixels.
@@ -383,9 +394,9 @@ RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,100 m0,100 m0,69 click \
               p a s s spc i t left \
               up up up up up up up up up up up right \
               $(RELAY_HOME) m0,100 m0,15 click \
-              m0,100 m0,100 m0,100 m0,100 m0,62 click ret \
+              m0,100 m0,100 m0,100 m0,100 m0,84 click ret \
               $(RELAY_HOME) m0,100 m0,39 click \
-              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,2 \
+              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,24 \
               click ret
 
 relay: $(IMAGE) $(BUILD)/test-vars.fd

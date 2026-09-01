@@ -175,7 +175,8 @@ typedef enum {
     HOT_MODE,        /* a view's name in the footer: switch to it */
     HOT_FINDX,       /* empty the search */
     HOT_INK,         /* choose an ink */
-    HOT_CANVAS       /* a cell of a picture: paint it */
+    HOT_CANVAS,      /* a cell of a picture: paint it */
+    HOT_RUN          /* run the focused text as a program */
 } hot_kind;
 
 typedef struct {
@@ -272,7 +273,7 @@ static bool cut_marked(u8 *d, u64 size, u64 *len)
 /* What the palette offers. The fixed entries make something new; the
  * rest are objects already in hand, so pointing at something that
  * exists needs no dragging and no second window. */
-#define PALETTE_FIXED 4
+#define PALETTE_FIXED 5
 #define CARRY_MAX 24
 
 /* What a picture is born as: room enough to draw in, small enough to
@@ -1145,7 +1146,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
 
         if (edit.kind == EDIT_PICK) {
             static const char *fixed[PALETTE_FIXED] = {
-                "  text", "  bytes", "  list", "  picture"
+                "  text", "  bytes", "  list", "  picture", "  script"
             };
             for (u32 p = 0; p < PALETTE_FIXED && ty < bottom - ROW; p++) {
                 bool on = is_hovered(HOT_PALETTE, p);
@@ -1810,6 +1811,30 @@ static void draw_all(void)
     text_at(tx, 14, sw - PAD, line,
             (focus_rights() & CAP_WRITE) ? C_WRITE : C_READONLY);
 
+    /* Any readable text can be run, provided there is somewhere to
+     * put the running program: the object one came through. The word
+     * sits beside the rights because running is the one thing rights
+     * alone do not announce. */
+    {
+        bool can_run = obj_type(focus()) == TYPE_TEXT &&
+                       (focus_rights() & CAP_READ) &&
+                       nav.at_generation == 0 && nav.depth >= 2;
+        if (can_run) {
+            object *through = nav.node[nav.depth - 2];
+            u32 hr = nav.rights[nav.depth - 2];
+            can_run = (obj_type(through) == TYPE_PROGRAM)
+                    ? (hr & CAP_GRANT) != 0
+                    : (hr & CAP_WRITE) != 0;
+        }
+        if (can_run) {
+            i32 rxr = tx + (i32)at * GLYPH_W + 3 * GLYPH_W;
+            bool lit = is_hovered(HOT_RUN, 0);
+            if (lit) fb_rect(rxr - 4, 11, 3 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(rxr, 14, sw - PAD, "run", lit ? C_TEXT : C_ACCENT);
+            hot_add(rxr - 4, 11, 3 * GLYPH_W + 8, ROW, HOT_RUN, 0);
+        }
+    }
+
     /* Marked letters, and letters being carried. The mark offers
      * "take"; what was taken travels with the shell and offers "put"
      * wherever writing is allowed. Both live in the header because
@@ -2435,6 +2460,44 @@ static void act_on(const hot_region *r)
         nav.paint_drag = true;
         break;
 
+    case HOT_RUN: {
+        /* The text becomes a program. The running instance lands next
+         * to its words, in the object one came through, named like
+         * them -- the text stays a text, and stays editable, which is
+         * what makes this an editor: the next pass through a line
+         * runs whatever the line says by then. */
+        object *f = focus();
+        if (obj_type(f) != TYPE_TEXT || nav.at_generation != 0) break;
+        if (nav.depth < 2) break;
+
+        object *holder = nav.node[nav.depth - 2];
+        u32 hr = nav.rights[nav.depth - 2];
+        bool can = (obj_type(holder) == TYPE_PROGRAM)
+                 ? (hr & CAP_GRANT) != 0
+                 : (hr & CAP_WRITE) != 0;
+        if (!can) break;
+
+        object *prog = runner_launch(f);
+        if (!prog) break;
+
+        u64 slots = obj_slots(holder), spot = slots;
+        for (u64 i = 0; i < slots; i++)
+            if (!obj_get_slot(holder, i)) { spot = i; break; }
+        if (spot == slots && !obj_grow_slots(holder, slots + 1)) break;
+
+        char nm[40];
+        label_of(holder, nav.via[nav.depth - 1], f, nm, sizeof(nm));
+
+        obj_set_slot(holder, spot, prog, CAP_READ | CAP_GRANT);
+        obj_set_slot_name(holder, spot, nm);
+        if (obj_type(holder) == TYPE_PROGRAM)
+            proc_grant(holder, prog, CAP_READ | CAP_GRANT);
+
+        nav.changes++;
+        nav.redraw = true;
+        break;
+    }
+
     case HOT_JOURNAL: {
         /* The line leads to the record. The walk is a real walk -- back
          * to the start, then through the reference that holds the
@@ -2564,6 +2627,20 @@ static void act_on(const hot_region *r)
                 pd[5] = (u8)(PICTURE_H >> 8);
             }
             suggest = "picture";
+            created = true;
+        }
+        else if (r->index == 4) {
+            /* A text that means to be run. Nothing marks it as one --
+             * any text can be run -- but starting from a line that
+             * already works beats starting from a blank page. */
+            made = obj_create(TYPE_TEXT, 1024, 0);
+            if (made) {
+                static const char first[] = "say hello from this text\n";
+                u8 *sd = (u8 *)obj_data(made);
+                for (u32 i = 0; i < sizeof(first); i++)
+                    sd[i] = (u8)first[i];
+            }
+            suggest = "script";
             created = true;
         }
         else if (r->index < PALETTE_FIXED + standard_count()) {

@@ -19,4 +19,8 @@ const char *standard_name(u32 i);
  * process itself; put it somewhere or it is merely running unheld. */
 object *standard_launch(u32 i);
 
+/* Starts the interpreter on a text: the text becomes a running
+ * program, granted its own words read-only as the first gift. */
+object *runner_launch(object *script);
+
 #endif /* EB_STANDARD_H */
