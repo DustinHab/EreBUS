@@ -166,7 +166,13 @@ static void backtrace(u64 rbp)
 
     u32 printed = 0;
     for (u32 depth = 0; depth < 12; depth++) {
-        if (rbp < 0x10000 || (rbp & 7)) break;
+        /* Only the kernel's own half is walked. A ring-3 fault hands
+         * over a user stack, and a mapped user page is still not the
+         * kernel's to read under SMAP -- the walker dereferencing it
+         * faults inside the fault handler, which is the exact spiral
+         * this file exists to prevent. The program's side of the
+         * story is proc_fault's to tell, not this trace's. */
+        if (rbp < 0xFFFF800000000000ULL || (rbp & 7)) break;
         if (!readable(rbp) || !readable(rbp + 8)) {
             kprintf(" <%p not mapped>", (void *)rbp);
             break;
