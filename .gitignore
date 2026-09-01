@@ -6,5 +6,5 @@ build/
 *.png
 *.log
 
-# Erzeugt, aber im Baum nützlich zum Nachschlagen -- bewusst NICHT
-# ignoriert: kernel/gfx/font8x16.h
+# Generated, but worth having in the tree to look things up -- kept on
+# purpose: kernel/gfx/font8x16.h
