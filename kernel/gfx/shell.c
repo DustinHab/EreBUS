@@ -164,7 +164,8 @@ typedef enum {
     HOT_PUT,         /* set the lifted letters down at the caret */
     HOT_DROP,        /* let the lifted letters go */
     HOT_CAPCUT,      /* one capability of a running program: take it back */
-    HOT_MODE         /* a view's name in the footer: switch to it */
+    HOT_MODE,        /* a view's name in the footer: switch to it */
+    HOT_FINDX        /* empty the search */
 } hot_kind;
 
 typedef struct {
@@ -1267,6 +1268,65 @@ typedef struct {
 static index_row irows[INDEX_MAX];
 static u32       icount;
 
+/* The search. There are no paths to remember here, so finding a thing
+ * again means asking for what it says or what it was called. Typing in
+ * the index feeds this; escape empties it. */
+static char find_buf[48];
+static u32  find_len;
+
+static char to_lower(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+}
+
+/* Whether the needle occurs in these bytes, case aside, and where. */
+static bool bytes_contain(const u8 *d, u64 len, u64 *where)
+{
+    if (find_len == 0 || !d) return false;
+    if (len < find_len) return false;
+    for (u64 i = 0; i + find_len <= len; i++) {
+        u32 j = 0;
+        while (j < find_len &&
+               to_lower((char)d[i + j]) == to_lower(find_buf[j])) j++;
+        if (j == find_len) { if (where) *where = i; return true; }
+    }
+    return false;
+}
+
+/* Whether a row answers the search: by the name it is shown under, or
+ * by what the text itself says. A content match hands back the line it
+ * was found in, so the list can show not only what matched but why. */
+static bool row_matches(const index_row *r, char *why, u32 why_max)
+{
+    why[0] = 0;
+    if (find_len == 0) return true;
+
+    char label[48];
+    label_of(r->parent >= 0 ? irows[r->parent].o : NULL, r->via,
+             r->o, label, sizeof(label));
+    u64 llen = 0;
+    while (label[llen]) llen++;
+    if (bytes_contain((const u8 *)label, llen, NULL)) return true;
+
+    if (obj_type(r->o) != TYPE_TEXT) return false;
+
+    const u8 *d = (const u8 *)obj_data(r->o);
+    if (!d) return false;
+    u64 len = text_len(d, obj_size(r->o));
+    u64 at = 0;
+    if (!bytes_contain(d, len, &at)) return false;
+
+    u64 start = at;
+    while (start > 0 && d[start - 1] != '\n') start--;
+    u32 n = 0;
+    while (start + n < len && d[start + n] != '\n' && n < why_max - 1) {
+        why[n] = (char)d[start + n];
+        n++;
+    }
+    why[n] = 0;
+    return true;
+}
+
 static bool index_has(object *o)
 {
     for (u32 i = 0; i < icount; i++) if (irows[i].o == o) return true;
@@ -1334,15 +1394,42 @@ static void draw_index_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     text_at(x, ty, sw - PAD, line, C_FAINT);
     ty += ROW + ROW / 2;
 
+    /* The search row. Typing lands here while the index is open --
+     * there is no little box to click first, because there is nothing
+     * else typing could mean in a list. Escape empties it. */
+    text_at(x, ty, sw - PAD, "find", C_DIM);
+    if (find_len) {
+        find_buf[find_len] = 0;
+        text_at(x + 6 * GLYPH_W, ty, sw - PAD, find_buf, C_TEXT);
+        fb_rect(x + (6 + (i32)find_len) * GLYPH_W, ty, 2, GLYPH_H,
+                C_ACCENT);
+
+        bool litx = is_hovered(HOT_FINDX, 0);
+        i32 fx = x + (9 + (i32)find_len) * GLYPH_W;
+        text_at(fx, ty, sw, "x", litx ? C_READONLY : C_FAINT);
+        hot_add(fx - 2, ty - 3, 2 * GLYPH_W, ROW, HOT_FINDX, 0);
+    } else {
+        fb_rect(x + 6 * GLYPH_W, ty, 2, GLYPH_H, C_ACCENT);
+        text_at(x + 8 * GLYPH_W, ty, sw - PAD,
+                "type to search names and words", C_FAINT);
+    }
+    ty += ROW + ROW / 2;
+
     text_at(x, ty, sw - PAD,
             "  id  kind       bytes   held  way   name", C_DIM);
     fb_rect(x, ty + ROW - 4, sw - 4 * PAD, 1, C_EDGE);
     ty += ROW + 4;
 
-    u32 shown = 0;
-    for (u32 i = 0; i < icount && ty < bottom - 2 * ROW; i++, shown++) {
+    u32 shown = 0, matched = 0;
+    for (u32 i = 0; i < icount; i++) {
         object *o = irows[i].o;
         index_row *r = &irows[i];
+
+        char why[44];
+        if (!row_matches(r, why, sizeof(why))) continue;
+        matched++;
+        if (ty >= bottom - 2 * ROW) continue;
+        shown++;
 
         bool here = (o == focus());
         bool hot = is_hovered(HOT_INDEX, i);
@@ -1385,6 +1472,16 @@ static void draw_index_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         text_at(x + 36 * GLYPH_W, ty, sw - PAD, what,
                 (here || hot) ? C_TEXT : C_DIM);
 
+        /* Why the search found it: the line it says it in. */
+        if (why[0]) {
+            at = put(line, 0, "says \"");
+            at = put(line, at, why);
+            at = put(line, at, "\"");
+            line[at] = 0;
+            text_at(x + 62 * GLYPH_W, ty, sw - PAD * 2 - 10 * GLYPH_W,
+                    line, C_FAINT);
+        }
+
         /* For a program, whether it runs, at the right edge. */
         if (obj_type(o) == TYPE_PROGRAM) {
             bool alive = proc_is_running(o);
@@ -1397,12 +1494,23 @@ static void draw_index_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         ty += ROW;
     }
 
-    if (shown < icount) {
+    if (shown < matched) {
         at = put(line, 0, "  and ");
-        at = put_dec(line, at, icount - shown);
+        at = put_dec(line, at, matched - shown);
         at = put(line, at, " more below the edge of the screen");
         line[at] = 0;
         text_at(x, ty, sw - PAD, line, C_FAINT);
+        ty += ROW;
+    }
+
+    if (find_len && ty < bottom) {
+        at = put(line, 0, "  ");
+        at = put_dec(line, at, matched);
+        at = put(line, at, matched == 1 ? " answer, of " : " answers, of ");
+        at = put_dec(line, at, icount);
+        at = put(line, at, " asked");
+        line[at] = 0;
+        text_at(x, ty, sw - PAD, line, C_DIM);
     }
 }
 
@@ -1688,7 +1796,9 @@ static void draw_all(void)
     if (settings_hints()) {
         at = put(line, at, "click anything you can see.   "
                            "arrows also move.   ");
-        if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
+        if (nav.mode == SHELL_INDEX)
+            at = put(line, at, "typing searches what you can reach.");
+        else if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
             at = put(line, at, "point it at something to hand it over.");
         else if (nav.sel_a != nav.sel_b)
             at = put(line, at, "typing replaces the marked letters.");
@@ -1869,7 +1979,12 @@ static void handle_keys(void)
             if (nav.at_generation > 0) go_to_generation(nav.at_generation - 1);
             continue;
         case KEY_ESCAPE:
-            leave_past();
+            if (nav.mode == SHELL_INDEX && find_len) {
+                find_len = 0;
+                nav.redraw = true;
+            } else {
+                leave_past();
+            }
             continue;
         case KEY_UP:
             if (nav.selected > 0) { nav.selected--; nav.redraw = true; }
@@ -1910,6 +2025,19 @@ static void handle_keys(void)
             if (k.codepoint == '1') { toggle_lens(LENS_TEXT); continue; }
             if (k.codepoint == '2') { toggle_lens(LENS_BYTES); continue; }
             if (k.codepoint == '3') { toggle_lens(LENS_STRUCTURE); continue; }
+            continue;
+        }
+
+        /* While the index is open, letters ask the index. There is
+         * nothing else typing could mean in a list of everything. */
+        if (nav.mode == SHELL_INDEX) {
+            if (k.codepoint == '\b') {
+                if (find_len) { find_len--; nav.redraw = true; }
+            } else if (k.codepoint >= 0x20 && k.codepoint < 0x7F &&
+                       find_len < sizeof(find_buf) - 1) {
+                find_buf[find_len++] = (char)k.codepoint;
+                nav.redraw = true;
+            }
             continue;
         }
 
@@ -2075,6 +2203,11 @@ static void act_on(const hot_region *r)
     case HOT_MODE:
         nav.mode = (shell_mode)(r->index % SHELL_MODE_COUNT);
         nav.changes++;
+        nav.redraw = true;
+        break;
+
+    case HOT_FINDX:
+        find_len = 0;
         nav.redraw = true;
         break;
 
