@@ -2756,8 +2756,9 @@ static void draw_term_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     i32 w = sw - PAD * 4;
     i32 h = bottom - y0 - ROW - 14;      /* room for the gather line */
 
+    term_session *ts = term_screen();
     u64 tlen;
-    const char *t = term_out(&tlen);
+    const char *t = term_out(ts, &tlen);
 
     u32 rows = 0;
     for (u64 i = 0; i < tlen; i++) if (t[i] == '\n') rows++;
@@ -2768,8 +2769,8 @@ static void draw_term_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     static u64 seen;
     static bool pinned = true;
     u32 max = rows > vis ? rows - vis : 0;
-    if (term_sequence() != seen) {
-        seen = term_sequence();
+    if (term_sequence(ts) != seen) {
+        seen = term_sequence(ts);
         if (pinned) scrolls[SCR_TERM] = max;
     }
     if (scrolls[SCR_TERM] > max) scrolls[SCR_TERM] = max;
@@ -2799,7 +2800,7 @@ static void draw_term_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     i32 gy = bottom - ROW - 4;
     fb_rect(x, gy - 4, w, 1, C_EDGE);
     u32 gl;
-    const char *g = term_gather(&gl);
+    const char *g = term_gather(ts, &gl);
     char gline[220];
     u32 at = 0;
     gline[at++] = '>';
@@ -3537,15 +3538,16 @@ static void handle_keys(void)
          * modes; everything else is the talk. Up brings the last line
          * back, the pages leaf through the transcript. */
         if (nav.mode == SHELL_TERM && k.codepoint != KEY_TAB) {
-            if      (k.codepoint == KEY_ENTER)  term_enter();
-            else if (k.codepoint == '\b')       term_rub();
-            else if (k.codepoint == KEY_ESCAPE) term_clear_line();
-            else if (k.codepoint == KEY_UP)     term_recall();
-            else if (k.codepoint == KEY_DOWN)   term_clear_line();
+            term_session *ts = term_screen();
+            if      (k.codepoint == KEY_ENTER)  term_enter(ts);
+            else if (k.codepoint == '\b')       term_rub(ts);
+            else if (k.codepoint == KEY_ESCAPE) term_clear_line(ts);
+            else if (k.codepoint == KEY_UP)     term_recall(ts);
+            else if (k.codepoint == KEY_DOWN)   term_clear_line(ts);
             else if (k.codepoint == KEY_PGUP)   scroll_by(SCR_TERM, -10);
             else if (k.codepoint == KEY_PGDN)   scroll_by(SCR_TERM, 10);
             else if (k.codepoint >= 0x20 && k.codepoint < 0x7F && !k.ctrl)
-                term_key((char)k.codepoint);
+                term_key(ts, (char)k.codepoint);
             nav.redraw = true;
             continue;
         }
@@ -5029,7 +5031,7 @@ void shell_run(void *arg)
          * something happened (the journal grew), and time passed (the
          * clock in the corner would otherwise only be right while one
          * is doing something, which is exactly when nobody looks). */
-        u64 seq = journal_sequence() + term_sequence();
+        u64 seq = journal_sequence() + term_sequence(term_screen());
         if (seq != seen_journal) { seen_journal = seq; nav.redraw = true; }
 
         /* The settings apply as they are typed: the moment a line comes

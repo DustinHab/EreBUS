@@ -10,12 +10,11 @@
  * One handshake needs two of these, and two are nothing.
  */
 #include <eb/crypto.h>
-
-typedef i64 gf[16];
+#include "gf25519.h"
 
 static const gf gf121665 = { 0xDB41, 1 };
 
-static void car25519(gf o)
+void car25519(gf o)
 {
     for (i32 i = 0; i < 16; i++) {
         o[i] += (1LL << 16);
@@ -26,7 +25,7 @@ static void car25519(gf o)
 }
 
 /* Conditional swap on b in {0,1}, chosen without branching on b. */
-static void sel25519(gf p, gf q, i32 b)
+void sel25519(gf p, gf q, i32 b)
 {
     i64 c = ~(b - 1);
     for (i32 i = 0; i < 16; i++) {
@@ -36,7 +35,7 @@ static void sel25519(gf p, gf q, i32 b)
     }
 }
 
-static void pack25519(u8 *o, const gf n)
+void pack25519(u8 *o, const gf n)
 {
     gf m, t;
     for (i32 i = 0; i < 16; i++) t[i] = n[i];
@@ -58,19 +57,19 @@ static void pack25519(u8 *o, const gf n)
     }
 }
 
-static void unpack25519(gf o, const u8 *n)
+void unpack25519(gf o, const u8 *n)
 {
     for (i32 i = 0; i < 16; i++) o[i] = n[2*i] + ((i64)n[2*i + 1] << 8);
     o[15] &= 0x7fff;
 }
 
-static void A(gf o, const gf a, const gf b)
+void A(gf o, const gf a, const gf b)
 { for (i32 i = 0; i < 16; i++) o[i] = a[i] + b[i]; }
 
-static void Z(gf o, const gf a, const gf b)
+void Z(gf o, const gf a, const gf b)
 { for (i32 i = 0; i < 16; i++) o[i] = a[i] - b[i]; }
 
-static void M(gf o, const gf a, const gf b)
+void M(gf o, const gf a, const gf b)
 {
     i64 t[31];
     for (i32 i = 0; i < 31; i++) t[i] = 0;
@@ -82,10 +81,10 @@ static void M(gf o, const gf a, const gf b)
     car25519(o);
 }
 
-static void S(gf o, const gf a) { M(o, a, a); }
+void S(gf o, const gf a) { M(o, a, a); }
 
 /* The field inverse by Fermat: a^(p-2). */
-static void inv25519(gf o, const gf i)
+void inv25519(gf o, const gf i)
 {
     gf c;
     for (i32 a = 0; a < 16; a++) c[a] = i[a];

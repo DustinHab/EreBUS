@@ -617,6 +617,26 @@ built binary.
   through the same doors -- once the identity question below has an
   answer, because a terminal that anyone on the wire may feed is not
   a door, it is a hole.
+* **The door.** The terminal reached over the network, by real ssh,
+  so the client anyone already has can knock: version 2,
+  curve25519-sha256 for the exchange, ssh-ed25519 for the host's
+  name and the visitor's, aes128-gcm@openssh.com on the wire -- one
+  profile, chosen and tested like every primitive under the seal
+  (SHA-512 and Ed25519 check themselves against their RFC vectors at
+  start-up). Who may come in is not a user table: it is the
+  "door |" lines in the settings, each one a public key pasted from
+  an id_ed25519.pub -- the key is the person, and the identity
+  question the seal left open is answered here the only honest way,
+  by the person naming the key. A visitor who proves they hold one
+  gets a terminal session of their own, walking the same graph from
+  the same beginning as the screen. The host's own key is made once
+  and kept in the graph as "the door key" under system, held with no
+  rights at all: it exists where everything exists, and nobody reads
+  it. The fingerprint stands in the boot log and the journal, for
+  checking the client's first-visit warning against. Honest limits:
+  one visitor at a time, no rekeying (a client that asks for it
+  after an hour is let go), and the plain port is the door -- there
+  is no knocking on a sealed pipe first.
 * **The line.** One running conversation with whoever else is on
   the pipe, kept as a read-only text on the system shelf. With it
   in focus the footer becomes a mouth: letters gather, enter says

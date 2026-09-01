@@ -51,4 +51,7 @@ keys() {
 python3 tools/ppm2png.py $BUILD/termtest.ppm $BUILD/termtest.png 2>/dev/null
 
 echo "--- what the script said ---"
-grep -a 'user: hello$\|user: hello ' $BUILD/serial.log
+# The runner pads its words to eight bytes with zeros, so the line
+# cannot be matched to its end; the boot-time greeting is the one
+# other "hello", and it names its ring.
+grep -a 'user: hello' $BUILD/serial.log | grep -v 'ring 3'

@@ -28,6 +28,7 @@
 #include <eb/settings.h>
 #include <eb/fat.h>
 #include <eb/term.h>
+#include <eb/ssh.h>
 #include <eb/activity.h>
 #include <eb/standard.h>
 #include <eb/net.h>
@@ -1542,6 +1543,42 @@ void kmain(eb_boot_info *bi)
                 }
             }
             if (ln) pipe_line_set(ln);
+        }
+
+        /* The door's key: the host's ed25519 pair, made once and kept
+         * in the graph like everything that must survive a boot. The
+         * reference the person holds grants nothing -- it exists
+         * where everything exists, and nobody reads it. Letting go
+         * of it makes a fresh one at the next start, and the clients
+         * will say so. */
+        {
+            object *dk = find_petnamed(root, "the door key", TYPE_BYTES,
+                                       NULL, NULL);
+            if (!dk) {
+                object *made = obj_create(TYPE_BYTES, 64, 0);
+                if (made) {
+                    obj_set_name(made, "the door key");
+                    ssh_make_key((u8 *)obj_data(made));
+                    if (list_append(sys_shelf ? sys_shelf : root, made, 0,
+                                    "the door key"))
+                        dk = made;
+                    obj_release(made);
+                }
+            }
+            if (dk && obj_size(dk) >= 64) {
+                ssh_init((const u8 *)obj_data(dk));
+                char fp[64];
+                ssh_fingerprint(fp);
+                kprintf("ssh:  the door's key is %s\n", fp);
+                char note[96];
+                u32 at = 0;
+                const char *a = "the door's key is ";
+                while (a[at]) { note[at] = a[at]; at++; }
+                for (u32 i = 0; fp[i] && at < sizeof(note) - 1; i++)
+                    note[at++] = fp[i];
+                note[at] = 0;
+                journal_says("ssh", note);
+            }
         }
 
         /* A restored clock face is the same heartbeat it always was;

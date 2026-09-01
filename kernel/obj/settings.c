@@ -16,6 +16,7 @@
  * they can see how the system is set without being able to set it.
  */
 #include <eb/settings.h>
+#include <eb/base64.h>
 #include <eb/journal.h>
 #include <eb/string.h>
 #include <eb/thread.h>
@@ -43,13 +44,26 @@ typedef struct {
     char name[24];
     bool work;
     bool german_keys;
+    /* Whose keys open the door: up to four ed25519 public keys, each
+     * from its own "door |" line. Nobody's, until one is written. */
+    u8   door[4][32];
+    u32  doors;
 } values;
 
 static values current = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                           false, { 0, 0, 0, 0 }, 0,
-                          false, { 0, 0, 0, 0 }, "erebus", false, false };
+                          false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0 };
 
 object *settings_object(void) { return settings; }
+
+u32 settings_door_count(void) { return current.doors; }
+
+bool settings_door_key(u32 i, u8 out[32])
+{
+    if (i >= current.doors) return false;
+    for (u32 k = 0; k < 32; k++) out[k] = current.door[i][k];
+    return true;
+}
 
 u64  settings_save_quiet_ns(void)   { return current.save_quiet_ns; }
 i64  settings_clock_offset_min(void){ return current.clock_offset_min; }
@@ -275,6 +289,29 @@ static void read_line(values *v, const char *line, u64 len)
          * one's processor is a standing decision, not a default. */
         if (line_has(val, vlen, "welcomed")) v->work = true;
         if (line_has(val, vlen, "refused"))  v->work = false;
+    } else if (matter_is(line, a, b, "door")) {
+        /* A key that may come in through the door: the line of an
+         * id_ed25519.pub, pasted whole -- "ssh-ed25519" and then the
+         * letters. The letters decode to the standard blob, and the
+         * key inside it is what the visitor must prove they hold. */
+        u64 i = 0;
+        while (i + 11 <= vlen && memcmp(val + i, "ssh-ed25519", 11) != 0) i++;
+        if (i + 11 <= vlen && v->doors < 4) {
+            i += 11;
+            while (i < vlen && val[i] == ' ') i++;
+            u64 from = i;
+            while (i < vlen && val[i] != ' ' && val[i] != '\r') i++;
+            u8 blob[128];
+            i32 got = base64_decode(val + from, (u32)(i - from), blob,
+                                    sizeof(blob));
+            if (got >= 51 &&
+                blob[0] == 0 && blob[1] == 0 && blob[2] == 0 && blob[3] == 11 &&
+                memcmp(blob + 4, "ssh-ed25519", 11) == 0 &&
+                blob[15] == 0 && blob[16] == 0 && blob[17] == 0 && blob[18] == 32) {
+                for (u32 k = 0; k < 32; k++) v->door[v->doors][k] = blob[19 + k];
+                v->doors++;
+            }
+        }
     } else if (matter_is(line, a, b, "name")) {
         /* What this machine calls itself when another asks: shown to
          * the other side as a claim, like every self-given name. */
@@ -401,7 +438,7 @@ void settings_apply(void)
 
     values next = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                     false, { 0, 0, 0, 0 }, 0,
-                    false, { 0, 0, 0, 0 }, "erebus", false, false };
+                    false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0 };
 
     u64 start = 0;
     for (u64 i = 0; i <= size; i++) {

@@ -51,4 +51,9 @@ bool settings_work(void);
 /* Whether the keyboard's keys mean their german letters. */
 bool settings_keys_german(void);
 
+/* Whose keys open the door: the ed25519 public keys written as
+ * "door |" lines, up to four. None written, nobody comes in. */
+u32  settings_door_count(void);
+bool settings_door_key(u32 i, u8 out[32]);
+
 #endif /* EB_SETTINGS_H */
