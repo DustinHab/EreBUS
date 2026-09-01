@@ -428,11 +428,24 @@ built binary.
   ("address | 10.9.9.20") for wires that have no landlord.
   tools/pipe-two.sh proves it: two machines on one emulated cable,
   the notes sent from one, found lying in the other's arrivals with
-  the same words, surviving its reboot. Honest limits: the pipe is
-  not yet sealed (it travels plainly, unlike https), and anyone who
-  can reach the port can lay things into arrivals -- quarantined as
-  inert data, but arriving unasked; sealing and greeting are the
-  pipe's next milestones.
+  the same words, surviving its reboot. Honest limit: anyone who can
+  reach the port can lay things into arrivals -- quarantined as
+  inert data, but arriving unasked.
+* **The pipe travels sealed.** Before anything crosses, the sender
+  knocks: HELLO carries a fresh x25519 key, WELCOME answers with the
+  other side's, and both ends derive AES-128-GCM keys -- one per
+  direction, a counter per record, replays refused, the envelope
+  header bound in as associated data. Offers, chunks and
+  acknowledgements only ever travel inside these envelopes; a plain
+  one arriving is turned away. Keys are fresh at every knock and
+  kept nowhere. The proof run records the wire at the receiver's own
+  card and greps the dump: the words of the notes do not appear on
+  it. Honest limits, the same ones https carries here: the knock is
+  private, not proven -- an impostor who answers the knock first is
+  spoken to, because there is no identity under the keys yet -- and
+  discovery (SEEK/HERE) speaks plainly, since names are claims
+  either way. If the crypto self-test fails at boot, the pipe
+  refuses to carry anything at all rather than fall back to plain.
 * **Finding each other.** Standing on the arrivals list shows the
   pipe whole: where it points, and a scan that calls out on the wire.
   Machines running this system answer with the name their settings
@@ -458,8 +471,8 @@ built binary.
 * M10 — booting real hardware from a USB stick
 * Certificate verification — turning the seal from privacy into
   identity: RSA/ECDSA signatures and a root store
-* A sealed pipe — the object pipe over the same cryptography https
-  uses, so substance crosses machines unreadable to the road
+* Identity under the pipe's knock — remembering who a machine was
+  the last time, so an impostor answering the knock is caught
 
 ## A note on Secure Boot
 

@@ -16,7 +16,7 @@ BUILD=build
 
 rm -f $BUILD/peerstore.img $BUILD/peer-vars.fd $BUILD/peer-serial.log \
       $BUILD/peer-esp.img $BUILD/teststore.img $BUILD/serial.log \
-      $BUILD/pipe-choose.ppm
+      $BUILD/pipe-choose.ppm $BUILD/pipe-wire.dump
 dd if=/dev/zero of=$BUILD/peerstore.img bs=1M count=32 status=none
 dd if=/dev/zero of=$BUILD/teststore.img bs=1M count=32 status=none
 cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/peer-vars.fd
@@ -60,6 +60,7 @@ keys() {
   -device ide-hd,drive=store,bus=ide.1 \
   -device e1000,netdev=n0 \
   -netdev socket,id=n0,listen=127.0.0.1:8010 \
+  -object filter-dump,id=fd0,netdev=n0,file=$BUILD/pipe-wire.dump \
   -display none -monitor stdio \
   -serial file:$BUILD/peer-serial.log >/dev/null 2>&1 &
 A_JOB=$!
@@ -109,3 +110,17 @@ echo "--- sender (B) ---"
 grep -a 'net:.*claim\|pipe' $BUILD/serial.log
 echo "--- receiver (A) ---"
 grep -a 'net:.*claim\|pipe' $BUILD/peer-serial.log
+
+# The wire itself, recorded at A's card: the notes' words must not be
+# on it, and the knock must be. A seal one cannot check is a story.
+echo "--- the wire ---"
+if grep -aq 'not a file' $BUILD/pipe-wire.dump; then
+    echo "FAILED: the words crossed in the clear"
+else
+    echo "no plaintext on the wire"
+fi
+if grep -aq 'EBPX' $BUILD/pipe-wire.dump; then
+    echo "pipe packets seen"
+else
+    echo "FAILED: no pipe packets in the dump"
+fi

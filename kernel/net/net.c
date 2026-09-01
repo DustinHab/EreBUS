@@ -45,9 +45,11 @@ static domain    *kdom;
 static object    *service_port;
 static cap_handle service_receive;
 static bool       running;
+static bool       crypto_good;
 
-object *net_port(void) { return service_port; }
-bool    net_up(void)   { return running; }
+object *net_port(void)      { return service_port; }
+bool    net_up(void)        { return running; }
+bool    net_crypto_ok(void) { return crypto_good; }
 
 bool net_own_address(u8 ip[4])
 {
@@ -1109,14 +1111,18 @@ bool net_start(void)
 
     /* The seal proves its arithmetic before it is offered. A failure
      * here does not stop the network -- plain http still works -- it
-     * only means tls stays unavailable, which is the honest outcome
-     * of primitives that cannot vouch for themselves. */
+     * only means tls and the pipe stay unavailable, which is the
+     * honest outcome of primitives that cannot vouch for themselves. */
     extern bool tls_schedule_selftest(void);
-    if (crypto_selftest() && tls_schedule_selftest())
+    crypto_good = crypto_selftest();
+    if (crypto_good && tls_schedule_selftest())
         kprintf("tls:  self test passed -- sha256, x25519, aes-128-gcm, "
                 "and the 1.3 key schedule\n");
     else
         kprintf("tls:  self test FAILED -- https disabled\n");
+    if (crypto_good)
+        kprintf("pipe: transfers travel sealed; the knock is private, "
+                "not yet proven\n");
 
     thread_create("net", net_thread, NULL, kdom);
     running = true;

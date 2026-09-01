@@ -73,6 +73,11 @@ void net_breathe(void);
 bool net_udp_send(const u8 dst[4], u16 sport, u16 dport,
                   const u8 *data, u32 len);
 
+/* Whether the crypto primitives proved themselves at start. The pipe
+ * refuses to carry anything without this; a seal that cannot vouch
+ * for itself seals nothing. */
+bool net_crypto_ok(void);
+
 /* Our own address, once the machine has one. */
 bool net_own_address(u8 ip[4]);
 
