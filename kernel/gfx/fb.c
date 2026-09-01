@@ -183,6 +183,18 @@ void fb_gradient(i32 x, i32 y, i32 w, i32 h, color top, color bottom)
     }
 }
 
+/* The sixteen inks. Fixed, and deliberately not any theme's: a
+ * picture keeps its colours whatever the shell is wearing. Ink 0 is
+ * the paper itself. */
+const color fb_inks[16] = {
+    RGB(236, 233, 226), RGB( 30,  30,  33), RGB(122, 122, 126),
+    RGB(188,  62,  52), RGB(214, 122,  52), RGB(222, 186,  72),
+    RGB( 82, 160,  92), RGB( 62, 160, 150), RGB( 72, 112, 200),
+    RGB(132,  92, 190), RGB(180,  82, 150), RGB(132,  92,  62),
+    RGB(224, 162, 172), RGB(182, 182, 182), RGB( 52, 100,  62),
+    RGB( 42,  62, 112),
+};
+
 /* ------------------------------------------------------------------ */
 /* Font                                                                */
 /* ------------------------------------------------------------------ */

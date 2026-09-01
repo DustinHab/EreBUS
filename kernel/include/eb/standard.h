@@ -34,4 +34,8 @@ object *work_launch(object *script, object *reply, u64 budget_seconds,
  * hardware that ignored the asking. */
 void system_off(void);
 
+/* The list named "the served", or NULL: what the web server offers.
+ * The reference is the whole switch. */
+object *system_served(void);
+
 #endif /* EB_STANDARD_H */

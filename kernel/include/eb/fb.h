@@ -11,6 +11,11 @@ typedef u32 color;
 
 #define RGB(r, g, b) ((color)(((u32)(r) << 16) | ((u32)(g) << 8) | (u32)(b)))
 
+/* The sixteen inks pictures are painted with. One table, shared by
+ * the paint lens, the web server's bmp writer, and whoever else has
+ * to say what ink 5 looks like. */
+extern const color fb_inks[16];
+
 void fb_init(const eb_boot_info *bi);
 u32  fb_width(void);
 u32  fb_height(void);

@@ -561,6 +561,16 @@ static void activity_thread(void *arg)
     }
 }
 
+/* The list this machine serves to the local net, when the person has
+ * made one: a list named "the served" on home or one shelf below.
+ * The reference is the whole switch -- no list, no serving. */
+object *system_served(void)
+{
+    if (!persistent_root) return NULL;
+    return find_petnamed(persistent_root, "the served", TYPE_LIST,
+                         NULL, NULL);
+}
+
 /* The deliberate end: the graph goes to disk, the journal notes the
  * leaving, and the machine is asked to sleep at the ports the common
  * machines listen on. A machine that ignores them is told so instead

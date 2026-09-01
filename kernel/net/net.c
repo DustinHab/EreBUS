@@ -24,6 +24,8 @@
  */
 #include <eb/net.h>
 #include <eb/pipe.h>
+#include <eb/standard.h>
+#include <eb/fb.h>
 #include <eb/crypto.h>
 #include <eb/msg.h>
 #include <eb/thread.h>
@@ -317,6 +319,7 @@ static void dns_input(const u8 *p, u32 len)
 }
 
 static void sntp_input(const u8 *p, u32 len);
+static void web_input(const u8 src[4], const u8 *seg, u32 len);
 
 /* Sorts one arriving frame. Called until the wire is quiet. */
 static void net_pump(void)
@@ -371,7 +374,10 @@ static void net_pump(void)
         u32 ilen = tot - ihl;
 
         if (proto == 6) {
-            tcp_input(inner, ilen);
+            u16 tdport = ilen >= 4 ? (u16)(((u16)inner[2] << 8) | inner[3])
+                                   : 0;
+            if (tdport == 80) web_input(p + 12, inner, ilen);
+            else              tcp_input(inner, ilen);
         } else if (proto == 17 && ilen >= 8) {
             u16 sport = ((u16)inner[0] << 8) | inner[1];
             u16 dport = ((u16)inner[2] << 8) | inner[3];
@@ -797,6 +803,299 @@ static void sntp_ask(void)
     memset(q, 0, sizeof(q));
     q[0] = 0x23;                       /* version 4, a client asking */
     net_udp_send(srv, 40123, 123, q, 48);
+}
+
+/* ------------------------------------------------------------------ */
+/* The served: a small web server                                      */
+/* ------------------------------------------------------------------ */
+
+/* One visitor at a time, one request per visit, and a reference as
+ * the whole switch: while a list named "the served" exists, its
+ * readable entries are pages on the local net; without the list the
+ * port does not even answer. Substance goes out and nothing comes in
+ * but the asking -- a browser is a reader here, never a hand. Best
+ * effort on purpose: no retransmission, one segment run per answer,
+ * which on the wire this serves is what a page load looks like. */
+
+static struct {
+    bool active, established;
+    u8   ip[4];
+    u16  port;
+    u32  snd_nxt, rcv_nxt;
+} web;
+
+static u8 web_all[20480];            /* header and body, composed */
+static u8 web_body[16600];
+
+static void web_emit(u8 flags, const u8 *data, u32 len)
+{
+    static u8 t[1500];
+    t[0] = 0; t[1] = 80;
+    t[2] = (u8)(web.port >> 8); t[3] = (u8)web.port;
+    t[4] = (u8)(web.snd_nxt >> 24); t[5] = (u8)(web.snd_nxt >> 16);
+    t[6] = (u8)(web.snd_nxt >> 8);  t[7] = (u8)web.snd_nxt;
+    t[8] = (u8)(web.rcv_nxt >> 24); t[9] = (u8)(web.rcv_nxt >> 16);
+    t[10] = (u8)(web.rcv_nxt >> 8); t[11] = (u8)web.rcv_nxt;
+    t[12] = 0x50;
+    t[13] = flags;
+    t[14] = 0x20; t[15] = 0x00;
+    t[16] = 0; t[17] = 0;
+    t[18] = 0; t[19] = 0;
+    for (u32 i = 0; i < len; i++) t[20 + i] = data[i];
+
+    u16 c = csum(t, 20 + len, pseudo_seed(web.ip, 6, 20 + len));
+    t[16] = (u8)(c >> 8); t[17] = (u8)c;
+    ip_send(6, web.ip, t, 20 + len);
+
+    web.snd_nxt += len;
+    if (flags & 0x03) web.snd_nxt += 1;      /* syn or fin took one */
+}
+
+static u32 wput(u8 *b, u32 at, const char *s)
+{
+    while (*s) b[at++] = (u8)*s++;
+    return at;
+}
+
+static u32 wput_dec(u8 *b, u32 at, u64 v)
+{
+    char d[24];
+    u32 n = 0;
+    if (v == 0) d[n++] = '0';
+    while (v) { d[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n) b[at++] = (u8)d[--n];
+    return at;
+}
+
+/* A petname into a page, with the four letters html cares about
+ * dulled -- names are claims, and claims do not get to be markup. */
+static u32 wput_name(u8 *b, u32 at, const char *s)
+{
+    for (u32 i = 0; s && s[i] && i < 40; i++) {
+        char c = s[i];
+        if (c == '<' || c == '>' || c == '&' || c == '"') c = '.';
+        b[at++] = (u8)c;
+    }
+    return at;
+}
+
+/* A picture as a bmp: 8 bits per pixel, the sixteen inks as its
+ * palette, rows bottom-up the way bmp wants them. */
+static u32 web_bmp(object *pic, u8 *out, u32 max)
+{
+    const u8 *d = (const u8 *)obj_data(pic);
+    if (!d || obj_size(pic) < 8) return 0;
+    u32 w = (u32)d[0] | ((u32)d[1] << 8) | ((u32)d[2] << 16) |
+            ((u32)d[3] << 24);
+    u32 h = (u32)d[4] | ((u32)d[5] << 8) | ((u32)d[6] << 16) |
+            ((u32)d[7] << 24);
+    if (w == 0 || h == 0 || (u64)w * h + 8 > obj_size(pic)) return 0;
+
+    u32 stride = (w + 3) & ~3u;
+    u32 total = 14 + 40 + 16 * 4 + stride * h;
+    if (total > max) return 0;
+
+    memset(out, 0, total);
+    out[0] = 'B'; out[1] = 'M';
+    out[2] = (u8)total; out[3] = (u8)(total >> 8);
+    out[4] = (u8)(total >> 16); out[5] = (u8)(total >> 24);
+    u32 off = 14 + 40 + 64;
+    out[10] = (u8)off; out[11] = (u8)(off >> 8);
+
+    u8 *ih = out + 14;
+    ih[0] = 40;
+    ih[4] = (u8)w; ih[5] = (u8)(w >> 8);
+    ih[8] = (u8)h; ih[9] = (u8)(h >> 8);
+    ih[12] = 1;                              /* one plane */
+    ih[14] = 8;                              /* bits per pixel */
+    ih[32] = 16;                             /* colours used */
+
+    u8 *pal = out + 14 + 40;
+    for (u32 i = 0; i < 16; i++) {
+        color c = fb_inks[i];
+        pal[i * 4 + 0] = (u8)c;              /* blue */
+        pal[i * 4 + 1] = (u8)(c >> 8);       /* green */
+        pal[i * 4 + 2] = (u8)(c >> 16);      /* red */
+    }
+
+    u8 *px = out + off;
+    for (u32 row = 0; row < h; row++) {
+        const u8 *src = d + 8 + (u64)(h - 1 - row) * w;
+        for (u32 col = 0; col < w; col++)
+            px[row * stride + col] = (u8)(src[col] & 15);
+    }
+    return total;
+}
+
+/* Builds the answer for one asked path into web_all. */
+static u32 web_answer(const char *path)
+{
+    object *served = system_served();
+    const char *ctype = "text/plain";
+    u32 blen = 0;
+    bool found = (served != NULL);
+
+    if (served && path[0] == '/' && path[1] == 0) {
+        ctype = "text/html";
+        u32 at = wput(web_body, 0,
+                      "<!doctype html><html><head><title>");
+        char nm[24];
+        settings_name(nm, sizeof(nm));
+        at = wput_name(web_body, at, nm);
+        at = wput(web_body, at,
+                  "</title></head><body><h1>what this machine "
+                  "serves</h1><ul>");
+        u32 n = 0;
+        for (u64 i = 0; i < obj_slots(served); i++) {
+            object *t = obj_get_slot(served, i);
+            if (!t || !(obj_slot_rights(served, i) & CAP_READ)) continue;
+            const char *label = obj_slot_name(served, i);
+            if (!label) label = obj_name(t);
+            at = wput(web_body, at, "<li><a href=\"/");
+            at = wput_dec(web_body, at, n);
+            at = wput(web_body, at, "\">");
+            at = wput_name(web_body, at, label ? label : "unnamed");
+            at = wput(web_body, at, "</a></li>");
+            n++;
+            if (at > sizeof(web_body) - 200) break;
+        }
+        at = wput(web_body, at, "</ul></body></html>");
+        blen = at;
+    } else if (served && path[0] == '/') {
+        u32 want = 0;
+        bool numeric = path[1] != 0;
+        for (u32 i = 1; path[i]; i++) {
+            if (path[i] < '0' || path[i] > '9') { numeric = false; break; }
+            want = want * 10 + (u32)(path[i] - '0');
+        }
+
+        object *hit = NULL;
+        if (numeric) {
+            u32 n = 0;
+            for (u64 i = 0; i < obj_slots(served) && !hit; i++) {
+                object *t = obj_get_slot(served, i);
+                if (!t || !(obj_slot_rights(served, i) & CAP_READ))
+                    continue;
+                if (n == want) hit = t;
+                n++;
+            }
+        }
+
+        if (!hit) {
+            found = false;
+        } else if (obj_type(hit) == TYPE_TEXT) {
+            const u8 *d = (const u8 *)obj_data(hit);
+            u64 size = obj_size(hit);
+            u32 n = 0;
+            while (d && n < size && d[n] && n < sizeof(web_body)) {
+                web_body[n] = d[n];
+                n++;
+            }
+            blen = n;
+        } else if (obj_type(hit) == TYPE_PICTURE) {
+            blen = web_bmp(hit, web_body, sizeof(web_body));
+            if (blen) ctype = "image/bmp";
+            else blen = wput(web_body, 0, "a picture too large to serve\n");
+        } else if (obj_type(hit) == TYPE_BYTES) {
+            ctype = "application/octet-stream";
+            u64 size = obj_size(hit);
+            if (size > sizeof(web_body)) size = sizeof(web_body);
+            memcpy(web_body, obj_data(hit), size);
+            blen = (u32)size;
+        } else {
+            blen = wput(web_body, 0,
+                        "a list; open its things one by one\n");
+        }
+    } else {
+        found = false;
+    }
+
+    u32 at = wput(web_all, 0, found ? "HTTP/1.0 200 OK\r\nContent-Type: "
+                                    : "HTTP/1.0 404 Not Found\r\n"
+                                      "Content-Type: ");
+    if (!found) {
+        blen = wput(web_body, 0, "nothing here\n");
+        ctype = "text/plain";
+    }
+    at = wput(web_all, at, ctype);
+    at = wput(web_all, at, "\r\nContent-Length: ");
+    at = wput_dec(web_all, at, blen);
+    at = wput(web_all, at, "\r\nConnection: close\r\n\r\n");
+    memcpy(web_all + at, web_body, blen);
+    return at + blen;
+}
+
+static void web_input(const u8 src[4], const u8 *seg, u32 len)
+{
+    if (len < 20) return;
+    if (!system_served()) return;            /* the port is closed */
+
+    u16 sport = ((u16)seg[0] << 8) | seg[1];
+    u32 seq = ((u32)seg[4] << 24) | ((u32)seg[5] << 16) |
+              ((u32)seg[6] << 8) | seg[7];
+    u32 ack = ((u32)seg[8] << 24) | ((u32)seg[9] << 16) |
+              ((u32)seg[10] << 8) | seg[11];
+    u8  off = (u8)(seg[12] >> 4) * 4;
+    u8  fl  = seg[13];
+    if (off > len) return;
+    (void)ack;
+
+    if (fl & 0x04) { web.active = false; return; }
+
+    /* A knock: answer it, taking over from any older visit. */
+    if ((fl & 0x02) && !(fl & 0x10)) {
+        for (u32 i = 0; i < 4; i++) web.ip[i] = src[i];
+        web.port = sport;
+        u32 iss;
+        rand_bytes((u8 *)&iss, 4);
+        web.snd_nxt = iss;
+        web.rcv_nxt = seq + 1;
+        web.active = true;
+        web.established = false;
+        web_emit(0x12, NULL, 0);             /* syn+ack */
+        return;
+    }
+
+    if (!web.active || !ip4_eq(src, web.ip) || sport != web.port)
+        return;
+
+    if (fl & 0x01) {                         /* their fin: wave back */
+        web.rcv_nxt = seq + 1;
+        web_emit(0x10, NULL, 0);
+        web.active = false;
+        return;
+    }
+
+    if ((fl & 0x10) && !web.established) web.established = true;
+
+    const u8 *data = seg + off;
+    u32 dlen = len - off;
+    if (dlen == 0 || !web.established) return;
+
+    /* The first line is the whole conversation: "GET /path ...". */
+    web.rcv_nxt = seq + dlen;
+
+    char path[120];
+    u32 pn = 0;
+    if (dlen > 4 && data[0] == 'G' && data[1] == 'E' && data[2] == 'T' &&
+        data[3] == ' ') {
+        u32 i = 4;
+        while (i < dlen && data[i] != ' ' && data[i] != '\r' &&
+               pn < sizeof(path) - 1)
+            path[pn++] = (char)data[i++];
+    }
+    path[pn] = 0;
+    if (pn == 0) { web.active = false; return; }
+
+    u32 total = web_answer(path);
+    kprintf("web:  served %s to %u.%u.%u.%u, %u bytes\n",
+            path, src[0], src[1], src[2], src[3], total);
+
+    for (u32 o2 = 0; o2 < total; o2 += 1360) {
+        u32 part = total - o2 < 1360 ? total - o2 : 1360;
+        bool last = (o2 + part >= total);
+        web_emit(last ? 0x19 : 0x18, web_all + o2, part);
+    }
 }
 
 static u16 tcp_port_next = 49200;
