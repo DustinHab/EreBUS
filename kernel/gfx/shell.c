@@ -2016,12 +2016,43 @@ static void line_between(i32 x0, i32 y0, i32 x1, i32 y1, color c)
         fb_rect(x0 + dx * i / steps, y0 + dy * i / steps, 2, 2, c);
 }
 
+/* The map moves under the hand: dragging empty ground pans it, the
+ * wheel zooms around the pointer. A graph larger than the screen is
+ * the normal case, not a failure, once it can be walked this way. */
+static i32  graph_zoom = 100;        /* percent */
+static i32  graph_pan_x, graph_pan_y;
+static bool graph_drag;
+static i32  graph_last_x, graph_last_y;
+static i32  graph_top, graph_bot;    /* where the map was last drawn */
+
+static void graph_zoom_at(i32 mx, i32 my, i32 dz)
+{
+    i32 nz = graph_zoom;
+    i32 steps = dz < 0 ? -dz : dz;
+    for (i32 i = 0; i < steps; i++)
+        nz = (dz < 0) ? nz * 11 / 10 : nz * 10 / 11;
+    if (nz < 30)  nz = 30;
+    if (nz > 250) nz = 250;
+    if (nz == graph_zoom) return;
+
+    /* The point under the pointer stays under the pointer. */
+    graph_pan_x = mx - (i32)((i64)(mx - graph_pan_x) * nz / graph_zoom);
+    graph_pan_y = my - (i32)((i64)(my - graph_pan_y) * nz / graph_zoom);
+    graph_zoom = nz;
+    nav.redraw = true;
+}
+
 static void draw_graph_shell(i32 sw, i32 sh, i32 top, i32 bottom)
 {
     (void)sw; (void)sh;
     build_graph();
 
-    i32 node_w = 250, node_h = 46;
+    i32 z = graph_zoom;
+    i32 node_w = 250 * z / 100, node_h = 46 * z / 100;
+    if (node_h < 8) node_h = 8;
+
+    graph_top = top;
+    graph_bot = bottom - 220;
 
     /* Every reference, not only the ones the walk came in by.
      *
@@ -2043,15 +2074,23 @@ static void draw_graph_shell(i32 sw, i32 sh, i32 top, i32 bottom)
 
             bool tree_edge = (gnodes[j].parent == (i32)i);
 
-            i32 x0 = gnodes[i].x + node_w, y0 = gnodes[i].y + node_h / 2;
-            i32 x1 = gnodes[j].x,          y1 = gnodes[j].y + node_h / 2;
+            i32 ax = gnodes[i].x * z / 100 + graph_pan_x;
+            i32 ay = gnodes[i].y * z / 100 + graph_pan_y;
+            i32 bx = gnodes[j].x * z / 100 + graph_pan_x;
+            i32 by = gnodes[j].y * z / 100 + graph_pan_y;
+
+            i32 x0 = ax + node_w, y0 = ay + node_h / 2;
+            i32 x1 = bx,          y1 = by + node_h / 2;
 
             /* An edge that goes backwards or sideways would cut through
              * the column it starts in, so it leaves from the left. */
             if (gnodes[j].depth <= gnodes[i].depth) {
-                x0 = gnodes[i].x;
-                x1 = gnodes[j].x + node_w;
+                x0 = ax;
+                x1 = bx + node_w;
             }
+            if ((y0 < top && y1 < top) ||
+                (y0 > graph_bot && y1 > graph_bot))
+                continue;
             line_between(x0, y0, x1, y1, tree_edge ? C_EDGE : C_FAINT);
         }
     }
@@ -2062,8 +2101,10 @@ static void draw_graph_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         bool on_path = false;
         for (u32 d = 0; d < nav.depth; d++) if (nav.node[d] == o) on_path = true;
 
-        i32 x = gnodes[i].x, y = gnodes[i].y;
-        if (y < top || y + node_h > bottom) continue;
+        i32 x = gnodes[i].x * z / 100 + graph_pan_x;
+        i32 y = gnodes[i].y * z / 100 + graph_pan_y;
+        if (y + node_h < top || y > graph_bot) continue;
+        if (x + node_w < 0 || x > sw) continue;
 
         bool hot = is_hovered(HOT_NODE, i);
         fb_rect(x - 2, y - 2, node_w + 4, node_h + 4,
@@ -2073,17 +2114,22 @@ static void draw_graph_shell(i32 sw, i32 sh, i32 top, i32 bottom)
                 (is_focus || hot) ? C_PANEL_HI : C_PANEL);
         hot_add(x - 2, y - 2, node_w + 4, node_h + 4, HOT_NODE, i);
 
-        char what[40];
-        graph_node *par = gnodes[i].parent >= 0 ? &gnodes[gnodes[i].parent]
-                                                : NULL;
-        u64 via = 0;
-        if (par) for (u64 s = 0; s < obj_slots(par->o); s++)
-            if (obj_get_slot(par->o, s) == o) { via = s; break; }
-        label_of(par ? par->o : NULL, via, o, what, sizeof(what));
-        text_at(x + 10, y + 7, x + node_w - 8, what,
-                is_focus ? C_TEXT : C_DIM);
-        text_at(x + 10, y + 7 + GLYPH_H + 2, x + node_w - 8,
-                type_name(obj_type(o)), C_FAINT);
+        /* Labels only where they fit: a shrunken box with a full
+         * label would be noise wearing letters. */
+        if (z >= 55) {
+            char what[40];
+            graph_node *par = gnodes[i].parent >= 0
+                            ? &gnodes[gnodes[i].parent] : NULL;
+            u64 via = 0;
+            if (par) for (u64 s = 0; s < obj_slots(par->o); s++)
+                if (obj_get_slot(par->o, s) == o) { via = s; break; }
+            label_of(par ? par->o : NULL, via, o, what, sizeof(what));
+            text_at(x + 10, y + 7, x + node_w - 8, what,
+                    is_focus ? C_TEXT : C_DIM);
+            if (z >= 85 && node_h >= 40)
+                text_at(x + 10, y + 7 + GLYPH_H + 2, x + node_w - 8,
+                        type_name(obj_type(o)), C_FAINT);
+        }
     }
 
     /* The focused object's content, below the map. Even here one is
@@ -2776,6 +2822,9 @@ static void draw_all(void)
         else if (focus() == pipe_arrivals() && nav.at_generation == 0)
             at = put(line, at, "scan finds machines; "
                                "click one and send reaches it.");
+        else if (nav.mode == SHELL_GRAPH)
+            at = put(line, at, "drag the empty ground to move the map; "
+                               "the wheel zooms.");
         else if (nav.mode == SHELL_INDEX)
             at = put(line, at, "typing searches what you can reach.");
         else if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
@@ -3662,12 +3711,30 @@ static void act_on(const hot_region *r)
         if (!j) break;
         if (nav.at_generation != 0) leave_past();
         go_back_to(0);
-        for (u64 i = 0; i < obj_slots(focus()); i++)
+
+        bool found_j = false;
+        for (u64 i = 0; i < obj_slots(focus()) && !found_j; i++)
             if (obj_get_slot(focus(), i) == j) {
                 nav.selected = (u32)i;
                 follow(i);
+                found_j = true;
+            }
+
+        /* The log lives on the system shelf now; one list down is
+         * still a real walk, reference by reference. */
+        for (u64 i = 0; i < obj_slots(focus()) && !found_j; i++) {
+            object *l = obj_get_slot(focus(), i);
+            if (!l || obj_type(l) != TYPE_LIST) continue;
+            for (u64 k = 0; k < obj_slots(l); k++) {
+                if (obj_get_slot(l, k) != j) continue;
+                nav.selected = (u32)i;
+                follow(i);
+                nav.selected = (u32)k;
+                follow(k);
+                found_j = true;
                 break;
             }
+        }
         break;
     }
 
@@ -3919,8 +3986,15 @@ static void handle_mouse(void)
         bool is = (m.buttons & 1) != 0;
         nav.buttons = m.buttons;
 
-        /* The wheel reads whatever it is over. */
-        if (m.dz) wheel_at(nav.mouse_x, nav.mouse_y, m.dz);
+        /* The wheel reads whatever it is over -- and over the map it
+         * zooms instead, around the pointer. */
+        if (m.dz) {
+            if (nav.mode == SHELL_GRAPH && graph_bot > graph_top &&
+                nav.mouse_y >= graph_top && nav.mouse_y < graph_bot)
+                graph_zoom_at(nav.mouse_x, nav.mouse_y, m.dz);
+            else
+                wheel_at(nav.mouse_x, nav.mouse_y, m.dz);
+        }
 
         if (is && !was) {
             i32 h = hot_at(nav.mouse_x, nav.mouse_y);
@@ -3929,11 +4003,19 @@ static void handle_mouse(void)
             } else if (sendto_open) {
                 sendto_open = false;     /* clicked past the chooser */
                 nav.redraw = true;
+            } else if (nav.mode == SHELL_GRAPH && graph_bot > graph_top &&
+                       nav.mouse_y >= graph_top &&
+                       nav.mouse_y < graph_bot) {
+                /* Empty ground taken hold of: the map will follow. */
+                graph_drag = true;
+                graph_last_x = nav.mouse_x;
+                graph_last_y = nav.mouse_y;
             }
         }
         if (!is && was) {
             nav.sel_drag = false;
             nav.paint_drag = false;
+            graph_drag = false;
         }
     }
 
@@ -3942,6 +4024,15 @@ static void handle_mouse(void)
     /* A held button over the canvas keeps painting: the stroke is the
      * gesture, not one cell per click. */
     if (nav.paint_drag && (nav.buttons & 1)) paint_at_pointer();
+
+    /* A held button on the map's empty ground drags the map. */
+    if (graph_drag && (nav.buttons & 1)) {
+        graph_pan_x += nav.mouse_x - graph_last_x;
+        graph_pan_y += nav.mouse_y - graph_last_y;
+        graph_last_x = nav.mouse_x;
+        graph_last_y = nav.mouse_y;
+        nav.redraw = true;
+    }
 
     /* Dragging with the button down stretches the mark. The moving end
      * is also the caret, so letting go leaves one standing exactly at

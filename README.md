@@ -490,6 +490,23 @@ built binary.
   second run. The proof run computes 6 times 7 across the cable and
   hears 42 back, then sends a second recipe that loops forever and
   hears, honestly, that it ran out of time.
+* **The home has shelves.** A root where every program, page and
+  list lay on one level read like a drawer tipped out. Two lists
+  sort it: "programs" holds what runs -- the ten standard programs
+  live there -- and "system" holds the machine's own pages: the
+  time, the log, the settings, the activity. The person's material
+  stays on top, arrivals beside it. The sorting is the system's,
+  not the seed's: a graph restored from an older day is shelved the
+  same way on the way in, keeping every petname and every right,
+  and everything that used to find these pages -- the journal
+  click, the clock's wiring, the record replay -- walks the shelf
+  as a real path of references, not a shortcut.
+* **The map moves under the hand.** The graph view was fixed and
+  cut off whatever lay past the screen's edge. Now the wheel zooms
+  it around the pointer -- boxes shrink and grow, labels stand
+  aside when their boxes get too small to carry them -- and taking
+  hold of empty ground drags the whole map. Clicking a node still
+  walks to it; only the ground pans.
 * **Everything that holds more than it shows scrolls.** The mouse
   grew its wheel -- the driver knocks the IntelliMouse knock, and a
   device that knows it answers with a fourth byte -- and one scroll

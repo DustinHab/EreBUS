@@ -72,10 +72,10 @@ sleep 3
          1 0 dot 9 dot 9 dot 2 1 \
          ret p e e r spc shift-backslash spc \
          1 0 dot 9 dot 9 dot 2 0 spc 7 8 0 0 \
-         left \
+         left left \
          home m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
-         m0,100 m0,100 m0,100 m0,100 m0,100 m0,33 click \
+         m0,100 m0,100 m0,69 click \
          m0,22 click ret \
          right \
          w a i t ret \
@@ -89,7 +89,7 @@ sleep 3
     keys left \
          home m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
-         m0,100 m0,100 m0,100 m0,100 m0,100 m0,55 click \
+         m0,100 m0,100 m0,91 click \
          m0,22 click ret \
          right \
          w a i t ret \

@@ -77,7 +77,7 @@ sleep 3
     keys tab tab tab t h e m e ret \
          ret a d d r e s s spc shift-backslash spc \
          1 0 dot 9 dot 9 dot 2 1 \
-         left up up up up up up up up up up up up up up up up right \
+         left left up up up up up right \
          home m100,20 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m100,0 m100,0 m100,0 m95,0 click \
          m0,1 m0,1 m0,1 m0,1 m0,1 m0,1

@@ -65,21 +65,20 @@ sleep 3
          1 0 dot 9 dot 9 dot 2 1 \
          ret p e e r spc shift-backslash spc \
          1 0 dot 9 dot 9 dot 2 0 spc 7 8 0 0 \
-         left \
+         left left \
          home m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
-         m0,100 m0,100 m0,100 m0,100 m0,100 m0,33 click \
+         m0,100 m0,100 m0,69 click \
          m0,154 click ret \
          home m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
-         m0,100 m0,100 m0,100 m0,100 m0,100 m0,55 click \
+         m0,100 m0,100 m0,91 click \
          m0,100 m0,100 m0,100 m0,96 click ret \
          right \
          home m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m0,100 m0,37 click \
-         m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 \
-         m0,100 m0,2 click ret
+         m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,38 click ret
     sleep 45
     echo "screendump $BUILD/foreman-b.ppm"
     sleep 2

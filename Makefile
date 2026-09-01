@@ -383,11 +383,11 @@ look: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 # The clicks are counted in hundreds because a PS/2 mouse only reports
 # how far it moved and the monitor clamps a single report; see
 # tools/look.sh.
-AGENT_TO_PROGRAM := down down down down right home \
+AGENT_TO_PROGRAM := down down down down right right home \
                     $(shell for i in $$(seq 17); do printf 'm100,7 '; done)
 AGENT_KEYS := $(AGENT_TO_PROGRAM) click \
-              m0,100 m0,100 m0,100 m0,100 m0,73 click esc \
-              m-94,-100 m0,-100 m0,-100 m0,-100 m0,-100 m0,26 click \
+              m0,100 m0,100 m0,100 m0,100 m0,100 m0,2 click esc \
+              m-94,-100 m0,-100 m0,-100 m0,-100 m0,-100 m0,-3 click \
               m100,0 m100,0 m78,0 click
 
 agent: $(IMAGE) $(BUILD)/test-vars.fd
@@ -406,27 +406,25 @@ agent: $(IMAGE) $(BUILD)/test-vars.fd
 # read-only -- its own decision, enforced by the kernel -- and the agent
 # duly reads it and fails to change it. No step here involves the shell
 # doing the delegating; two programs did.
-# The coordinates track the root's slot layout: seed objects in 0-3,
-# the standard programs in 4-13 (foreman last), the time in 14, the
-# log in 15, the settings in 16, the activity in 17, the arrivals in
-# 18, so the note made here becomes slot 19. When the seed graph
-# changes, this changes. They also track the add palette: seven fixed
-# offers, then a header and the ten startable programs, then a header
-# and the carries -- when the palette gains a row, every carry click
-# below it moves by a row's 22 pixels, and a carry sitting after the
-# foreman's slot moves once more.
+# The coordinates track the root's shelved layout: seed objects in
+# 0-3, the "programs" list in 4 (the ten standard programs inside,
+# foreman last), the "system" list in 5 (the time, log, settings,
+# activity inside), the arrivals in 6 -- so the note made here
+# becomes slot 7 and home's add sits at y 269. They also track the
+# add palette: seven fixed offers, then a header and the ten
+# startable programs, then a header and the carries at add+440 --
+# when the palette or the carry list gains a row, the carry clicks
+# move by a row's 22 pixels.
 RELAY_HOME := home $(shell for i in $$(seq 17); do printf 'm100,0 '; done)
-RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,100 m0,100 m0,100 m0,33 click \
+RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,69 click \
               m0,22 click ret \
-              down down down down down down down down down down down \
-              down down down down down right \
+              right \
               p a s s spc i t left \
-              up up up up up up up up up up up up up up right \
+              up up up right down right \
               $(RELAY_HOME) m0,100 m0,15 click \
-              m0,100 m0,100 m0,100 m0,100 m0,100 m0,72 click ret \
+              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,60 click ret \
               $(RELAY_HOME) m0,100 m0,39 click \
-              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 \
-              m0,78 click ret
+              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,36 click ret
 
 relay: $(IMAGE) $(BUILD)/test-vars.fd
 	@rm -f $(STORE)

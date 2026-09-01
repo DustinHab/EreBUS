@@ -358,6 +358,117 @@ static const char lang_text[] =
     "without another click; \"again N\" in the first line\n"
     "hands it in anew every n seconds.\n";
 
+/* Finds a reference by petname and type, on the root or one list
+ * below it -- the one search the shelved graph needs everywhere. */
+static object *find_petnamed(object *root, const char *nm, type_id t,
+                             object **holder, u64 *slot)
+{
+    for (u64 i = 0; i < obj_slots(root); i++) {
+        object *s = obj_get_slot(root, i);
+        const char *n = obj_slot_name(root, i);
+        if (s && n && strcmp(n, nm) == 0 && obj_type(s) == t) {
+            if (holder) *holder = root;
+            if (slot) *slot = i;
+            return s;
+        }
+    }
+    for (u64 i = 0; i < obj_slots(root); i++) {
+        object *l = obj_get_slot(root, i);
+        if (!l || obj_type(l) != TYPE_LIST) continue;
+        for (u64 k = 0; k < obj_slots(l); k++) {
+            object *s = obj_get_slot(l, k);
+            const char *n = obj_slot_name(l, k);
+            if (s && n && strcmp(n, nm) == 0 && obj_type(s) == t) {
+                if (holder) *holder = l;
+                if (slot) *slot = k;
+                return s;
+            }
+        }
+    }
+    return NULL;
+}
+
+/* Appends into the first empty slot, growing when there is none. */
+static bool list_append(object *l, object *o, u32 rights, const char *nm)
+{
+    u64 n = obj_slots(l), at = n;
+    for (u64 i = 0; i < n; i++)
+        if (!obj_get_slot(l, i)) { at = i; break; }
+    if (at == n && !obj_grow_slots(l, n + 1)) return false;
+    obj_set_slot(l, at, o, rights);
+    obj_set_slot_name(l, at, nm);
+    return true;
+}
+
+/* The shelves. A home where every program, page and list lies on one
+ * level reads like a drawer tipped out; two lists sort it: "programs"
+ * holds what runs, "system" holds the machine's own pages -- the
+ * time, the log, the settings, the activity. The person's material
+ * stays on top. Old graphs are sorted the same way on the way in, so
+ * the structure is the system's, not only the fresh start's. */
+static void ensure_structure(object *root, object **progs_out,
+                             object **sys_out)
+{
+    object *progs = NULL, *sys = NULL;
+
+    for (u64 i = 0; i < obj_slots(root); i++) {
+        object *s = obj_get_slot(root, i);
+        const char *n = obj_slot_name(root, i);
+        if (!s || !n || obj_type(s) != TYPE_LIST) continue;
+        if (strcmp(n, "programs") == 0) progs = s;
+        if (strcmp(n, "system") == 0)   sys = s;
+    }
+
+    if (!progs) {
+        object *made = obj_create(TYPE_LIST, 0, 4);
+        if (made) {
+            obj_set_name(made, "programs");
+            if (list_append(root, made,
+                            CAP_READ | CAP_WRITE | CAP_GRANT, "programs"))
+                progs = made;
+            obj_release(made);
+        }
+    }
+    if (!sys) {
+        object *made = obj_create(TYPE_LIST, 0, 4);
+        if (made) {
+            obj_set_name(made, "system");
+            if (list_append(root, made,
+                            CAP_READ | CAP_WRITE | CAP_GRANT, "system"))
+                sys = made;
+            obj_release(made);
+        }
+    }
+
+    /* Sorting in: programs -- running or records -- go to their
+     * shelf, the machine's pages to theirs, each keeping its rights
+     * and its petname. Everything else stays where the person put
+     * it. */
+    for (u64 i = 0; i < obj_slots(root); i++) {
+        object *s = obj_get_slot(root, i);
+        if (!s || s == progs || s == sys) continue;
+        const char *nm = obj_slot_name(root, i);
+        u32 r = obj_slot_rights(root, i);
+
+        object *shelf = NULL;
+        if (progs && obj_type(s) == TYPE_PROGRAM) shelf = progs;
+        else if (sys && nm &&
+                 (strcmp(nm, "the time") == 0 || strcmp(nm, "log") == 0 ||
+                  strcmp(nm, "settings") == 0 ||
+                  strcmp(nm, "activity") == 0))
+            shelf = sys;
+        if (!shelf) continue;
+
+        if (list_append(shelf, s, r, nm)) {
+            obj_set_slot(root, i, NULL, 0);
+            obj_set_slot_name(root, i, NULL);
+        }
+    }
+
+    *progs_out = progs;
+    *sys_out = sys;
+}
+
 /* Finds the language page -- a reference named "the language" on the
  * root or one list below it -- or makes one, preferring to live in
  * the aside next to the other explanations. Then brings its words up
@@ -1148,15 +1259,32 @@ void kmain(eb_boot_info *bi)
         object *records[STANDARD_COUNT] = { NULL };
         bool placed[STANDARD_COUNT] = { false };
 
-        for (u64 i = 0; i < obj_slots(root); i++) {
+        /* The shelves come first, so records already sorted onto them
+         * -- and records still lying flat in an old graph, which the
+         * sorting moves -- are all found in the walk below. */
+        object *progs_shelf = NULL, *sys_shelf = NULL;
+        ensure_structure(root, &progs_shelf, &sys_shelf);
+
+        /* Everywhere a record can lie: the root, and each list on it. */
+        object *places[16];
+        u32 nplaces = 0;
+        places[nplaces++] = root;
+        for (u64 i = 0; i < obj_slots(root) && nplaces < 16; i++) {
             object *s = obj_get_slot(root, i);
-            if (!s || obj_type(s) != TYPE_PROGRAM || proc_is_running(s))
-                continue;
-            for (u32 k = 0; k < STANDARD_COUNT; k++)
-                if (standard_obj[k] && obj_name(s) &&
-                    strcmp(obj_name(s), standard[k].name) == 0)
-                    records[k] = s;
+            if (s && obj_type(s) == TYPE_LIST) places[nplaces++] = s;
         }
+
+        for (u32 pi = 0; pi < nplaces; pi++)
+            for (u64 i = 0; i < obj_slots(places[pi]); i++) {
+                object *s = obj_get_slot(places[pi], i);
+                if (!s || obj_type(s) != TYPE_PROGRAM ||
+                    proc_is_running(s))
+                    continue;
+                for (u32 k = 0; k < STANDARD_COUNT; k++)
+                    if (standard_obj[k] && obj_name(s) &&
+                        strcmp(obj_name(s), standard[k].name) == 0)
+                        records[k] = s;
+            }
 
         /* Replay. A reference from one record to another is re-pointed
          * at the other's successor: the courier knew the agent, so it
@@ -1189,17 +1317,19 @@ void kmain(eb_boot_info *bi)
 
         /* The successors take the records' places, petnames included;
          * unmatched records go; anything still unplaced gets a fresh
-         * slot with a plain name. Read and grant, never write: nobody
-         * edits a running program by typing into it. */
-        for (u64 i = 0; i < obj_slots(root); i++) {
-            object *s = obj_get_slot(root, i);
+         * slot on the programs shelf. Read and grant, never write:
+         * nobody edits a running program by typing into it. */
+        for (u32 pi = 0; pi < nplaces; pi++) {
+            object *place = places[pi];
+            for (u64 i = 0; i < obj_slots(place); i++) {
+            object *s = obj_get_slot(place, i);
             if (!s || obj_type(s) != TYPE_PROGRAM || proc_is_running(s))
                 continue;
             bool matched = false;
             for (u32 k = 0; k < STANDARD_COUNT; k++) {
                 if (s != records[k] || !standard_obj[k]) continue;
-                obj_set_slot(root, i, standard_obj[k],
-                             obj_slot_rights(root, i));
+                obj_set_slot(place, i, standard_obj[k],
+                             obj_slot_rights(place, i));
                 placed[k] = true;
                 matched = true;
             }
@@ -1240,27 +1370,24 @@ void kmain(eb_boot_info *bi)
                         obj_set_slot_name(fresh, fat, jn);
                         proc_grant(fresh, t, rr);
                     }
-                    obj_set_slot(root, i, fresh, obj_slot_rights(root, i));
+                    obj_set_slot(place, i, fresh,
+                                 obj_slot_rights(place, i));
                     matched = true;
                 }
             }
 
             if (!matched) {
-                obj_set_slot(root, i, NULL, 0);
-                obj_set_slot_name(root, i, NULL);
+                obj_set_slot(place, i, NULL, 0);
+                obj_set_slot_name(place, i, NULL);
+            }
             }
         }
 
         for (u32 k = 0; k < STANDARD_COUNT; k++) {
             if (!standard_obj[k] || placed[k]) continue;
-
-            u64 n = obj_slots(root), spot = n;
-            for (u64 i = 0; i < n; i++)
-                if (!obj_get_slot(root, i)) { spot = i; break; }
-            if (spot == n && !obj_grow_slots(root, n + 1)) continue;
-
-            obj_set_slot(root, spot, standard_obj[k], CAP_READ | CAP_GRANT);
-            obj_set_slot_name(root, spot, standard[k].petname);
+            object *shelf = progs_shelf ? progs_shelf : root;
+            list_append(shelf, standard_obj[k], CAP_READ | CAP_GRANT,
+                        standard[k].petname);
         }
 
         /* Out of the box, the clock has somewhere to write: a fresh
@@ -1283,13 +1410,8 @@ void kmain(eb_boot_info *bi)
                     obj_set_name(face, "the time");
                     obj_set_fleeting(face, true);
 
-                    u64 n = obj_slots(root), spot = n;
-                    for (u64 i = 0; i < n; i++)
-                        if (!obj_get_slot(root, i)) { spot = i; break; }
-                    if (spot < n || obj_grow_slots(root, n + 1)) {
-                        obj_set_slot(root, spot, face, CAP_READ);
-                        obj_set_slot_name(root, spot, "the time");
-                    }
+                    list_append(sys_shelf ? sys_shelf : root, face,
+                                CAP_READ, "the time");
 
                     obj_set_slot(clock_obj, 0, face,
                                  CAP_READ | CAP_WRITE);
@@ -1305,95 +1427,54 @@ void kmain(eb_boot_info *bi)
          * into it rather than starting a second history. The reference
          * is read-only on purpose: history can be read by anyone who
          * holds it and rewritten by nobody. */
-        for (u64 i = 0; i < obj_slots(root); i++) {
-            object *s = obj_get_slot(root, i);
-            const char *nm = obj_slot_name(root, i);
-            if (s && nm && strcmp(nm, "log") == 0 &&
-                obj_type(s) == TYPE_TEXT) {
-                journal_adopt(s);
-                break;
-            }
+        {
+            object *j = find_petnamed(root, "log", TYPE_TEXT,
+                                      NULL, NULL);
+            if (j) journal_adopt(j);
         }
-        if (!journal_object() && journal_create()) {
-            u64 n = obj_slots(root), at = n;
-            for (u64 i = 0; i < n; i++)
-                if (!obj_get_slot(root, i)) { at = i; break; }
-            if (at < n || obj_grow_slots(root, n + 1)) {
-                obj_set_slot(root, at, journal_object(), CAP_READ);
-                obj_set_slot_name(root, at, "log");
-            }
-        }
+        if (!journal_object() && journal_create())
+            list_append(sys_shelf ? sys_shelf : root, journal_object(),
+                        CAP_READ, "log");
+
         /* The settings, found the same way as the journal or made
          * fresh. The reference the person holds is read AND write: how
          * the system is set is theirs to say, by writing sentences. */
-        for (u64 i = 0; i < obj_slots(root); i++) {
-            object *s = obj_get_slot(root, i);
-            const char *nm = obj_slot_name(root, i);
-            if (s && nm && strcmp(nm, "settings") == 0 &&
-                obj_type(s) == TYPE_TEXT) {
-                settings_adopt(s);
-                break;
-            }
+        {
+            object *s = find_petnamed(root, "settings", TYPE_TEXT,
+                                      NULL, NULL);
+            if (s) settings_adopt(s);
         }
-        if (!settings_object() && settings_create()) {
-            u64 n = obj_slots(root), at = n;
-            for (u64 i = 0; i < n; i++)
-                if (!obj_get_slot(root, i)) { at = i; break; }
-            if (at < n || obj_grow_slots(root, n + 1)) {
-                obj_set_slot(root, at, settings_object(),
-                             CAP_READ | CAP_WRITE);
-                obj_set_slot_name(root, at, "settings");
-            }
-        }
+        if (!settings_object() && settings_create())
+            list_append(sys_shelf ? sys_shelf : root, settings_object(),
+                        CAP_READ | CAP_WRITE, "settings");
         settings_apply();
 
         /* The activity table: what the machine is doing, rewritten
          * once a second by its own thread. Read-only for the person --
          * the machine reports, nobody edits the report. */
-        for (u64 i = 0; i < obj_slots(root); i++) {
-            object *s = obj_get_slot(root, i);
-            const char *nm = obj_slot_name(root, i);
-            if (s && nm && strcmp(nm, "activity") == 0 &&
-                obj_type(s) == TYPE_TEXT) {
-                activity_adopt(s);
-                break;
-            }
+        {
+            object *a = find_petnamed(root, "activity", TYPE_TEXT,
+                                      NULL, NULL);
+            if (a) activity_adopt(a);
         }
-        if (!activity_object() && activity_create()) {
-            u64 n = obj_slots(root), at = n;
-            for (u64 i = 0; i < n; i++)
-                if (!obj_get_slot(root, i)) { at = i; break; }
-            if (at < n || obj_grow_slots(root, n + 1)) {
-                obj_set_slot(root, at, activity_object(), CAP_READ);
-                obj_set_slot_name(root, at, "activity");
-            }
-        }
+        if (!activity_object() && activity_create())
+            list_append(sys_shelf ? sys_shelf : root, activity_object(),
+                        CAP_READ, "activity");
 
         /* Where the pipe lays what other machines send: a plain list,
          * found again by its name or made fresh, held read-and-write
          * -- what arrived is the person's to keep, rename, or throw
          * out, and the kernel only ever appends. */
         {
-            object *arr = NULL;
-            for (u64 i = 0; i < obj_slots(root); i++) {
-                object *s = obj_get_slot(root, i);
-                const char *nm = obj_slot_name(root, i);
-                if (s && nm && strcmp(nm, "arrivals") == 0 &&
-                    obj_type(s) == TYPE_LIST) { arr = s; break; }
-            }
+            object *arr = find_petnamed(root, "arrivals", TYPE_LIST,
+                                        NULL, NULL);
             if (!arr) {
                 object *made = obj_create(TYPE_LIST, 0, 4);
                 if (made) {
                     obj_set_name(made, "arrivals");
-                    u64 n = obj_slots(root), at = n;
-                    for (u64 i = 0; i < n; i++)
-                        if (!obj_get_slot(root, i)) { at = i; break; }
-                    if (at < n || obj_grow_slots(root, n + 1)) {
-                        obj_set_slot(root, at, made,
-                                     CAP_READ | CAP_WRITE);
-                        obj_set_slot_name(root, at, "arrivals");
+                    if (list_append(root, made, CAP_READ | CAP_WRITE,
+                                    "arrivals"))
                         arr = made;
-                    }
                     obj_release(made);
                 }
             }
@@ -1402,12 +1483,10 @@ void kmain(eb_boot_info *bi)
 
         /* A restored clock face is the same heartbeat it always was;
          * the mark does not ride the snapshot, so it is set anew. */
-        for (u64 i = 0; i < obj_slots(root); i++) {
-            object *s = obj_get_slot(root, i);
-            const char *nm = obj_slot_name(root, i);
-            if (s && nm && strcmp(nm, "the time") == 0 &&
-                obj_type(s) == TYPE_TEXT)
-                obj_set_fleeting(s, true);
+        {
+            object *face = find_petnamed(root, "the time", TYPE_TEXT,
+                                         NULL, NULL);
+            if (face) obj_set_fleeting(face, true);
         }
 
         ensure_language(root);
