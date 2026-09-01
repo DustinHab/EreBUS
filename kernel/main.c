@@ -26,6 +26,7 @@
 #include <eb/proc.h>
 #include <eb/journal.h>
 #include <eb/settings.h>
+#include <eb/fat.h>
 #include <eb/activity.h>
 #include <eb/standard.h>
 #include <eb/net.h>
@@ -560,6 +561,12 @@ static void activity_thread(void *arg)
         while (time_ns() - since < 1000000000ULL) sched_yield();
     }
 }
+
+/* The exchange disk's list, when a FAT disk is attached: where its
+ * files landed as objects, and where objects lie to be written out. */
+static object *disk_list;
+
+object *system_disk(void) { return disk_list; }
 
 /* The list this machine serves to the local net, when the person has
  * made one: a list named "the served" on home or one shelf below.
@@ -1518,6 +1525,29 @@ void kmain(eb_boot_info *bi)
             object *face = find_petnamed(root, "the time", TYPE_TEXT,
                                          NULL, NULL);
             if (face) obj_set_fleeting(face, true);
+        }
+
+        /* The exchange disk: when a FAT disk stands beside the store,
+         * its files come in as objects on a list of their own, laid
+         * on the system shelf. Writing back stays a deliberate act,
+         * a word on that list. */
+        if (blk_aux_present() && fat_mount()) {
+            object *dl = find_petnamed(root, "the disk", TYPE_LIST,
+                                       NULL, NULL);
+            if (!dl) {
+                object *made = obj_create(TYPE_LIST, 0, 4);
+                if (made) {
+                    obj_set_name(made, "the disk");
+                    if (list_append(sys_shelf ? sys_shelf : root, made,
+                                    CAP_READ | CAP_WRITE, "the disk"))
+                        dl = made;
+                    obj_release(made);
+                }
+            }
+            if (dl) {
+                disk_list = dl;
+                fat_take_in(dl);
+            }
         }
 
         ensure_language(root);

@@ -38,4 +38,7 @@ void system_off(void);
  * The reference is the whole switch. */
 object *system_served(void);
 
+/* The exchange disk's list, or NULL when no FAT disk is attached. */
+object *system_disk(void);
+
 #endif /* EB_STANDARD_H */

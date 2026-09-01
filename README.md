@@ -547,6 +547,39 @@ built binary.
   measurement, a sum, a check, recomputed across the machines on
   the wire while nobody watches. The foreman holds the wire and
   what it is given, and nothing else.
+* **The everyday grew in.** Letting go of a reference steps it into
+  a bin on home first, petname and rights along; inside the bin the
+  letting go is final. "turn off" at the footer's far right saves
+  the graph and puts the machine to sleep at the ports firmware
+  listens on. The clock sets itself from the net soon after the
+  wires are up and hourly after, utc under the settings' own
+  offset. A running program can be ended by whoever may give to it:
+  the thread is condemned and finishes at its next step into the
+  kernel, through the same exit and reaping a voluntary end takes
+  -- the honest note being that a program which never asks the
+  kernel for anything cannot be caught this way, and none shipped
+  is like that.
+* **Bundles.** "pack" folds a readable list -- texts, bytes,
+  pictures, lists in lists, four levels, loops walked once -- into
+  one BYTES object sized for the pipe; "unpack" builds the list
+  back. A folder of things crosses machines as one send.
+* **The keys speak german when asked.** "keys | german" turns the
+  same keyboard into qwertz with umlauts, sharp s, the right alt's
+  third meanings and the extra key beside the left shift; the font
+  carried the glyphs all along. The seed stays english.
+* **The split.** A fifth way of looking: two independent walks side
+  by side, each with its own path, selection and place in its text.
+  The left one writes -- caret, chips and header belong to it; the
+  right one reads and walks. The same object open in both is one
+  object seen twice, never a copy.
+* **The exchange disk.** A FAT32 disk beside the store is the
+  bridge to the rest of the world: at boot its root directory's
+  files come in as objects on "the disk" under system -- texts when
+  they read like text -- and "write out" on that list lays new
+  entries down as files under plain 8.3 names. Read and write both
+  proven against mtools from outside. Honest limits: FAT32 only,
+  the root directory only, 64 KiB a file, long names read but not
+  written.
 * **What a result is worth.** An answer is a claim by the machine
   that answered, nothing more. Nothing here proves the arithmetic
   was actually done: there are no attestations, no redundant runs,

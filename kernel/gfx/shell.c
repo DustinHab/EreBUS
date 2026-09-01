@@ -15,6 +15,7 @@
 #include <eb/net.h>
 #include <eb/pipe.h>
 #include <eb/bundle.h>
+#include <eb/fat.h>
 #include <eb/html.h>
 #include <eb/string.h>
 #include <eb/time.h>
@@ -203,7 +204,9 @@ typedef enum {
     HOT_PACK,        /* fold the focused list into one plain thing */
     HOT_UNPACK,      /* build the list back out of a bundle */
     HOT_P2REF,       /* the second pane: follow a reference */
-    HOT_P2TRAIL      /* the second pane: go back to a step */
+    HOT_P2TRAIL,     /* the second pane: go back to a step */
+    HOT_FATIN,       /* read the exchange disk's files in again */
+    HOT_FATOUT       /* write the disk list's new things out */
 } hot_kind;
 
 typedef struct {
@@ -2847,6 +2850,26 @@ static void draw_all(void)
                     lit ? C_TEXT : C_ACCENT);
             hot_add(chip_x - 4, 11, 6 * GLYPH_W + 8, ROW, HOT_UNPACK, 0);
         }
+
+        /* The exchange disk's list carries its two acts: reading the
+         * disk in again, and writing the new things out. */
+        if (focus() == system_disk() && focus() != NULL &&
+            nav.at_generation == 0) {
+            if (ft == TYPE_LIST) chip_x += 5 * GLYPH_W;   /* past pack */
+            bool lit = is_hovered(HOT_FATIN, 0);
+            if (lit) fb_rect(chip_x - 4, 11, 7 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(chip_x, 14, sw - PAD, "take in",
+                    lit ? C_TEXT : C_ACCENT);
+            hot_add(chip_x - 4, 11, 7 * GLYPH_W + 8, ROW, HOT_FATIN, 0);
+            chip_x += 9 * GLYPH_W;
+
+            bool lit2 = is_hovered(HOT_FATOUT, 0);
+            if (lit2) fb_rect(chip_x - 4, 11, 9 * GLYPH_W + 8, ROW,
+                              C_EDGE);
+            text_at(chip_x, 14, sw - PAD, "write out",
+                    lit2 ? C_TEXT : C_ACCENT);
+            hot_add(chip_x - 4, 11, 9 * GLYPH_W + 8, ROW, HOT_FATOUT, 0);
+        }
     }
 
     /* Marked letters, and letters being carried. The mark offers
@@ -4093,6 +4116,25 @@ static void act_on(const hot_region *r)
             proc_end(focus())) {
             journal_says("system", "a program was ended by hand");
             nav.changes++;
+        }
+        nav.redraw = true;
+        break;
+
+    case HOT_FATIN:
+        if (focus() == system_disk() && system_disk()) {
+            u32 got = fat_take_in(system_disk());
+            journal_says("system", got ? "the disk's files came in"
+                                       : "nothing new on the disk");
+            nav.changes++;
+        }
+        nav.redraw = true;
+        break;
+
+    case HOT_FATOUT:
+        if (focus() == system_disk() && system_disk()) {
+            u32 wrote = fat_write_out(system_disk());
+            journal_says("system", wrote ? "written out to the disk"
+                                         : "nothing new to write out");
         }
         nav.redraw = true;
         break;

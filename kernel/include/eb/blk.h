@@ -26,6 +26,13 @@ u32  blk_disk_count(void);  /* how many disks were found */
 bool blk_read(u64 lba, u32 count, void *dst);
 bool blk_write(u64 lba, u32 count, const void *src);
 
+/* The exchange disk: the data disk after the store, when one is
+ * attached. Files cross between worlds on it. */
+bool blk_aux_present(void);
+u64  blk_aux_sectors(void);
+bool blk_aux_read(u64 lba, u32 count, void *dst);
+bool blk_aux_write(u64 lba, u32 count, const void *src);
+
 /* Writes a pattern, reads it back, and puts the sector back as it was.
  * Runs on a sector well past anything we use. */
 bool blk_selftest(void);

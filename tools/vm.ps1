@@ -40,6 +40,18 @@ if (-not (Test-Path $store)) {
 # entries in it boot into nothing.
 Copy-Item $vars (Join-Path $build "win-vars.fd") -Force
 
+# The exchange disk, when one lies next to the project: a FAT32 image
+# whose files appear inside the system as "the disk". Make one with
+# mkfs.vfat (or format a stick image) and drop it here.
+$exchange = Join-Path $root "exchange.img"
+$xchgArgs = @()
+if (Test-Path $exchange) {
+    $xchgArgs = @(
+        "-drive", "id=xchg,file=$exchange,format=raw,if=none",
+        "-device", "ide-hd,drive=xchg,bus=ide.2"
+    )
+}
+
 & $qemu `
     -machine q35 -m 512M `
     -drive "if=pflash,format=raw,readonly=on,file=$code" `
@@ -48,7 +60,8 @@ Copy-Item $vars (Join-Path $build "win-vars.fd") -Force
     -vga none -device "VGA,edid=on,xres=1280,yres=800" `
     -drive "id=store,file=$store,format=raw,if=none" `
     -device "ide-hd,drive=store,bus=ide.1" `
+    @xchgArgs `
     -device "e1000,netdev=n0" `
-    -netdev "user,id=n0,hostfwd=udp::7801-:7800" `
+    -netdev "user,id=n0,hostfwd=udp::7801-:7800,hostfwd=tcp::8080-:80" `
     -name "Erebus" `
     -serial "file:$(Join-Path $build 'vm-serial.log')"

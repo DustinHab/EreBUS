@@ -94,19 +94,26 @@ _Static_assert(sizeof(fis_h2d) == 20, "host to device FIS must be 20 bytes");
 #define STAGE_SECTORS 128                       /* 64 KiB at a time */
 #define STAGE_BYTES   (STAGE_SECTORS * BLK_SECTOR_SIZE)
 
+/* One attached disk: its port and its own command machinery. Two of
+ * these exist -- the store the graph lives on, and, when a second
+ * data disk is attached, the exchange disk files cross on. */
+typedef struct {
+    hba_port   *port;
+    u32         index;
+    bool        ready;
+    u64         sectors;
+    cmd_header *cmd_list;
+    void       *fis_area;
+    cmd_table  *table;
+    u8         *stage;
+    phys_addr   clp, fp, tp, sp;
+} ahci_disk;
+
 static hba_mem  *hba;
-static hba_port *port;
+static ahci_disk store_d, aux_d;
 static bool present;
-static u64  sector_count;
-static u32  port_index;
 static u32  disk_count;
 static char model[41];
-
-static cmd_header *cmd_list;      /* direct-map pointer */
-static void       *fis_area;
-static cmd_table  *table;
-static u8         *stage;
-static phys_addr   cmd_list_phys, fis_phys, table_phys, stage_phys;
 
 /* --- helpers -------------------------------------------------------- */
 
@@ -119,58 +126,57 @@ static bool wait_clear(volatile u32 *reg, u32 mask, u32 spins)
     return false;
 }
 
-static void port_stop(void)
+static void port_stop(ahci_disk *d)
 {
-    port->cmd &= ~PORT_CMD_ST;
-    port->cmd &= ~PORT_CMD_FRE;
-    wait_clear(&port->cmd, PORT_CMD_CR | PORT_CMD_FR, 1000);
+    d->port->cmd &= ~PORT_CMD_ST;
+    d->port->cmd &= ~PORT_CMD_FRE;
+    wait_clear(&d->port->cmd, PORT_CMD_CR | PORT_CMD_FR, 1000);
 }
 
-static void port_start(void)
+static void port_start(ahci_disk *d)
 {
-    wait_clear(&port->cmd, PORT_CMD_CR, 1000);
-    port->cmd |= PORT_CMD_FRE;
-    port->cmd |= PORT_CMD_ST;
+    wait_clear(&d->port->cmd, PORT_CMD_CR, 1000);
+    d->port->cmd |= PORT_CMD_FRE;
+    d->port->cmd |= PORT_CMD_ST;
 }
 
 /* Builds one command and waits for it. Returns false on any error the
  * controller reports, rather than leaving the caller to guess from the
  * data. */
-static bool run_command(u8 ata_command, u64 lba, u32 sectors,
-                        phys_addr buffer, u32 bytes, bool writing)
+static bool run_command(ahci_disk *d, u8 ata_command, u64 lba,
+                        u32 sectors, phys_addr buffer, u32 bytes,
+                        bool writing)
 {
-    /* Deliberately no check on present here: the very first command
+    /* Deliberately no check on ready here: the very first command
      * this issues is the IDENTIFY that decides whether a disk is
-     * present at all. Guarding against a flag that only gets set
-     * afterwards makes the driver refuse to start itself, which is
-     * exactly what it did. The public entry points check instead. */
-    if (!port) return false;
+     * present at all. The public entry points check instead. */
+    if (!d->port) return false;
 
     /* A busy port means the last command has not finished. Nothing good
      * comes of issuing into that. */
-    if (!wait_clear(&port->tfd, TFD_BSY | TFD_DRQ, 1000)) return false;
+    if (!wait_clear(&d->port->tfd, TFD_BSY | TFD_DRQ, 1000)) return false;
 
-    port->is = (u32)-1;             /* clear stale status */
-    port->serr = port->serr;
+    d->port->is = (u32)-1;          /* clear stale status */
+    d->port->serr = d->port->serr;
 
-    cmd_header *h = &cmd_list[0];
+    cmd_header *h = &d->cmd_list[0];
     h->flags  = (u8)((sizeof(fis_h2d) / 4) & 0x1F);
     if (writing) h->flags |= (1u << 6);
     h->flags2 = 0;
     h->prdtl  = bytes ? 1 : 0;
     h->prdbc  = 0;
-    h->ctba   = (u32)table_phys;
-    h->ctbau  = (u32)(table_phys >> 32);
+    h->ctba   = (u32)d->tp;
+    h->ctbau  = (u32)(d->tp >> 32);
 
-    for (u32 i = 0; i < sizeof(cmd_table); i++) ((u8 *)table)[i] = 0;
+    for (u32 i = 0; i < sizeof(cmd_table); i++) ((u8 *)d->table)[i] = 0;
 
     if (bytes) {
-        table->prdt[0].dba  = (u32)buffer;
-        table->prdt[0].dbau = (u32)(buffer >> 32);
-        table->prdt[0].dbc  = (bytes - 1) & 0x3FFFFF;
+        d->table->prdt[0].dba  = (u32)buffer;
+        d->table->prdt[0].dbau = (u32)(buffer >> 32);
+        d->table->prdt[0].dbc  = (bytes - 1) & 0x3FFFFF;
     }
 
-    fis_h2d *fis = (fis_h2d *)table->cfis;
+    fis_h2d *fis = (fis_h2d *)d->table->cfis;
     fis->type = 0x27;
     fis->pm_and_c = 0x80;
     fis->command = ata_command;
@@ -184,64 +190,89 @@ static bool run_command(u8 ata_command, u64 lba, u32 sectors,
     fis->count_low  = (u8)(sectors);
     fis->count_high = (u8)(sectors >> 8);
 
-    port->ci = 1;                   /* slot zero, and we only use slot zero */
+    d->port->ci = 1;                /* slot zero, and we only use slot zero */
 
     for (u32 i = 0; i < 1000000; i++) {
-        if ((port->ci & 1) == 0) break;
-        if (port->is & (1u << 30)) return false;    /* task file error */
+        if ((d->port->ci & 1) == 0) break;
+        if (d->port->is & (1u << 30)) return false; /* task file error */
     }
-    if (port->ci & 1) return false;                 /* never finished */
-    if (port->tfd & TFD_ERR) return false;
+    if (d->port->ci & 1) return false;              /* never finished */
+    if (d->port->tfd & TFD_ERR) return false;
 
     return true;
 }
 
 /* --- setting up ------------------------------------------------------ */
 
-static bool claim_memory(void)
+static bool claim_memory(ahci_disk *d)
 {
     /* The command list wants 1 KiB aligned to 1 KiB and the received
      * FIS area 256 bytes aligned to 256, so one page holds both with
      * room to spare. */
     phys_addr page = pmm_alloc();
     if (page == PMM_NO_FRAME) return false;
-    cmd_list_phys = page;
-    fis_phys = page + 1024;
-    cmd_list = (cmd_header *)phys_to_virt(cmd_list_phys);
-    fis_area = phys_to_virt(fis_phys);
+    d->clp = page;
+    d->fp = page + 1024;
+    d->cmd_list = (cmd_header *)phys_to_virt(d->clp);
+    d->fis_area = phys_to_virt(d->fp);
 
-    table_phys = pmm_alloc();
-    if (table_phys == PMM_NO_FRAME) return false;
-    table = (cmd_table *)phys_to_virt(table_phys);
+    d->tp = pmm_alloc();
+    if (d->tp == PMM_NO_FRAME) return false;
+    d->table = (cmd_table *)phys_to_virt(d->tp);
 
     /* The staging area has to be contiguous in physical memory: the
      * controller is given an address and a length and knows nothing
      * about page tables. */
-    stage_phys = pmm_alloc_contig(STAGE_BYTES / PAGE_SIZE);
-    if (stage_phys == PMM_NO_FRAME) return false;
-    stage = (u8 *)phys_to_virt(stage_phys);
+    d->sp = pmm_alloc_contig(STAGE_BYTES / PAGE_SIZE);
+    if (d->sp == PMM_NO_FRAME) return false;
+    d->stage = (u8 *)phys_to_virt(d->sp);
 
     return true;
 }
 
-static void read_identity(const u16 *id)
+static u64 identity_sectors(const u16 *id)
 {
-    /* The model name is twenty words with the bytes the other way
-     * round, and padded with spaces rather than terminated. */
-    for (u32 i = 0; i < 20; i++) {
-        model[i * 2]     = (char)(id[27 + i] >> 8);
-        model[i * 2 + 1] = (char)(id[27 + i] & 0xFF);
-    }
-    model[40] = 0;
-    for (i32 i = 39; i >= 0 && model[i] == ' '; i--) model[i] = 0;
+    u64 s = (u64)id[100] | ((u64)id[101] << 16) |
+            ((u64)id[102] << 32) | ((u64)id[103] << 48);
+    if (s == 0) s = (u64)id[60] | ((u64)id[61] << 16);
+    return s;
+}
 
-    /* Words 100 to 103 hold the 48-bit sector count. Word 60/61 is the
-     * older 28-bit figure, used only if the drive is too old to have
-     * the newer one. */
-    sector_count = (u64)id[100] | ((u64)id[101] << 16) |
-                   ((u64)id[102] << 32) | ((u64)id[103] << 48);
-    if (sector_count == 0)
-        sector_count = (u64)id[60] | ((u64)id[61] << 16);
+/* Brings one port up and asks the disk who it is. */
+static bool disk_up(ahci_disk *d, hba_port *p, u32 index, bool keep_model)
+{
+    d->port = p;
+    d->index = index;
+    if (!claim_memory(d)) return false;
+
+    port_stop(d);
+    p->clb  = (u32)d->clp;
+    p->clbu = (u32)(d->clp >> 32);
+    p->fb   = (u32)d->fp;
+    p->fbu  = (u32)(d->fp >> 32);
+    for (u32 i = 0; i < 1024; i++) ((u8 *)d->cmd_list)[i] = 0;
+    for (u32 i = 0; i < 256; i++) ((u8 *)d->fis_area)[i] = 0;
+    port_start(d);
+
+    if (!run_command(d, ATA_IDENTIFY, 0, 0, d->sp, 512, false))
+        return false;
+
+    const u16 *id = (const u16 *)d->stage;
+    d->sectors = identity_sectors(id);
+
+    if (keep_model) {
+        /* The model name is twenty words with the bytes the other way
+         * round, and padded with spaces rather than terminated. */
+        for (u32 i = 0; i < 20; i++) {
+            model[i * 2]     = (char)(id[27 + i] >> 8);
+            model[i * 2 + 1] = (char)(id[27 + i] & 0xFF);
+        }
+        model[40] = 0;
+        for (i32 i = 39; i >= 0 && model[i] == ' '; i--) model[i] = 0;
+    }
+
+    d->ready = true;
+    return true;
 }
 
 bool blk_init(void)
@@ -266,19 +297,15 @@ bool blk_init(void)
 
     hba->ghc |= (1u << 31);          /* AHCI mode rather than legacy IDE */
 
-    if (!claim_memory()) { kprintf("blk:  out of memory for the queues\n"); return false; }
-
-    /* Take the highest-numbered port with a SATA disk on it, not the
-     * first.
-     *
-     * Port zero is where the machine booted from, and overwriting the
-     * disk one is running off is a mistake that only announces itself
-     * on the next start. Anything attached after it is a disk somebody
-     * added deliberately, which is what a store is. With one disk this
-     * picks that one, and the caller decides whether writing to it is
+    /* Sort the disks by role. Port zero is where the machine booted
+     * from; the first port after it is the store the graph lives on;
+     * the port after that, when one is there, is the exchange disk
+     * files cross on. With only one disk at all, that one is the
+     * store and the caller decides whether writing to it is
      * sensible. */
     u32 implemented = hba->pi;
-    u32 chosen = 0;
+    i32 found[32];
+    u32 nfound = 0;
     for (u32 i = 0; i < 32; i++) {
         if (!(implemented & (1u << i))) continue;
 
@@ -288,53 +315,63 @@ bool blk_init(void)
         if (det != 3 || ipm != 1) continue;      /* nothing, or asleep */
         if (p->sig != 0x00000101) continue;      /* not a plain disk */
 
-        port = p;
-        chosen = i;
+        found[nfound++] = (i32)i;
         disk_count++;
     }
-    if (!port) { kprintf("blk:  controller present but no disk attached\n"); return false; }
-    port_index = chosen;
-
-    port_stop();
-    port->clb  = (u32)cmd_list_phys;
-    port->clbu = (u32)(cmd_list_phys >> 32);
-    port->fb   = (u32)fis_phys;
-    port->fbu  = (u32)(fis_phys >> 32);
-    for (u32 i = 0; i < 1024; i++) ((u8 *)cmd_list)[i] = 0;
-    for (u32 i = 0; i < 256; i++) ((u8 *)fis_area)[i] = 0;
-    port_start();
-
-    if (!run_command(ATA_IDENTIFY, 0, 0, stage_phys, 512, false)) {
-        kprintf("blk:  the disk did not answer IDENTIFY\n");
+    if (nfound == 0) {
+        kprintf("blk:  controller present but no disk attached\n");
         return false;
     }
 
-    read_identity((const u16 *)stage);
+    i32 store_at = -1, aux_at = -1;
+    for (u32 i = 0; i < nfound; i++) {
+        if (found[i] == 0) continue;
+        if (store_at < 0)     store_at = found[i];
+        else if (aux_at < 0)  aux_at = found[i];
+    }
+    if (store_at < 0) store_at = found[0];
+
+    if (!disk_up(&store_d, &hba->ports[store_at], (u32)store_at, true)) {
+        kprintf("blk:  the disk did not answer IDENTIFY\n");
+        return false;
+    }
     present = true;
+
+    if (aux_at >= 0) {
+        if (disk_up(&aux_d, &hba->ports[aux_at], (u32)aux_at, false))
+            kprintf("blk:  an exchange disk on port %d, %llu sectors\n",
+                    aux_at, aux_d.sectors);
+        else
+            kprintf("blk:  the exchange disk did not answer\n");
+    }
     return true;
 }
 
 bool blk_present(void)      { return present; }
-u64  blk_sectors(void)      { return sector_count; }
+u64  blk_sectors(void)      { return store_d.sectors; }
 const char *blk_model(void) { return present ? model : "none"; }
-u32  blk_port(void)         { return port_index; }
+u32  blk_port(void)         { return store_d.index; }
 u32  blk_disk_count(void)   { return disk_count; }
+
+bool blk_aux_present(void)  { return aux_d.ready; }
+u64  blk_aux_sectors(void)  { return aux_d.sectors; }
 
 /* --- reading and writing --------------------------------------------- */
 
-bool blk_read(u64 lba, u32 count, void *dst)
+static bool disk_read(ahci_disk *d, u64 lba, u32 count, void *dst)
 {
-    if (!present || count == 0) return false;
+    if (!d->ready || count == 0) return false;
 
     u8 *out = (u8 *)dst;
     while (count > 0) {
         u32 chunk = count > STAGE_SECTORS ? STAGE_SECTORS : count;
         u32 bytes = chunk * BLK_SECTOR_SIZE;
 
-        if (!run_command(ATA_READ_DMA, lba, chunk, stage_phys, bytes, false))
+        if (!run_command(d, ATA_READ_DMA, lba, chunk, d->sp, bytes,
+                         false))
             return false;
 
-        for (u32 i = 0; i < bytes; i++) out[i] = stage[i];
+        for (u32 i = 0; i < bytes; i++) out[i] = d->stage[i];
 
         out += bytes;
         lba += chunk;
@@ -343,18 +380,19 @@ bool blk_read(u64 lba, u32 count, void *dst)
     return true;
 }
 
-bool blk_write(u64 lba, u32 count, const void *src)
+static bool disk_write(ahci_disk *d, u64 lba, u32 count, const void *src)
 {
-    if (!present || count == 0) return false;
+    if (!d->ready || count == 0) return false;
 
     const u8 *in = (const u8 *)src;
     while (count > 0) {
         u32 chunk = count > STAGE_SECTORS ? STAGE_SECTORS : count;
         u32 bytes = chunk * BLK_SECTOR_SIZE;
 
-        for (u32 i = 0; i < bytes; i++) stage[i] = in[i];
+        for (u32 i = 0; i < bytes; i++) d->stage[i] = in[i];
 
-        if (!run_command(ATA_WRITE_DMA, lba, chunk, stage_phys, bytes, true))
+        if (!run_command(d, ATA_WRITE_DMA, lba, chunk, d->sp, bytes,
+                         true))
             return false;
 
         in += bytes;
@@ -365,14 +403,34 @@ bool blk_write(u64 lba, u32 count, const void *src)
     /* Ask the drive to actually commit rather than hold it in its own
      * cache. A snapshot that is only in a disk's memory is not a
      * snapshot. */
-    return run_command(ATA_FLUSH, 0, 0, 0, 0, false);
+    return run_command(d, ATA_FLUSH, 0, 0, 0, 0, false);
+}
+
+bool blk_read(u64 lba, u32 count, void *dst)
+{
+    return present && disk_read(&store_d, lba, count, dst);
+}
+
+bool blk_write(u64 lba, u32 count, const void *src)
+{
+    return present && disk_write(&store_d, lba, count, src);
+}
+
+bool blk_aux_read(u64 lba, u32 count, void *dst)
+{
+    return disk_read(&aux_d, lba, count, dst);
+}
+
+bool blk_aux_write(u64 lba, u32 count, const void *src)
+{
+    return disk_write(&aux_d, lba, count, src);
 }
 
 /* --- self test -------------------------------------------------------- */
 
 bool blk_selftest(void)
 {
-    if (!present || sector_count < 4096) return false;
+    if (!present || store_d.sectors < 4096) return false;
 
     /* Well away from anything we keep, and restored afterwards, so a
      * test run leaves the disk exactly as it found it. */
