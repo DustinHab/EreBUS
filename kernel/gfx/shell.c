@@ -17,6 +17,7 @@
 #include <eb/bundle.h>
 #include <eb/fat.h>
 #include <eb/term.h>
+#include <eb/asm.h>
 #include <eb/html.h>
 #include <eb/string.h>
 #include <eb/time.h>
@@ -210,7 +211,8 @@ typedef enum {
     HOT_FATOUT,      /* write the disk list's new things out */
     HOT_COPY,        /* lay a copy of the focused thing beside it */
     HOT_TFIND,       /* search inside the focused text */
-    HOT_LINE_SAY     /* send what the bottom row has gathered */
+    HOT_LINE_SAY,    /* send what the bottom row has gathered */
+    HOT_ASSEMBLE     /* turn the focused text into a program image */
 } hot_kind;
 
 typedef struct {
@@ -2922,16 +2924,25 @@ static void draw_all(void)
      * sits beside the rights because running is the one thing rights
      * alone do not announce. */
     {
-        bool can_run = obj_type(focus()) == TYPE_TEXT &&
-                       (focus_rights() & CAP_READ) &&
+        /* A text runs through the interpreter; bytes that are an image
+         * run through the loader. The same word, because it is the
+         * same act. And a text can be assembled first -- the image
+         * lands beside it, the way a running program does. */
+        bool is_image = obj_type(focus()) == TYPE_BYTES &&
+                        code_image_ok((const u8 *)obj_data(focus()),
+                                      obj_size(focus()), NULL, NULL, NULL);
+        bool can_lay = (focus_rights() & CAP_READ) &&
                        nav.at_generation == 0 && nav.depth >= 2;
-        if (can_run) {
+        if (can_lay) {
             object *through = nav.node[nav.depth - 2];
             u32 hr = nav.rights[nav.depth - 2];
-            can_run = (obj_type(through) == TYPE_PROGRAM)
+            can_lay = (obj_type(through) == TYPE_PROGRAM)
                     ? (hr & CAP_GRANT) != 0
                     : (hr & CAP_WRITE) != 0;
         }
+        bool can_run = can_lay && (obj_type(focus()) == TYPE_TEXT || is_image);
+        bool can_asm = can_lay && obj_type(focus()) == TYPE_TEXT &&
+                       obj_type(nav.node[nav.depth - 2]) != TYPE_PROGRAM;
         i32 chip_x = tx + (i32)at * GLYPH_W + 3 * GLYPH_W;
         if (can_run) {
             bool lit = is_hovered(HOT_RUN, 0);
@@ -3020,6 +3031,16 @@ static void draw_all(void)
             text_at(chip_x, 14, sw - PAD, "copy", lit ? C_TEXT : C_ACCENT);
             hot_add(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, HOT_COPY, 0);
             chip_x += 6 * GLYPH_W;
+        }
+
+        /* Last in the row, so the words before it keep their places:
+         * a text of instructions becomes an image that runs. */
+        if (can_asm) {
+            bool lit = is_hovered(HOT_ASSEMBLE, 0);
+            if (lit) fb_rect(chip_x - 4, 11, 8 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(chip_x, 14, sw - PAD, "assemble", lit ? C_TEXT : C_ACCENT);
+            hot_add(chip_x - 4, 11, 8 * GLYPH_W + 8, ROW, HOT_ASSEMBLE, 0);
+            chip_x += 10 * GLYPH_W;
         }
 
         /* The exchange disk's list carries its two acts: reading the
@@ -4227,8 +4248,11 @@ static void act_on(const hot_region *r)
          * what makes this an editor: the next pass through a line
          * runs whatever the line says by then. */
         object *f = focus();
-        if (obj_type(f) != TYPE_TEXT || nav.at_generation != 0) break;
-        if (nav.depth < 2) break;
+        if (nav.at_generation != 0 || nav.depth < 2) break;
+        bool image = obj_type(f) == TYPE_BYTES &&
+                     code_image_ok((const u8 *)obj_data(f), obj_size(f),
+                                   NULL, NULL, NULL);
+        if (obj_type(f) != TYPE_TEXT && !image) break;
 
         object *holder = nav.node[nav.depth - 2];
         u32 hr = nav.rights[nav.depth - 2];
@@ -4237,7 +4261,7 @@ static void act_on(const hot_region *r)
                  : (hr & CAP_WRITE) != 0;
         if (!can) break;
 
-        object *prog = runner_launch(f);
+        object *prog = image ? code_launch(f) : runner_launch(f);
         if (!prog) break;
 
         u64 slots = obj_slots(holder), spot = slots;
@@ -4430,6 +4454,58 @@ static void act_on(const hot_region *r)
     case HOT_LINE_SAY:
         say_commit();
         break;
+
+    case HOT_ASSEMBLE: {
+        /* The text becomes an image, laid beside it in the holder one
+         * came through, named after it. What went wrong is said in
+         * the journal with its line, and nothing is laid. */
+        object *f = focus();
+        if (obj_type(f) != TYPE_TEXT || nav.at_generation != 0) break;
+        if (nav.depth < 2) break;
+        object *holder = nav.node[nav.depth - 2];
+        if (!(nav.rights[nav.depth - 2] & CAP_WRITE)) break;
+        if (obj_type(holder) == TYPE_PROGRAM) break;
+
+        static u8 image[65536];
+        char err[112];
+        const u8 *src = (const u8 *)obj_data(f);
+        i64 got = asm_assemble(src, text_len(src, obj_size(f)), image,
+                               sizeof(image), err, sizeof(err));
+        if (got < 0) {
+            journal_says("assemble", err);
+            nav.redraw = true;
+            break;
+        }
+
+        object *made = obj_create(TYPE_BYTES, (u64)got, 0);
+        if (!made) break;
+        memcpy(obj_data(made), image, (u64)got);
+
+        u64 slots = obj_slots(holder), spot = slots;
+        for (u64 i = 0; i < slots; i++)
+            if (!obj_get_slot(holder, i)) { spot = i; break; }
+        if (spot == slots && !obj_grow_slots(holder, slots + 1)) {
+            obj_release(made);
+            break;
+        }
+
+        char nm[40];
+        label_of(holder, nav.via[nav.depth - 1], f, nm, sizeof(nm));
+        u32 n = 0;
+        while (nm[n] && n < 19) n++;
+        const char *tail = " code";
+        for (u32 i = 0; tail[i]; i++) nm[n++] = tail[i];
+        nm[n] = 0;
+
+        obj_set_slot(holder, spot, made, CAP_READ | CAP_WRITE | CAP_GRANT);
+        obj_set_slot_name(holder, spot, nm);
+        obj_release(made);
+        obj_touch(holder);
+        journal_says("assemble", "an image lies beside the text; run it");
+        nav.changes++;
+        nav.redraw = true;
+        break;
+    }
 
     case HOT_COPY: {
         object *f = focus();

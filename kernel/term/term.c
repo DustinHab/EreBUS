@@ -27,6 +27,7 @@
 #include <eb/pipe.h>
 #include <eb/standard.h>
 #include <eb/settings.h>
+#include <eb/asm.h>
 #include <eb/time.h>
 #include <eb/string.h>
 
@@ -690,13 +691,69 @@ static void cmd_letgo(term_session *s, const char *what)
 /* Programs                                                            */
 /* ------------------------------------------------------------------ */
 
-static void cmd_run(term_session *s, const char *what)
+/* A text becomes a program through the assembler: the image lies
+ * beside it, named after it, ready to run. What went wrong is said
+ * with its line. */
+static void cmd_assemble(term_session *s, const char *what)
 {
-    if (!what[0]) { t_say(s, "run which text?"); return; }
+    if (!what[0]) { t_say(s, "assemble which text?"); return; }
     spot sp;
     if (!resolve(s, what, &sp)) return;
-    if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "only a text can run."); return; }
+    if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "only a text can be assembled."); return; }
+    if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
+    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "the image would lie here, and you may not lay things in here."); return; }
+
+    char nm[NAME_SHOWN];
+    u32 n = 0;
+    while (sp.nm[n] && n < 19) { nm[n] = sp.nm[n]; n++; }
+    const char *tail = " code";
+    for (u32 i = 0; tail[i]; i++) nm[n++] = tail[i];
+    nm[n] = 0;
+
+    static u8 image[65536];
+    char err[120];
+    const u8 *src = (const u8 *)obj_data(sp.o);
+    i64 got = asm_assemble(src, text_len(src, obj_size(sp.o)), image,
+                           sizeof(image), err, sizeof(err));
+    if (got < 0) { t_say(s, err); return; }
+
+    object *made = obj_create(TYPE_BYTES, (u64)got, 0);
+    if (!made) { t_say(s, "nothing came of it; memory is short."); return; }
+    memcpy(obj_data(made), image, (u64)got);
+    i64 at = lay_here(s, made, CAP_READ | CAP_WRITE | CAP_GRANT, nm);
+    obj_release(made);
+    if (at < 0) { t_say(s, "no room to lay the image here."); return; }
+    t_puts(s, nm);
+    t_puts(s, "  lies beside it: ");
+    t_dec(s, (u64)got);
+    t_say(s, " bytes.  'run' it.");
+}
+
+static void cmd_run(term_session *s, const char *what)
+{
+    if (!what[0]) { t_say(s, "run which text, or which image?"); return; }
+    spot sp;
+    if (!resolve(s, what, &sp)) return;
     if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "the running one would lie here, and you may not lay things in here."); return; }
+
+    if (obj_type(sp.o) == TYPE_BYTES) {
+        if (!code_image_ok((const u8 *)obj_data(sp.o), obj_size(sp.o),
+                           NULL, NULL, NULL)) {
+            t_say(s, "those bytes are no program image; 'assemble' makes one.");
+            return;
+        }
+        char nm[NAME_SHOWN];
+        u32 n = 0;
+        while (sp.nm[n] && n < NAME_SHOWN - 1) { nm[n] = sp.nm[n]; n++; }
+        nm[n] = 0;
+        object *prog = code_launch(sp.o);
+        if (!prog) { t_say(s, "it would not start."); return; }
+        i64 at = lay_here(s, prog, CAP_READ | CAP_GRANT, nm);
+        if (at < 0) { t_say(s, "it runs, but there was no room to lay it here."); return; }
+        t_say(s, "it runs; the journal carries what it says.");
+        return;
+    }
+    if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "only a text or an image can run."); return; }
 
     /* The name is copied out first: laying the program here can grow
      * the slot table, and sp.nm points into the old one -- freed the
@@ -1064,7 +1121,8 @@ static void cmd_help(term_session *s)
     t_say(s, "  let go <name>    into the bin; in the bin, for good");
     t_end(s);
     t_say(s, "programs");
-    t_say(s, "  run <name>       run that text as a program, here");
+    t_say(s, "  run <name>       run that text, or that image, as a program, here");
+    t_say(s, "  assemble <name>  turn that text of instructions into an image");
     t_say(s, "  give <name> to <program>   hand it a reference");
     t_say(s, "  end <name>       end a running program");
     t_end(s);
@@ -1111,6 +1169,7 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "rename", &rest))  cmd_rename(s, rest);
     else if (word_starts(line, "let go", &rest))  cmd_letgo(s, rest);
     else if (word_starts(line, "run", &rest))     cmd_run(s, rest);
+    else if (word_starts(line, "assemble", &rest))cmd_assemble(s, rest);
     else if (word_starts(line, "give", &rest))    cmd_give(s, rest);
     else if (word_starts(line, "end", &rest))     cmd_end(s, rest);
     else if (word_starts(line, "send", &rest))    cmd_send(s, rest);

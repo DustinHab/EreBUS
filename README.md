@@ -617,6 +617,28 @@ built binary.
   through the same doors -- once the identity question below has an
   answer, because a terminal that anyone on the wire may feed is not
   a door, it is a hole.
+* **The machine programmed on itself.** An assembler lives in the
+  system: a text of x86-64 instructions in the ordinary words --
+  mov, add, cmp, jne, call, syscall, brackets for addresses, section
+  code and section data, db and dq -- becomes an image, laid beside
+  the text; "run" on the image loads it into a process of its own,
+  code read-and-execute, data read-and-write, never both, and hands
+  it the same two handles and eight system calls every shipped
+  program gets. The page "the machine" in the aside is the whole
+  contract -- registers at entry, the calls, the message layout --
+  written so that the page itself assembles: stand on it, press
+  assemble, run what it made, and it says hello. A program built
+  this way comes back at the next boot the way a script does; it is
+  part of the world. This is what "without restrictions" means here:
+  anything the processor can do in ring 3 can be written on the
+  machine, run on the machine, and kept on the machine -- and it
+  still holds only what it is given, because the loader changes
+  nothing about the rules, only about who wrote the code. The honest
+  edge: the kernel itself is C, and a C compiler is a project of its
+  own; until one exists, the kernel is built outside and everything
+  above it can be built inside. The classic way to close that gap is
+  to write the compiler here, in this assembler, which is exactly
+  what the assembler is for.
 * **The door.** The terminal reached over the network, by real ssh,
   so the client anyone already has can knock: version 2,
   curve25519-sha256 for the exchange, ssh-ed25519 for the host's

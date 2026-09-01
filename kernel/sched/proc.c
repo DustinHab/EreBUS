@@ -16,6 +16,8 @@
 #include <eb/panic.h>
 
 /* The user section of the kernel image, from the linker script. */
+#include <eb/asm.h>
+
 extern char __user_start[];
 extern char __user_end[];
 
@@ -179,8 +181,21 @@ static u64 addrspace_frames(phys_addr pml4)
 /* Processes                                                           */
 /* ------------------------------------------------------------------ */
 
-process *proc_create(const char *name, const void *entry_point,
-                     object *console)
+/* A half-built process must not leave half its parts behind. The same
+ * teardown the reaper uses, minus what was never made. */
+static process *proc_abandon(process *p)
+{
+    if (p->inbox) obj_release(p->inbox);
+    domain_destroy(p->dom);
+    addrspace_destroy(p->pml4);
+    kfree(p);
+    return NULL;
+}
+
+/* The beginning every process shares: a place in the table, an
+ * address space, a domain. What gets mapped into the space is the
+ * caller's to say next. */
+static process *proc_begin(const char *name)
 {
     /* A full table refuses at the door. Registering nowhere and
      * running anyway would make a process the liveness check cannot
@@ -206,12 +221,83 @@ process *proc_create(const char *name, const void *entry_point,
     p->magic = PROC_MAGIC;
     p->id = next_pid++;
     p->name = name;
+    return p;
+}
 
-    /* Every program is mapped the same way: the whole user section at
-     * one fixed address, and the entry point wherever inside it this
-     * particular program happens to begin. Sharing the mapping costs
-     * nothing -- the pages are read-only -- and it keeps the layout
-     * identical from one process to the next. */
+/* Fresh pages of the process's own at a user address, filled from src
+ * as far as it reaches and zero beyond. Either to run and never to be
+ * written, or to be written and never to run -- the stack and a loaded
+ * program's data are the second kind, because this is where anything
+ * a program is fed ends up, so it is the first place an attacker
+ * would like to put code. The filling happens before the mapping, on
+ * the kernel's own view of the frame. */
+static bool map_fresh(process *p, virt_addr at, u64 size, bool exec,
+                      const u8 *src, u64 src_len)
+{
+    for (u64 off = 0; off < size; off += PAGE_SIZE) {
+        phys_addr frame = pmm_alloc();
+        if (frame == PMM_NO_FRAME) return false;
+        u8 *page = (u8 *)phys_to_virt(frame);
+        for (u32 i = 0; i < PAGE_SIZE; i++) {
+            u64 s = off + i;
+            page[i] = (src && s < src_len) ? src[s] : 0;
+        }
+        u64 flags = PTE_PRESENT | PTE_USER |
+                    (exec ? 0 : (PTE_WRITE | PTE_NX));
+        if (!vmm_map(p->pml4, at + off, frame, PAGE_SIZE, flags)) {
+            pmm_free(frame);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* The end every process shares: the stack, the two things it starts
+ * holding, and the program as it appears in the graph. */
+static process *proc_finish(process *p, const char *name, object *console)
+{
+    if (!map_fresh(p, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_SIZE,
+                   false, NULL, 0))
+        return proc_abandon(p);
+
+    /* What it starts holding: permission to speak to the console, and
+     * its own letter box. Two capabilities, and nothing else in the
+     * world. */
+    p->inbox = port_create(8);
+    if (!p->inbox) return proc_abandon(p);
+
+    p->console_cap = console ? cap_insert(p->dom, console, CAP_CALL) : 0;
+    p->inbox_cap = cap_insert(p->dom, p->inbox, CAP_READ);
+
+    /* And the program as it appears in the graph. Pointing this object
+     * at something is how the program comes to hold it -- the same
+     * gesture as pointing anything at anything, with the difference
+     * that this particular holder is alive. */
+    p->stamp = time_boot_stamp() ^ (p->id << 40) ^ p->id;
+
+    p->self = obj_create(TYPE_PROGRAM, sizeof(program_ref), 8);
+    if (!p->self) return proc_abandon(p);
+    program_ref *ref = (program_ref *)obj_data(p->self);
+    ref->p = p;
+    ref->stamp = p->stamp;
+    obj_set_name(p->self, name);
+
+    if (live_count < MAX_PROCESSES) live[live_count++] = p;
+    process_count++;
+    return p;
+}
+
+process *proc_create(const char *name, const void *entry_point,
+                     object *console)
+{
+    process *p = proc_begin(name);
+    if (!p) return NULL;
+
+    /* Every shipped program is mapped the same way: the whole user
+     * section at one fixed address, and the entry point wherever
+     * inside it this particular program happens to begin. Sharing the
+     * mapping costs nothing -- the pages are read-only -- and it keeps
+     * the layout identical from one process to the next. */
     p->entry = USER_CODE_BASE +
                ((const u8 *)entry_point - (const u8 *)__user_start);
 
@@ -224,57 +310,38 @@ process *proc_create(const char *name, const void *entry_point,
         phys_addr phys = kernel_virt_to_phys(__user_start + off);
         if (!vmm_map(p->pml4, USER_CODE_BASE + off, phys, PAGE_SIZE,
                      PTE_PRESENT | PTE_USER))
-            goto fail;
+            return proc_abandon(p);
     }
 
-    /* The stack: writable, and emphatically not executable. This is
-     * where anything a program is fed ends up, so it is the first place
-     * an attacker would like to put code. */
-    for (u64 off = 0; off < USER_STACK_SIZE; off += PAGE_SIZE) {
-        phys_addr frame = pmm_alloc();
-        if (frame == PMM_NO_FRAME) goto fail;
-        virt_addr at = USER_STACK_TOP - USER_STACK_SIZE + off;
-        if (!vmm_map(p->pml4, at, frame, PAGE_SIZE,
-                     PTE_PRESENT | PTE_WRITE | PTE_USER | PTE_NX)) {
-            pmm_free(frame);
-            goto fail;
-        }
-    }
+    return proc_finish(p, name, console);
+}
 
-    /* What it starts holding: permission to speak to the console, and
-     * its own letter box. Two capabilities, and nothing else in the
-     * world. */
-    p->inbox = port_create(8);
-    if (!p->inbox) goto fail;
+process *proc_create_code(const char *name, const u8 *image, u64 len,
+                          object *console)
+{
+    u32 code_len, data_len, zero_len;
+    if (!code_image_ok(image, len, &code_len, &data_len, &zero_len))
+        return NULL;
 
-    p->console_cap = console ? cap_insert(p->dom, console, CAP_CALL) : 0;
-    p->inbox_cap = cap_insert(p->dom, p->inbox, CAP_READ);
+    process *p = proc_begin(name);
+    if (!p) return NULL;
+    p->entry = USER_LOAD_CODE;
 
-    /* And the program as it appears in the graph. Pointing this object
-     * at something is how the program comes to hold it -- the same
-     * gesture as pointing anything at anything, with the difference
-     * that this particular holder is alive. */
-    p->stamp = time_boot_stamp() ^ (p->id << 40) ^ p->id;
+    /* The code, copied into pages of its own and mapped to run but
+     * never to be written; the data, mapped to be written but never
+     * to run. The same wall the kernel keeps around itself, kept
+     * around what a person builds here. */
+    u64 csize = PAGE_UP((u64)code_len);
+    if (!map_fresh(p, USER_LOAD_CODE, csize, true, image + 16, code_len))
+        return proc_abandon(p);
 
-    p->self = obj_create(TYPE_PROGRAM, sizeof(program_ref), 8);
-    if (!p->self) goto fail;
-    program_ref *ref = (program_ref *)obj_data(p->self);
-    ref->p = p;
-    ref->stamp = p->stamp;
-    obj_set_name(p->self, name);
+    u64 dsize = PAGE_UP((u64)data_len + zero_len);
+    if (dsize == 0) dsize = PAGE_SIZE;
+    if (!map_fresh(p, USER_LOAD_DATA, dsize, false,
+                   image + 16 + code_len, data_len))
+        return proc_abandon(p);
 
-    if (live_count < MAX_PROCESSES) live[live_count++] = p;
-    process_count++;
-    return p;
-
-fail:
-    /* A half-built process must not leave half its parts behind. The
-     * same teardown the reaper uses, minus what was never made. */
-    if (p->inbox) obj_release(p->inbox);
-    domain_destroy(p->dom);
-    addrspace_destroy(p->pml4);
-    kfree(p);
-    return NULL;
+    return proc_finish(p, name, console);
 }
 
 object *proc_object(process *p) { return p ? p->self : NULL; }

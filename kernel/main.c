@@ -29,6 +29,7 @@
 #include <eb/fat.h>
 #include <eb/term.h>
 #include <eb/ssh.h>
+#include <eb/asm.h>
 #include <eb/activity.h>
 #include <eb/standard.h>
 #include <eb/net.h>
@@ -229,6 +230,30 @@ object *runner_launch(object *script)
     proc_grant(prog, script, CAP_READ);
 
     kprintf("proc: %llu (script) running a text\n", proc_id(p));
+    return prog;
+}
+
+object *code_launch(object *image)
+{
+    if (!image || obj_type(image) != TYPE_BYTES || !console_port)
+        return NULL;
+    const u8 *d = (const u8 *)obj_data(image);
+    if (!code_image_ok(d, obj_size(image), NULL, NULL, NULL)) return NULL;
+
+    process *p = proc_create_code("code", d, obj_size(image), console_port);
+    if (!p) return NULL;
+    if (!proc_start(p)) return NULL;
+
+    /* Its image: the first giving, recorded on the program object like
+     * every giving, and read-only like a set of orders should be from
+     * the inside. The bytes stay the person's to change from outside;
+     * what runs is what was loaded. */
+    object *prog = proc_object(p);
+    obj_set_slot(prog, 0, image, CAP_READ);
+    obj_set_slot_name(prog, 0, "its code");
+    proc_grant(prog, image, CAP_READ);
+
+    kprintf("proc: %llu (code) running an image\n", proc_id(p));
     return prog;
 }
 
@@ -476,11 +501,69 @@ static void ensure_structure(object *root, object **progs_out,
     *sys_out = sys;
 }
 
-/* Finds the language page -- a reference named "the language" on the
- * root or one list below it -- or makes one, preferring to live in
- * the aside next to the other explanations. Then brings its words up
- * to date. Graphs from earlier days gain the page this way too. */
-static void ensure_language(object *root)
+/* The machine, as a program sees it -- written so that the page
+ * itself assembles: stand on it, press assemble, run what it made.
+ * A program made on this machine starts with two handles and the
+ * eight calls, and nothing else; this is the whole of it. */
+static const char machine_text[] =
+    "; the machine, as a program sees it.\n"
+    ";\n"
+    "; a program starts holding two things and nothing else:\n"
+    ";   rdi  a handle to speak to the console (send, tag TEXT)\n"
+    ";   rsi  a handle to its own letter box (receive)\n"
+    "; the stack is ready at rsp. the code lies at 0x1000000,\n"
+    "; read and run, never written; the data at 0x1100000, read\n"
+    "; and written, never run -- one page at least.\n"
+    ";\n"
+    "; a system call: the number in rax, the arguments in\n"
+    "; rdi rsi rdx r10 r8, the answer in rax. rcx and r11 are\n"
+    "; lost across it.\n"
+    ";   0 exit                1 yield\n"
+    ";   2 send     handle, tag, w0, w1, w2\n"
+    ";   3 receive  handle, buffer, no_wait   (72 bytes land)\n"
+    ";   4 read     handle, offset  -> eight bytes\n"
+    ";   5 write    handle, offset, value\n"
+    ";   6 pass     port, tag, handle, mask, w0\n"
+    ";   7 clock    -> the second of the day\n"
+    "; answers: 0 done; -1 refused; -2 nothing there, or full.\n"
+    ";\n"
+    "; a message, as it lands in the buffer:\n"
+    ";   0   tag      8 bytes      16  words    4 x 8\n"
+    ";   8   nwords   4 bytes      48  handles  2 x 8\n"
+    ";   12  ncaps    4 bytes      64  masks    2 x 4\n"
+    "; a gift is tag 0x4556494721: the handle at 48, the rights\n"
+    "; at 16, and a number that rode along at 24. TEXT is\n"
+    "; 0x54584554: three words of eight letters to the console.\n"
+    ";\n"
+    "; the words: mov lea movzx add sub and or xor cmp test\n"
+    "; shl shr sar inc dec neg not mul imul div idiv cqo push\n"
+    "; pop call ret jmp je jne jl jge jle jg jb jae jbe ja\n"
+    "; syscall nop. brackets hold addresses: [rax], [rbx + 8],\n"
+    "; [name]. a width goes before them when nothing else says\n"
+    "; it: byte [rdi], qword [rsp - 8]. section code, section\n"
+    "; data; db dw dd dq lay values down, res n lays n zeros.\n"
+    ";\n"
+    "; stand on this page, press assemble, then run what it made.\n"
+    "\n"
+    "section data\n"
+    "hello: db \"hello fr\", \"om the m\", \"achine  \"\n"
+    "\n"
+    "section code\n"
+    "    mov rax, 2              ; send\n"
+    "    mov rsi, 0x54584554     ; the TEXT tag\n"
+    "    mov rdx, [hello]        ; eight letters each\n"
+    "    mov r10, [hello + 8]\n"
+    "    mov r8, [hello + 16]\n"
+    "    syscall                 ; rdi still holds the console\n"
+    "    mov rax, 0              ; exit\n"
+    "    syscall\n";
+
+/* Finds a reference page -- named on the root or one list below it
+ * -- or makes one, preferring to live in the aside next to the other
+ * explanations. Then brings its words up to date. Graphs from earlier
+ * days gain the page this way too. */
+static void ensure_page(object *root, const char *name,
+                        const char *text, u64 text_size, u64 page_size)
 {
     object *found = NULL;
     object *aside = NULL;
@@ -492,8 +575,7 @@ static void ensure_language(object *root)
         if (!s) continue;
         const char *nm = obj_slot_name(root, i);
 
-        if (nm && strcmp(nm, "the language") == 0 &&
-            obj_type(s) == TYPE_TEXT) {
+        if (nm && strcmp(nm, name) == 0 && obj_type(s) == TYPE_TEXT) {
             found = s; place_of = root; slot_of = i;
             break;
         }
@@ -504,7 +586,7 @@ static void ensure_language(object *root)
         for (u64 j = 0; j < obj_slots(s) && !found; j++) {
             object *t = obj_get_slot(s, j);
             const char *tn = obj_slot_name(s, j);
-            if (t && tn && strcmp(tn, "the language") == 0 &&
+            if (t && tn && strcmp(tn, name) == 0 &&
                 obj_type(t) == TYPE_TEXT) {
                 found = t; place_of = s; slot_of = j;
             }
@@ -512,9 +594,9 @@ static void ensure_language(object *root)
     }
 
     if (!found) {
-        object *made = obj_create(TYPE_TEXT, 2048, 0);
+        object *made = obj_create(TYPE_TEXT, page_size, 0);
         if (!made) return;
-        obj_set_name(made, "the language");
+        obj_set_name(made, name);
 
         object *place = aside ? aside : root;
         u64 n = obj_slots(place), at = n;
@@ -525,7 +607,7 @@ static void ensure_language(object *root)
             return;
         }
         obj_set_slot(place, at, made, CAP_READ);
-        obj_set_slot_name(place, at, "the language");
+        obj_set_slot_name(place, at, name);
         obj_release(made);
         found = made;                     /* the slot holds it now */
     }
@@ -533,27 +615,39 @@ static void ensure_language(object *root)
     /* A page from an older day may be too small for today's words.
      * The words matter, the object does not: a bigger page takes the
      * old one's place in the graph. */
-    if (obj_size(found) < sizeof(lang_text) && place_of) {
-        object *wider = obj_create(TYPE_TEXT, 2048, 0);
+    if (obj_size(found) < text_size && place_of) {
+        object *wider = obj_create(TYPE_TEXT, page_size, 0);
         if (!wider) return;
-        obj_set_name(wider, "the language");
+        obj_set_name(wider, name);
         obj_set_slot(place_of, slot_of, wider, CAP_READ);
-        obj_set_slot_name(place_of, slot_of, "the language");
+        obj_set_slot_name(place_of, slot_of, name);
         obj_release(wider);
         found = wider;
     }
 
     u8 *d = (u8 *)obj_data(found);
-    if (!d || obj_size(found) < sizeof(lang_text)) return;
+    if (!d || obj_size(found) < text_size) return;
 
     bool same = true;
-    for (u32 i = 0; i < sizeof(lang_text) && same; i++)
-        if (d[i] != (u8)lang_text[i]) same = false;
+    for (u64 i = 0; i < text_size && same; i++)
+        if (d[i] != (u8)text[i]) same = false;
     if (same) return;
 
     for (u64 i = 0; i < obj_size(found); i++)
-        d[i] = (i < sizeof(lang_text)) ? (u8)lang_text[i] : 0;
-    journal_says("system", "the language page speaks today's words");
+        d[i] = (i < text_size) ? (u8)text[i] : 0;
+    char note[64];
+    u32 at = 0;
+    for (u32 i = 0; name[i] && at < 30; i++) note[at++] = name[i];
+    const char *tail = " page speaks today's words";
+    for (u32 i = 0; tail[i] && at < sizeof(note) - 1; i++) note[at++] = tail[i];
+    note[at] = 0;
+    journal_says("system", note);
+}
+
+static void ensure_language(object *root)
+{
+    ensure_page(root, "the language", lang_text, sizeof(lang_text), 2048);
+    ensure_page(root, "the machine", machine_text, sizeof(machine_text), 3000);
 }
 
 /* Rewrites the activity table once a second. Between rewrites it only
@@ -1385,22 +1479,36 @@ void kmain(eb_boot_info *bi)
              * to the record, since a dead recipient translates to
              * nothing. If the world is to come back as it was left,
              * the programs the person wrote are part of the world. */
-            if (!matched && obj_name(s) && strcmp(obj_name(s), "script") == 0) {
+            /* Only an unmatched record is still an object: a matched
+             * one was just replaced in its slot, and that may have
+             * been its last holder. */
+            bool was_script = !matched && obj_name(s) &&
+                              strcmp(obj_name(s), "script") == 0;
+            bool was_code   = !matched && obj_name(s) &&
+                              strcmp(obj_name(s), "code") == 0;
+            if (was_script || was_code) {
                 object *script_words = NULL;
+                object *code_image = NULL;
                 for (u64 j = 0; j < obj_slots(s); j++) {
                     object *t = obj_get_slot(s, j);
                     const char *jn = obj_slot_name(s, j);
                     if (t && jn && strcmp(jn, "its words") == 0 &&
                         obj_type(t) == TYPE_TEXT) { script_words = t; break; }
+                    if (t && jn && strcmp(jn, "its code") == 0 &&
+                        obj_type(t) == TYPE_BYTES) { code_image = t; break; }
                 }
 
+                /* A program built on this machine comes back the same
+                 * way a script does: its image is all it ever was. */
                 object *fresh = script_words ? runner_launch(script_words)
-                                             : NULL;
+                              : code_image   ? code_launch(code_image)
+                              : NULL;
                 if (fresh) {
                     for (u64 j = 0; j < obj_slots(s); j++) {
                         object *t = obj_get_slot(s, j);
                         const char *jn = obj_slot_name(s, j);
-                        if (!t || (jn && strcmp(jn, "its words") == 0))
+                        if (!t || (jn && (strcmp(jn, "its words") == 0 ||
+                                          strcmp(jn, "its code") == 0)))
                             continue;
 
                         u64 fn = obj_slots(fresh), fat = fn;

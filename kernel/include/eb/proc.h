@@ -26,6 +26,14 @@ typedef struct process process;
 process *proc_create(const char *name, const void *entry_point,
                      object *console);
 
+/* Creates a process from an image the assembler made: the head, the
+ * code laid at USER_LOAD_CODE read-and-execute, the data at
+ * USER_LOAD_DATA read-and-write with the zeroed room after it -- at
+ * least one writable page either way. Refuses an image the head
+ * does not vouch for. */
+process *proc_create_code(const char *name, const u8 *image, u64 len,
+                          object *console);
+
 /* The program as it appears in the object graph. Pointing this object
  * at something hands the program that thing -- the same gesture as
  * anywhere else, and the only way a program comes to hold anything. */

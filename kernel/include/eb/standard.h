@@ -23,6 +23,12 @@ object *standard_launch(u32 i);
  * program, granted its own words read-only as the first gift. */
 object *runner_launch(object *script);
 
+/* Starts an image the assembler made: the bytes become a running
+ * program, granted their own image read-only as the first gift, the
+ * way a script is granted its words. NULL for bytes that are not an
+ * image. */
+object *code_launch(object *image);
+
 /* Starts the interpreter on a visiting text, for the pipe: the words
  * read-only, a reply port send-only, and a time budget the
  * interpreter itself enforces. Holds nothing else. A divided job's
