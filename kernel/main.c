@@ -128,6 +128,8 @@ extern char user_watch[];
 extern char user_wipe[];
 extern char user_fetch[];
 extern void user_foreman(u64 console, u64 inbox);
+extern void user_reckon(u64 console, u64 inbox);
+extern void user_pulse(u64 console, u64 inbox);
 
 /* What the system ships with. hello and trespass make their point at
  * start-up and end; these stay, each doing one thing to whatever it is
@@ -149,6 +151,8 @@ static const struct {
     { "wipe",    user_wipe,    "wipe" },
     { "fetch",   user_fetch,   "fetch" },
     { "foreman", (char *)user_foreman, "foreman" },
+    { "reckon",  (char *)user_reckon,  "reckon" },
+    { "pulse",   (char *)user_pulse,   "pulse" },
 };
 #define STANDARD_COUNT ((u32)ARRAY_LEN(standard))
 

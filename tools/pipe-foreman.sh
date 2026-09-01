@@ -78,7 +78,7 @@ sleep 3
          home m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m0,100 m0,37 click \
-         m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,38 click ret
+         m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,82 click ret
     sleep 45
     echo "screendump $BUILD/foreman-b.ppm"
     sleep 2

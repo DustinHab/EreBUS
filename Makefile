@@ -108,6 +108,8 @@ KERN_C   := kernel/main.c \
             kernel/net/net.c \
             kernel/user/runner.c \
             kernel/user/foreman.c \
+            kernel/user/reckon.c \
+            kernel/user/pulse.c \
             kernel/arch/x86_64/syscall.c \
             kernel/arch/x86_64/gdt.c \
             kernel/arch/x86_64/trap.c
@@ -184,6 +186,18 @@ $(BUILD)/kernel/user/foreman.o: kernel/user/foreman.c $(FONT)
 	@echo "  CC      kernel/user/foreman.c (ring 3)"
 	@$(CC) $(KERN_FLAGS) -fno-stack-protector -fno-jump-tables \
 	       -c kernel/user/foreman.c -o $@
+
+$(BUILD)/kernel/user/reckon.o: kernel/user/reckon.c $(FONT)
+	@mkdir -p $(dir $@)
+	@echo "  CC      kernel/user/reckon.c (ring 3)"
+	@$(CC) $(KERN_FLAGS) -fno-stack-protector -fno-jump-tables \
+	       -c kernel/user/reckon.c -o $@
+
+$(BUILD)/kernel/user/pulse.o: kernel/user/pulse.c $(FONT)
+	@mkdir -p $(dir $@)
+	@echo "  CC      kernel/user/pulse.c (ring 3)"
+	@$(CC) $(KERN_FLAGS) -fno-stack-protector -fno-jump-tables \
+	       -c kernel/user/pulse.c -o $@
 
 $(KERNEL): $(KERN_OBJ) kernel/arch/x86_64/linker.ld
 	@echo "  LINK    $@"
@@ -388,8 +402,8 @@ look: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 AGENT_TO_PROGRAM := down down down down right right home \
                     $(shell for i in $$(seq 17); do printf 'm100,7 '; done)
 AGENT_KEYS := $(AGENT_TO_PROGRAM) click \
-              m0,100 m0,100 m0,100 m0,100 m0,100 m0,2 click esc \
-              m-94,-100 m0,-100 m0,-100 m0,-100 m0,-100 m0,-3 click \
+              m0,100 m0,100 m0,100 m0,100 m0,100 m0,46 click esc \
+              m-94,-100 m0,-100 m0,-100 m0,-100 m0,-100 m0,-47 click \
               m100,0 m100,0 m78,0 click
 
 agent: $(IMAGE) $(BUILD)/test-vars.fd
@@ -424,9 +438,10 @@ RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,69 click \
               p a s s spc i t left \
               up up up right down right \
               $(RELAY_HOME) m0,100 m0,15 click \
-              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,60 click ret \
+              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,4 \
+              click ret \
               $(RELAY_HOME) m0,100 m0,39 click \
-              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,36 click ret
+              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,80 click ret
 
 relay: $(IMAGE) $(BUILD)/test-vars.fd
 	@rm -f $(STORE)
