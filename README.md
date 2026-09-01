@@ -580,6 +580,36 @@ built binary.
   proven against mtools from outside. Honest limits: FAT32 only,
   the root directory only, 64 KiB a file, long names read but not
   written.
+* **Copy and find.** Every readable text, bytes, picture or list
+  offers a copy chip; the copy lies beside the original, named
+  after it, a list copied flat with the same references and rights.
+  The text lens grew a find bar -- the word at the tab row's right
+  end, or ctrl+f: matches underline in place with a count, enter
+  walks the caret match to match, escape closes, and following a
+  reference closes it too, since a needle belongs to the text it
+  was typed over.
+* **reckon.** The calculator is a program like any other: point it
+  at a text and every line ending in an equals sign gets its answer
+  written after it -- sums, products, remainders, parentheses,
+  negatives. A line it cannot read gets a question mark instead of
+  a guess, and answered lines no longer end in the sign, so running
+  it twice changes nothing.
+* **pulse.** The machine's vitals drawn instead of listed: given a
+  writable picture and the readable activity page it paints one
+  column every other second -- used memory a blue bar from the
+  bottom, the processor's share a red mark, a grey cursor walking
+  ahead. The picture is an object, so the history rides the
+  snapshot and the drawing goes on across a reboot. The breath
+  between columns is deliberate: a canvas touched every second
+  would never be still enough to save.
+* **The line.** One running conversation with whoever else is on
+  the pipe, kept as a read-only text on the system shelf. With it
+  in focus the footer becomes a mouth: letters gather, enter says
+  them, and the word crosses inside the seal -- with no seal up but
+  a peer named, the say knocks first and the word follows. Proven
+  with two machines and a wire dump holding no clear word; the
+  identity caveat below wears these clothes too, since a name on
+  the line is the sender's claim, not a proof.
 * **What a result is worth.** An answer is a claim by the machine
   that answered, nothing more. Nothing here proves the arithmetic
   was actually done: there are no attestations, no redundant runs,
