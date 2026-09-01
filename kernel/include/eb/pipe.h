@@ -58,6 +58,14 @@ void pipe_service(void);
 /* The arrivals list, for the shell to recognise. */
 object *pipe_arrivals(void);
 
+/* The line: one running conversation with whoever else is on the
+ * pipe, kept as a text the kernel appends to. Saying a word puts it
+ * through every sealed session; with none standing but a peer named,
+ * the knock goes out first and the word follows the seal. */
+void    pipe_line_set(object *text);
+object *pipe_line(void);
+bool    pipe_say(const char *text);
+
 /* Looking for company: a scan calls out on the wire, and machines
  * running this same system answer with their names. The found stand
  * in a small table until the next scan; pointing the pipe at one is

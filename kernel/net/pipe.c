@@ -54,6 +54,7 @@
 #define K_SEALED  8                  /* an envelope around any of the rest */
 #define K_ASK     9                  /* a job: run this text, answer me */
 #define K_ANSWER  10                 /* what became of a job */
+#define K_SAY     11                 /* a word for the person there */
 
 #define CHUNK_MAX 1024
 #define CARRY_MAX_BYTES 65536
@@ -63,6 +64,10 @@
  * asking side grants and the interpreter over there enforces. */
 #define RECIPE_MAX   1024
 #define ASK_BUDGET_S 20
+
+/* A spoken word: short enough to fit one sealed datagram with room
+ * to spare, long enough for a sentence worth saying. */
+#define SAY_MAX 200
 
 /* The desk: how many jobs may queue, how many parts a job may be
  * divided into, how many asks fly at once, how many machines are
@@ -96,6 +101,80 @@ void pipe_arrivals_set(object *list)
 }
 
 object *pipe_arrivals(void) { return arrivals; }
+
+/* ------------------------------------------------------------------ */
+/* The line                                                            */
+/* ------------------------------------------------------------------ */
+
+/* One running conversation, kept as an ordinary text: the kernel
+ * appends what is said, in the order it was said, and the person
+ * holds it read-only -- a talk is a record too. */
+static object *line_obj;
+
+void pipe_line_set(object *t)
+{
+    if (line_obj) obj_release(line_obj);
+    line_obj = t;
+    if (line_obj) obj_retain(line_obj);
+}
+
+object *pipe_line(void) { return line_obj; }
+
+/* Words already heard, so a datagram that arrives twice does not
+ * stand on the line twice. */
+static u64 say_heard[8];
+static u32 say_heard_at;
+
+/* A word waiting for a seal that is still being knocked for. */
+static struct {
+    bool active;
+    u64  born_ns;
+    char text[SAY_MAX + 1];
+} saypend;
+
+static void line_append(const char *who, const char *what)
+{
+    if (!line_obj || !who || !what) return;
+
+    char ln[256];
+    u64 at = 0;
+    for (u64 i = 0; who[i] && at < 30; i++) {
+        char c = who[i];
+        ln[at++] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+    }
+    while (at > 0 && ln[at - 1] == ' ') at--;
+    ln[at++] = ':';
+    ln[at++] = ' ';
+    ln[at++] = ' ';
+    for (u64 i = 0; what[i] && at < sizeof(ln) - 2; i++) {
+        char c = what[i];
+        ln[at++] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+    }
+    while (at > 0 && ln[at - 1] == ' ') at--;
+    ln[at++] = '\n';
+
+    u64 flags = irq_save();
+    u8 *d = (u8 *)obj_data(line_obj);
+    u64 size = obj_size(line_obj);
+    if (!d || size < sizeof(ln) + 2) { irq_restore(flags); return; }
+    u64 len = 0;
+    while (len < size && d[len]) len++;
+
+    /* A full page: the older half of the talk makes room, cut at a
+     * line boundary so no word survives torn in the middle. */
+    if (len + at + 1 > size) {
+        u64 from = len / 2;
+        while (from < len && d[from] != '\n') from++;
+        if (from < len) from++;
+        memmove(d, d + from, len - from);
+        len -= from;
+        memset(d + len, 0, size - len);
+    }
+    memcpy(d + len, ln, at);
+    d[len + at] = 0;
+    irq_restore(flags);
+    obj_touch(line_obj);
+}
 
 static u32 rd32(const u8 *p);
 static u64 rd64(const u8 *p);
@@ -974,6 +1053,64 @@ static void arrival_done(void)
 
 /* One plaintext packet out of an opened envelope. Everything with
  * substance in it lands here and nowhere else. */
+/* ------------------------------------------------------------------ */
+/* Saying a word                                                       */
+/* ------------------------------------------------------------------ */
+
+/* Puts one spoken word into every sealed session there is. Answers
+ * how many doors it went through -- zero means nobody could hear. */
+static u32 say_wire(const char *text)
+{
+    u32 tl = 0;
+    while (text[tl] && tl < SAY_MAX) tl++;
+    if (tl == 0) return 0;
+
+    u8 pkt[44 + SAY_MAX];
+    wr32(pkt, MAGIC);
+    pkt[4] = K_SAY; pkt[5] = pkt[6] = pkt[7] = 0;
+    u64 id;
+    rand_bytes((u8 *)&id, 8);
+    wr64(pkt + 8, id);
+    char nm[24];
+    settings_name(nm, sizeof(nm));
+    for (u32 i = 0; i < 24; i++) pkt[16 + i] = (u8)nm[i];
+    wr32(pkt + 40, tl);
+    memcpy(pkt + 44, text, tl);
+
+    u32 sent = 0;
+    for (u32 i = 0; i < SEAL_MAX; i++)
+        if (seal[i].used) { seal_send(&seal[i], pkt, 44 + tl); sent++; }
+    return sent;
+}
+
+bool pipe_say(const char *text)
+{
+    if (!text || !text[0]) return false;
+
+    /* What was said stands on the line either way; whether anyone
+     * heard it is the journal's to report. */
+    line_append("you", text);
+
+    if (say_wire(text)) return true;
+
+    /* No seal is standing. With a named peer the knock goes out and
+     * the word waits by the door; without one there is no door. */
+    u8 peer[4];
+    u16 pp;
+    if (!settings_peer(peer, &pp)) {
+        journal_says("pipe", "nobody is on the line, and no peer is named");
+        return false;
+    }
+    u32 n = 0;
+    while (text[n] && n < SAY_MAX) { saypend.text[n] = text[n]; n++; }
+    saypend.text[n] = 0;
+    saypend.active = true;
+    saypend.born_ns = time_ns();
+    knock_begin(peer, pp);
+    journal_says("pipe", "knocking first; the word will follow");
+    return true;
+}
+
 static void inner_input(const u8 src[4], u16 sport, sealrec *s,
                         const u8 *p, u32 len)
 {
@@ -1040,6 +1177,53 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
             last_taken_id = in.id;
             arrival_done();
         }
+        return;
+    }
+
+    /* A word for the person here. It goes on the line under the name
+     * the sender wears; the same datagram said twice lands once. */
+    if (kind == K_SAY && len >= 44) {
+        u32 tl = rd32(p + 40);
+        if (tl == 0 || tl > SAY_MAX || 44 + tl > len) return;
+
+        for (u32 i = 0; i < 8; i++)
+            if (say_heard[i] == id) return;
+        say_heard[say_heard_at] = id;
+        say_heard_at = (say_heard_at + 1) % 8;
+
+        char nm[25];
+        u32 n = 0;
+        while (n < 24 && p[16 + n]) {
+            char c = (char)p[16 + n];
+            nm[n] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+            n++;
+        }
+        nm[n] = 0;
+        if (!nm[0]) {
+            const char *fallback = "someone";
+            for (n = 0; fallback[n]; n++) nm[n] = fallback[n];
+            nm[n] = 0;
+        }
+
+        char tx[SAY_MAX + 1];
+        for (u32 i = 0; i < tl; i++) {
+            char c = (char)p[44 + i];
+            tx[i] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+        }
+        tx[tl] = 0;
+
+        line_append(nm, tx);
+
+        /* The bottom row shows the journal's latest word, so this is
+         * how a talk announces itself without a bell. */
+        char note[64];
+        u32 a = 0;
+        while (nm[a] && a < 24) { note[a] = nm[a]; a++; }
+        const char *tail = " spoke on the line";
+        for (u32 i = 0; tail[i] && a < sizeof(note) - 1; i++)
+            note[a++] = tail[i];
+        note[a] = 0;
+        journal_says("pipe", note);
         return;
     }
 
@@ -1275,8 +1459,13 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         memcpy(pkt + 12, pub, 32);
         net_udp_send(src, PIPE_PORT, sport, pkt, 44);
 
+        /* The session's own copy, not src: src points into the card's
+         * receive ring, and sending above may already have let that
+         * slot be filled again. It printed another packet's bytes as
+         * an address once -- the seal itself was never wrong, only
+         * the report of it. */
         kprintf("pipe: sealed with %u.%u.%u.%u\n",
-                src[0], src[1], src[2], src[3]);
+                s->ip[0], s->ip[1], s->ip[2], s->ip[3]);
         return;
     }
 
@@ -1300,7 +1489,7 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         knock.active = false;
 
         kprintf("pipe: sealed with %u.%u.%u.%u\n",
-                src[0], src[1], src[2], src[3]);
+                s->ip[0], s->ip[1], s->ip[2], s->ip[3]);
         journal_says("pipe", "the way is sealed");
         return;
     }
@@ -1381,6 +1570,21 @@ void pipe_service(void)
                 knock.last_ns = now;
                 knock_send();
             }
+        }
+    }
+
+    /* A word that waited for the knock goes the moment any door is
+     * open; one that waited too long is let go, and said so. */
+    if (saypend.active) {
+        bool door = false;
+        for (u32 i = 0; i < SEAL_MAX; i++)
+            if (seal[i].used) door = true;
+        if (door) {
+            saypend.active = false;
+            say_wire(saypend.text);
+        } else if (time_ns() - saypend.born_ns > 10 * SECOND) {
+            saypend.active = false;
+            journal_says("pipe", "the word found no open door");
         }
     }
 

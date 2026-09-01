@@ -1523,6 +1523,26 @@ void kmain(eb_boot_info *bi)
             if (arr) pipe_arrivals_set(arr);
         }
 
+        /* The line: one running conversation with whoever else is on
+         * the pipe. The kernel writes what is said; the person reads
+         * it here and speaks through the shell's bottom row. Read-only
+         * on purpose -- a talk, once had, is a record like any other. */
+        {
+            object *ln = find_petnamed(root, "the line", TYPE_TEXT,
+                                       NULL, NULL);
+            if (!ln) {
+                object *made = obj_create(TYPE_TEXT, 4096, 0);
+                if (made) {
+                    obj_set_name(made, "the line");
+                    if (list_append(sys_shelf ? sys_shelf : root, made,
+                                    CAP_READ, "the line"))
+                        ln = made;
+                    obj_release(made);
+                }
+            }
+            if (ln) pipe_line_set(ln);
+        }
+
         /* A restored clock face is the same heartbeat it always was;
          * the mark does not ride the snapshot, so it is set anew. */
         {

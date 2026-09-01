@@ -208,7 +208,8 @@ typedef enum {
     HOT_FATIN,       /* read the exchange disk's files in again */
     HOT_FATOUT,      /* write the disk list's new things out */
     HOT_COPY,        /* lay a copy of the focused thing beside it */
-    HOT_TFIND        /* search inside the focused text */
+    HOT_TFIND,       /* search inside the focused text */
+    HOT_LINE_SAY     /* send what the bottom row has gathered */
 } hot_kind;
 
 typedef struct {
@@ -371,6 +372,23 @@ static char tfind_buf[40];
 static u32  tfind_len;
 static u32  tfind_count;
 static char to_lower(char c);
+
+/* Speaking on the line: the letters gathered in the bottom row while
+ * the line is in focus, sent whole on enter. The pipe caps a word at
+ * two hundred letters, and so does this. */
+static char say_buf[201];
+static u32  say_len;
+
+/* Says the gathered word and clears the row. Enter and the send word
+ * both land here, so the click and the key cannot drift apart. */
+static void say_commit(void)
+{
+    if (!say_len) return;
+    say_buf[say_len] = 0;
+    pipe_say(say_buf);
+    say_len = 0;
+    nav.redraw = true;
+}
 
 /* ------------------------------------------------------------------ */
 /* Making and shaping                                                  */
@@ -2796,8 +2814,9 @@ static void draw_all(void)
      * that for exactly as long -- put() does not check, so the hints
      * quietly wrote over whatever the compiler had placed next. Found
      * the day the text grew and the corruption finally landed somewhere
-     * visible. */
-    char line[192];
+     * visible. Grown again for the line's mouth: "say: " and two
+     * hundred letters and the caret must fit. */
+    char line[256];
     i32 tx = sw / 2 + PAD;
     const char *tn = type_name(obj_type(focus()));
     text_at(tx, 14, sw - PAD, tn, type_color(obj_type(focus())));
@@ -3125,7 +3144,19 @@ static void draw_all(void)
     mx += 2 * GLYPH_W;
 
     at = 0;
-    if (settings_hints()) {
+
+    /* With the line in focus the footer is a mouth, not a hint: what
+     * is being typed stands here until enter or the send word says
+     * it. It shows even with hints off -- it is not advice, it is the
+     * only place the unsent word exists. */
+    bool mouth = pipe_line() && focus() == pipe_line() &&
+                 nav.at_generation == 0;
+    if (mouth) {
+        at = put(line, at, "say: ");
+        for (u32 i = 0; i < say_len && at < sizeof(line) - 4; i++)
+            line[at++] = say_buf[i];
+        at = put(line, at, "_");
+    } else if (settings_hints()) {
         at = put(line, at, "click anything you can see.  arrows move; "
                            "the wheel scrolls.  ");
         if (sendto_open && sendto_ask)
@@ -3172,7 +3203,21 @@ static void draw_all(void)
     }
 
     line[at] = 0;
-    text_at(mx, sh - 28 + 6, off_x - 2 * GLYPH_W, line, C_FAINT);
+    text_at(mx, sh - 28 + 6, off_x - 2 * GLYPH_W, line,
+            mouth ? C_TEXT : C_FAINT);
+
+    /* The send word, right after the gathered letters: the same act
+     * as enter, for whoever speaks with the mouse. */
+    if (mouth && say_len) {
+        i32 sx2 = mx + ((i32)at + 2) * GLYPH_W;
+        if (sx2 + 4 * GLYPH_W < off_x - 2 * GLYPH_W) {
+            bool lit = is_hovered(HOT_LINE_SAY, 0);
+            text_at(sx2, sh - 28 + 6, sw, "send",
+                    lit ? C_ACCENT : C_TEXT);
+            hot_add(sx2 - 3, sh - 28, 4 * GLYPH_W + 6, 28,
+                    HOT_LINE_SAY, 0);
+        }
+    }
 
     /* The recipient chooser: send was pressed with nobody set, so the
      * choosing happens under the word itself. The scan is already
@@ -3522,6 +3567,34 @@ static void handle_keys(void)
             if (k.codepoint >= 0x20 && k.codepoint < 0x100 && !k.ctrl &&
                 tfind_len < sizeof(tfind_buf) - 1) {
                 tfind_buf[tfind_len++] = (char)k.codepoint;
+                nav.redraw = true;
+                continue;
+            }
+        }
+
+        /* With the line in focus the bottom row is a mouth: letters
+         * gather there, enter says them, escape swallows them. The
+         * text itself is read-only, so nothing else wanted the keys.
+         * Arrows and the rest fall through and still walk. */
+        if (pipe_line() && focus() == pipe_line() &&
+            nav.at_generation == 0) {
+            if (k.codepoint == KEY_ENTER) {
+                say_commit();
+                continue;
+            }
+            if (k.codepoint == '\b') {
+                if (say_len) say_len--;
+                nav.redraw = true;
+                continue;
+            }
+            if (k.codepoint == KEY_ESCAPE && say_len) {
+                say_len = 0;
+                nav.redraw = true;
+                continue;
+            }
+            if (k.codepoint >= 0x20 && k.codepoint < 0x7F && !k.ctrl &&
+                say_len < sizeof(say_buf) - 1) {
+                say_buf[say_len++] = (char)k.codepoint;
                 nav.redraw = true;
                 continue;
             }
@@ -4255,6 +4328,10 @@ static void act_on(const hot_region *r)
     case HOT_TFIND:
         tfind_on = !tfind_on;
         nav.redraw = true;
+        break;
+
+    case HOT_LINE_SAY:
+        say_commit();
         break;
 
     case HOT_COPY: {
