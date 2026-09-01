@@ -32,6 +32,11 @@ process *proc_create(const char *name, const void *entry_point,
 object *proc_object(process *p);
 bool    proc_grant(object *program, object *what, u32 rights);
 
+/* The same giving, with one number riding along in the message. The
+ * runner reads a time budget off its first gift this way. */
+bool    proc_grant_word(object *program, object *what, u32 rights,
+                        u64 word);
+
 /* And taking it back. The program is not asked and cannot refuse; it
  * finds out by trying. */
 bool    proc_revoke(object *program, object *what);

@@ -468,6 +468,28 @@ built binary.
   same breath. Escape or a click elsewhere puts it away. The proof
   script walks exactly this shortest path: stand on the notes, press
   send, click the machine that answered.
+* **Far work.** Beside send stands ask: the focused text travels to
+  the peer as a recipe, runs over there, and what it answers comes
+  home -- a journal line saying "job 1 answers: 42", and the answer
+  as a small text in arrivals. This is the first stone of a
+  decentralised machine: any Erebus can lend its processor to
+  another, and what crosses is still only substance -- the recipe is
+  words in the one-page language, never machine code. The visiting
+  script runs under the same interpreter as any local text, holding
+  exactly two things: its words, read-only, and a send-only way
+  home. It cannot see the graph, the disk, or the network; the
+  capability table it was born with is the whole world it can touch,
+  and the memory quota bounds the rest. Its first gift is the way
+  home -- wait, then answer, is the whole convention -- and it
+  carries a time budget the interpreter itself enforces: loops,
+  rests and waits all end when the clock says so, which is why a
+  visiting script cannot outstay its welcome. Lending the processor
+  is a standing decision of the owner: the settings ship saying
+  "work | refused", and only "work | welcomed" changes that. One job
+  at a time; a repeated ask gets the old answer repeated, never a
+  second run. The proof run computes 6 times 7 across the cable and
+  hears 42 back, then sends a second recipe that loops forever and
+  hears, honestly, that it ran out of time.
 * M10 — booting real hardware from a USB stick
 * Certificate verification — turning the seal from privacy into
   identity: RSA/ECDSA signatures and a root store

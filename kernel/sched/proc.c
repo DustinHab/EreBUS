@@ -346,7 +346,7 @@ static bool grant_translate(object **what, u32 *rights)
     return true;
 }
 
-bool proc_grant(object *program, object *what, u32 rights)
+bool proc_grant_word(object *program, object *what, u32 rights, u64 word)
 {
     if (!program || obj_type(program) != TYPE_PROGRAM || !what) return false;
 
@@ -367,10 +367,19 @@ bool proc_grant(object *program, object *what, u32 rights)
 
     message m = { 0 };
     m.tag = 0x4556494721ULL;      /* "GIVE!" */
-    m.nwords = 1;
+    m.nwords = 2;
     m.words[0] = rights;
+    m.words[1] = word;             /* one number riding along; the
+                                    * runner reads a budget off its
+                                    * first gift, and nothing else
+                                    * looks at it */
 
     return port_post(p->inbox, &m, &what, &rights, 1, "you");
+}
+
+bool proc_grant(object *program, object *what, u32 rights)
+{
+    return proc_grant_word(program, what, rights, 0);
 }
 
 bool proc_revoke(object *program, object *what)

@@ -44,4 +44,8 @@ bool settings_address(u8 ip[4]);
 /* What this machine calls itself when another asks. */
 void settings_name(char *out, u32 max);
 
+/* Whether this machine runs texts other machines send it. Refused
+ * unless the settings say "work | welcomed". */
+bool settings_work(void);
+
 #endif /* EB_SETTINGS_H */

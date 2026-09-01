@@ -41,11 +41,12 @@ typedef struct {
     bool addr_set;
     u8   addr_ip[4];
     char name[24];
+    bool work;
 } values;
 
 static values current = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                           false, { 0, 0, 0, 0 }, 0,
-                          false, { 0, 0, 0, 0 }, "erebus" };
+                          false, { 0, 0, 0, 0 }, "erebus", false };
 
 object *settings_object(void) { return settings; }
 
@@ -69,6 +70,8 @@ bool settings_address(u8 ip[4])
     if (ip) for (u32 i = 0; i < 4; i++) ip[i] = current.addr_ip[i];
     return true;
 }
+
+bool settings_work(void) { return current.work; }
 
 void settings_name(char *out, u32 max)
 {
@@ -98,7 +101,8 @@ static const char seed[] =
     "start    | where i left\n"
     "name     | erebus\n"
     "address  | by lease\n"
-    "peer     | nobody\n";
+    "peer     | nobody\n"
+    "work     | refused\n";
 
 bool settings_create(void)
 {
@@ -258,21 +262,27 @@ static void read_line(values *v, const char *line, u64 len)
         } else {
             v->addr_set = false;
         }
+    } else if (matter_is(line, a, b, "work")) {
+        /* Whether this machine runs texts other machines send it.
+         * Refused unless the owner has written otherwise: lending
+         * one's processor is a standing decision, not a default. */
+        if (line_has(val, vlen, "welcomed")) v->work = true;
+        if (line_has(val, vlen, "refused"))  v->work = false;
     } else if (matter_is(line, a, b, "name")) {
         /* What this machine calls itself when another asks: shown to
          * the other side as a claim, like every self-given name. */
         u64 from = 0, to = vlen;
         while (from < to && val[from] == ' ') from++;
         while (to > from && (val[to-1] == ' ' || val[to-1] == '\r')) to--;
-        u32 n = 0;
-        for (u64 i = from; i < to && n < sizeof(v->name) - 1; i++)
+        u32 nl = 0;
+        for (u64 i = from; i < to && nl < sizeof(v->name) - 1; i++)
             if ((u8)val[i] >= 0x20 && (u8)val[i] < 0x7F)
-                v->name[n++] = val[i];
-        v->name[n] = 0;
-        if (n == 0) {
+                v->name[nl++] = val[i];
+        v->name[nl] = 0;
+        if (nl == 0) {
             const char *fb = "erebus";
-            for (n = 0; fb[n]; n++) v->name[n] = fb[n];
-            v->name[n] = 0;
+            for (nl = 0; fb[nl]; nl++) v->name[nl] = fb[nl];
+            v->name[nl] = 0;
         }
     }
 }
@@ -331,6 +341,11 @@ static void note_changes(const values *was, const values *now)
     if (strcmp(was->name, now->name) != 0)
         journal_says("settings", "the machine goes by a new name");
 
+    if (was->work != now->work)
+        journal_says("settings", now->work
+                     ? "work from other machines is welcomed now"
+                     : "work from other machines is refused now");
+
     if (was->addr_set != now->addr_set ||
         (now->addr_set && memcmp(was->addr_ip, now->addr_ip, 4) != 0))
         journal_says("settings", now->addr_set
@@ -374,7 +389,7 @@ void settings_apply(void)
 
     values next = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                     false, { 0, 0, 0, 0 }, 0,
-                    false, { 0, 0, 0, 0 }, "erebus" };
+                    false, { 0, 0, 0, 0 }, "erebus", false };
 
     u64 start = 0;
     for (u64 i = 0; i <= size; i++) {

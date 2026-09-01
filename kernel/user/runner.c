@@ -17,6 +17,7 @@
  *   show x           say a variable and its value, for the writer
  *   wait             sleep until the next gift or message arrives
  *   tell <words>     send up to 24 letters to "it", when it listens
+ *   answer <n|v>     send the value, in digits, to "it"
  *   set x <n|v>      variables a..z hold signed numbers
  *   add sub mul div  arithmetic onto a variable
  *   get x <n|v>      x = eight bytes of "it", at that offset
@@ -29,11 +30,18 @@
  *   stop             the end
  *
  * "it" is the latest thing the runner was given after its words. The
- * outcome of get and put lands in r: zero for done, below zero for
- * refused -- and refusal is not an error, it is the kernel declining to
- * produce an object for a right the script does not hold. A script
- * finds out what it may do the same way every other program here does:
- * by trying.
+ * outcome of get, put, tell and answer lands in r: zero for done,
+ * below zero for refused -- and refusal is not an error, it is the
+ * kernel declining to produce an object for a right the script does
+ * not hold. A script finds out what it may do the same way every
+ * other program here does: by trying.
+ *
+ * A script may arrive with a time budget: the first gift's second
+ * word says how many seconds it has. When they are spent, the runner
+ * says so and ends the script -- resting, waiting and looping
+ * included. Scripts sent by other machines always carry one, which
+ * is why a visiting script cannot outstay its welcome: the language
+ * is the jail, and the clock is on its wall.
  *
  * This file is compiled into the kernel image but never runs as the
  * kernel: the section pragma below puts it among the user programs,
@@ -258,16 +266,52 @@ static u64 r_clock(void)
     return sys3(NR_CLOCK, 0, 0, 0);
 }
 
-static void r_rest(i64 seconds)
+/* Seconds gone since `from`, midnight included. */
+static u64 gone_since(u64 from)
+{
+    return (r_clock() + 86400 - from) % 86400;
+}
+
+/* A rest never sleeps past the budget: the clamp is what makes the
+ * budget hold against a script that rests its time away. */
+static void r_rest(i64 seconds, u64 started, u64 budget)
 {
     if (seconds <= 0) return;
     if (seconds > 86399) seconds = 86399;
+    if (budget) {
+        i64 remain = (i64)budget - (i64)gone_since(started);
+        if (remain <= 0) return;
+        if (seconds > remain) seconds = remain;
+    }
     u64 from = r_clock();
     for (;;) {
-        u64 gone = (r_clock() + 86400 - from) % 86400;
-        if ((i64)gone >= seconds) break;
+        if ((i64)gone_since(from) >= seconds) break;
         r_yield();
     }
+}
+
+/* The value of a variable, in digits, to "it" -- how a script hands
+ * a number to whoever is listening, the reply to a far ask included.
+ * The same shape of message tell sends; only the letters differ. */
+static u64 tell_number(u64 port, i64 val)
+{
+    u8 out[24];
+    for (u32 i = 0; i < 24; i++) out[i] = 0;
+
+    u64 mag = (val < 0) ? (u64)-val : (u64)val;
+    char digits[20];
+    u32 nd = 0;
+    if (mag == 0) digits[nd++] = '0';
+    while (mag) { digits[nd++] = (char)('0' + mag % 10); mag /= 10; }
+
+    u32 at = 0;
+    if (val < 0) out[at++] = '-';
+    while (nd && at < 24) out[at++] = (u8)digits[--nd];
+
+    u64 w[3] = { 0, 0, 0 };
+    for (u32 i = 0; i < 24; i++)
+        w[i / 8] |= (u64)out[i] << ((i % 8) * 8);
+    return sys5(NR_SEND, port, TAG_TEXT, w[0], w[1], w[2]);
 }
 
 /* What a line can tell the loop. */
@@ -277,7 +321,8 @@ static void r_rest(i64 seconds)
 
 /* Runs one line. Answers the next line number, or a FLOW_ code. */
 static i64 exec_line(const char *s, u32 ln, u64 console,
-                     i64 *v, u64 it, bool *skip)
+                     i64 *v, u64 it, bool *skip,
+                     u64 started, u64 budget)
 {
     i32 pos = 0;
     u64 w = word_at(s, &pos);
@@ -303,6 +348,15 @@ static i64 exec_line(const char *s, u32 ln, u64 console,
         return (i64)ln + 1;
     }
 
+    if (w == P8('a','n','s','w','e','r',0,0)) {
+        bool ok = true;
+        i64 n = operand(s, &pos, v, &ok);
+        if (!ok) return FLOW_WRONG;
+        u64 res = tell_number(it, n);
+        v['r' - 'a'] = (res == 0) ? 0 : -1;
+        return (i64)ln + 1;
+    }
+
     if (w == P8('s','h','o','w',0,0,0,0)) {
         while (s[pos] == ' ') pos++;
         if (s[pos] < 'a' || s[pos] > 'z') return FLOW_WRONG;
@@ -321,7 +375,7 @@ static i64 exec_line(const char *s, u32 ln, u64 console,
         bool ok = true;
         i64 n = operand(s, &pos, v, &ok);
         if (!ok) return FLOW_WRONG;
-        r_rest(n);
+        r_rest(n, started, budget);
         return (i64)ln + 1;
     }
 
@@ -435,12 +489,19 @@ void user_runner(u64 console, u64 inbox)
           P8('s','h','o','w','n',' ',' ',' '));
 
     /* The first gift is the program. Until it arrives there is
-     * nothing to do and nothing to know. */
-    u64 words = 0;
+     * nothing to do and nothing to know. Its second word may carry a
+     * time budget in seconds; zero means none, and a visiting script
+     * always brings one. */
+    u64 words = 0, budget = 0;
     while (!words) {
         if (msg_receive(inbox, buf) != 0) { r_yield(); continue; }
-        if (msg_ncaps(buf) > 0) words = msg_u64(buf, MSG_CAP0);
+        if (msg_ncaps(buf) > 0) {
+            words = msg_u64(buf, MSG_CAP0);
+            budget = msg_u64(buf, MSG_WORD0 + 8);
+        }
     }
+    if (budget > 86399) budget = 86399;
+    u64 started = r_clock();
 
     u64  it = 0;
     u32  ln = 0;
@@ -453,9 +514,20 @@ void user_runner(u64 console, u64 inbox)
          * that keeps it a polite neighbour rather than a warm one. */
         if (++steps >= 128) { steps = 0; r_yield(); }
 
+        /* The budget holds against everything: loops, rests, and a
+         * wait nobody will ever answer all pass through here. */
+        if (budget && gone_since(started) >= budget) {
+            r_say(console,
+                  P8('o','u','t',' ','o','f',' ','t'),
+                  P8('i','m','e',' ',' ',' ',' ',' '),
+                  P8(' ',' ',' ',' ',' ',' ',' ',' '));
+            break;
+        }
+
         if (script_line(words, ln, line) < 0) break;   /* the end */
 
-        i64 next = exec_line(line, ln, console, v, it, &skip);
+        i64 next = exec_line(line, ln, console, v, it, &skip,
+                             started, budget);
 
         if (next == FLOW_STOP) break;
 

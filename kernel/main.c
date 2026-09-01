@@ -220,6 +220,36 @@ object *runner_launch(object *script)
     return prog;
 }
 
+/* A visiting script: the same interpreter, holding exactly two
+ * things -- its words, read-only, and the way home, send-only. The
+ * budget rides on the first gift and the interpreter enforces it,
+ * which is what makes running a stranger's text tolerable: the
+ * language is the jail, and this hands the visitor a cell with a
+ * clock in it and nothing else. */
+object *work_launch(object *script, object *reply, u64 budget_seconds)
+{
+    if (!script || obj_type(script) != TYPE_TEXT || !reply ||
+        !console_port)
+        return NULL;
+
+    process *p = proc_create("work", (const void *)user_runner,
+                             console_port);
+    if (!p) return NULL;
+    if (!proc_start(p)) return NULL;
+
+    object *prog = proc_object(p);
+    obj_set_slot(prog, 0, script, CAP_READ);
+    obj_set_slot_name(prog, 0, "its words");
+    proc_grant_word(prog, script, CAP_READ, budget_seconds);
+
+    obj_set_slot(prog, 1, reply, CAP_CALL);
+    obj_set_slot_name(prog, 1, "the way home");
+    proc_grant(prog, reply, CAP_CALL);
+
+    kprintf("proc: %llu (work) running a visiting text\n", proc_id(p));
+    return prog;
+}
+
 /* Prints the packed characters a message carries. Anything outside
  * printable ASCII is dropped rather than sent to the console, so a
  * program cannot drive the terminal with escape sequences. */
@@ -285,6 +315,7 @@ static const char lang_text[] =
     "\n"
     "say <words>      up to 24 letters, to the console\n"
     "tell <words>     the same, to it -- when it listens\n"
+    "answer <n or v>  the value, in digits, to it\n"
     "show x           say a variable and its value\n"
     "wait             sleep until the next gift\n"
     "set x <n or v>   also: add sub mul div\n"
@@ -299,7 +330,14 @@ static const char lang_text[] =
     "stop             the end\n"
     "\n"
     "edit a running script and the next pass through a\n"
-    "line runs the new words.\n";
+    "line runs the new words.\n"
+    "\n"
+    "a text can also be asked of another machine: press\n"
+    "ask beside send, and it runs over there. it arrives\n"
+    "holding the way home as its first gift -- wait, then\n"
+    "answer sends the result back. it must finish inside\n"
+    "its budget, and the far machine only works at all\n"
+    "when its settings say \"work | welcomed\".\n";
 
 /* Finds the language page -- a reference named "the language" on the
  * root or one list below it -- or makes one, preferring to live in
@@ -309,6 +347,8 @@ static void ensure_language(object *root)
 {
     object *found = NULL;
     object *aside = NULL;
+    object *place_of = NULL;             /* where the reference lives */
+    u64     slot_of = 0;
 
     for (u64 i = 0; i < obj_slots(root) && !found; i++) {
         object *s = obj_get_slot(root, i);
@@ -316,7 +356,10 @@ static void ensure_language(object *root)
         const char *nm = obj_slot_name(root, i);
 
         if (nm && strcmp(nm, "the language") == 0 &&
-            obj_type(s) == TYPE_TEXT) { found = s; break; }
+            obj_type(s) == TYPE_TEXT) {
+            found = s; place_of = root; slot_of = i;
+            break;
+        }
 
         if (obj_type(s) != TYPE_LIST) continue;
         if (nm && strcmp(nm, "aside") == 0) aside = s;
@@ -325,13 +368,14 @@ static void ensure_language(object *root)
             object *t = obj_get_slot(s, j);
             const char *tn = obj_slot_name(s, j);
             if (t && tn && strcmp(tn, "the language") == 0 &&
-                obj_type(t) == TYPE_TEXT)
-                found = t;
+                obj_type(t) == TYPE_TEXT) {
+                found = t; place_of = s; slot_of = j;
+            }
         }
     }
 
     if (!found) {
-        object *made = obj_create(TYPE_TEXT, 1024, 0);
+        object *made = obj_create(TYPE_TEXT, 2048, 0);
         if (!made) return;
         obj_set_name(made, "the language");
 
@@ -347,6 +391,19 @@ static void ensure_language(object *root)
         obj_set_slot_name(place, at, "the language");
         obj_release(made);
         found = made;                     /* the slot holds it now */
+    }
+
+    /* A page from an older day may be too small for today's words.
+     * The words matter, the object does not: a bigger page takes the
+     * old one's place in the graph. */
+    if (obj_size(found) < sizeof(lang_text) && place_of) {
+        object *wider = obj_create(TYPE_TEXT, 2048, 0);
+        if (!wider) return;
+        obj_set_name(wider, "the language");
+        obj_set_slot(place_of, slot_of, wider, CAP_READ);
+        obj_set_slot_name(place_of, slot_of, "the language");
+        obj_release(wider);
+        found = wider;
     }
 
     u8 *d = (u8 *)obj_data(found);

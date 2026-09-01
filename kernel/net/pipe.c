@@ -36,6 +36,9 @@
 #include <eb/time.h>
 #include <eb/crypto.h>
 #include <eb/string.h>
+#include <eb/msg.h>
+#include <eb/proc.h>
+#include <eb/standard.h>
 #include <eb/fmt.h>
 #include <eb/io.h>
 
@@ -48,10 +51,24 @@
 #define K_HELLO   6                  /* a knock: my fresh public key */
 #define K_WELCOME 7                  /* the answer: mine, in return */
 #define K_SEALED  8                  /* an envelope around any of the rest */
+#define K_ASK     9                  /* a job: run this text, answer me */
+#define K_ANSWER  10                 /* what became of a job */
 
 #define CHUNK_MAX 1024
 #define CARRY_MAX_BYTES 65536
 #define INNER_MAX (24 + CHUNK_MAX)
+
+/* Far work. A recipe fits one sealed datagram; the budget is what the
+ * asking side grants and the interpreter over there enforces. */
+#define RECIPE_MAX   1024
+#define ASK_BUDGET_S 20
+
+/* What an answer says about its job. */
+#define A_OK     0                   /* here is the result */
+#define A_NOWORK 1                   /* this machine takes no work */
+#define A_LATE   2                   /* it ran out of time */
+#define A_BUSY   3                   /* already working on something */
+#define A_SILENT 4                   /* it ended without answering */
 
 /* Wire kinds, deliberately not the kernel's type ids. */
 #define W_TEXT    1
@@ -358,6 +375,145 @@ static void knock_send(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Far work                                                            */
+/* ------------------------------------------------------------------ */
+
+/* A text can be asked of another machine: it travels as a recipe,
+ * runs over there in the interpreter with a way home and a clock and
+ * nothing else, and what it answers comes back correlated by job.
+ * The far machine only works at all when its settings welcome it. */
+
+static domain *pipe_kdom;
+
+void pipe_prepare(domain *k) { pipe_kdom = k; }
+
+/* The ask we have out, if any. */
+static struct {
+    bool active;
+    u64  id;
+    u32  no;                         /* the human's number for it */
+    u32  tries;
+    u64  last_ns;
+    u64  started_ns;
+    u32  len;
+    u8   data[RECIPE_MAX];
+} ask;
+
+static u32 ask_no;
+
+/* The job we are running for someone else, if any. One at a time:
+ * a worker is a neighbour lending a hand, not a queue. */
+static struct {
+    bool       active;
+    u64        id;
+    u8         from[4];
+    u64        started_ns;
+    u64        budget_s;
+    object    *prog;
+    object    *port;
+    cap_handle recv;
+} workj;
+
+/* The last answer given, kept to repeat when the same ask comes
+ * again -- a lost answer must cost a resend, never a second run. */
+static struct {
+    bool valid;
+    u64  id;
+    u8   status;
+    u8   text[24];
+} gave;
+
+/* "job N..." -- the journal's half of the correlation. */
+static void job_says(u32 no, const char *tail)
+{
+    char line[48];
+    u32 at = 0;
+    const char *p = "job ";
+    while (*p) line[at++] = *p++;
+
+    char d[10];
+    u32 nd = 0;
+    if (no == 0) d[nd++] = '0';
+    while (no && nd < 10) { d[nd++] = (char)('0' + no % 10); no /= 10; }
+    while (nd && at < 46) line[at++] = d[--nd];
+
+    while (*tail && at < 47) line[at++] = *tail++;
+    line[at] = 0;
+    journal_says("pipe", line);
+}
+
+static void answer_send(sealrec *s, u64 id, u8 status, const u8 text[24])
+{
+    u8 pkt[40];
+    wr32(pkt, MAGIC);
+    pkt[4] = K_ANSWER; pkt[5] = status; pkt[6] = pkt[7] = 0;
+    wr64(pkt + 8, id);
+    for (u32 i = 0; i < 24; i++) pkt[16 + i] = text[i];
+    seal_send(s, pkt, 40);
+}
+
+static void ask_send(sealrec *s)
+{
+    u8 pkt[24 + RECIPE_MAX];
+    wr32(pkt, MAGIC);
+    pkt[4] = K_ASK; pkt[5] = pkt[6] = pkt[7] = 0;
+    wr64(pkt + 8, ask.id);
+    wr32(pkt + 16, ask.len);
+    wr32(pkt + 20, ASK_BUDGET_S);
+    memcpy(pkt + 24, ask.data, ask.len);
+    seal_send(s, pkt, 24 + ask.len);
+}
+
+bool pipe_ask(object *o)
+{
+    if (!o) return false;
+
+    if (!net_crypto_ok()) {
+        journal_says("pipe", "the seal cannot prove itself; "
+                             "nothing goes");
+        return false;
+    }
+    if (obj_type(o) != TYPE_TEXT) {
+        journal_says("pipe", "only a text can be asked");
+        return false;
+    }
+    if (!settings_peer(NULL, NULL)) {
+        journal_says("pipe", "no peer is named in the settings");
+        return false;
+    }
+    if (ask.active) {
+        journal_says("pipe", "still waiting on the last job");
+        return false;
+    }
+
+    const u8 *d = (const u8 *)obj_data(o);
+    u64 size = obj_size(o);
+    u32 len = 0;
+    if (d) while (len < size && d[len]) len++;
+    if (len == 0) {
+        journal_says("pipe", "there is nothing in it to ask");
+        return false;
+    }
+    if (len > RECIPE_MAX) {
+        journal_says("pipe", "that recipe is too long to send");
+        return false;
+    }
+
+    memcpy(ask.data, d, len);
+    ask.len = len;
+    rand_bytes((u8 *)&ask.id, 8);
+    ask.no = ++ask_no;
+    ask.tries = 0;
+    ask.last_ns = 0;
+    ask.started_ns = time_ns();
+    ask.active = true;
+
+    job_says(ask.no, " asked of the peer");
+    kprintf("pipe: job %u asked, %u bytes of recipe\n", ask.no, len);
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
 /* Sending                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -483,6 +639,52 @@ static struct {
 
 static u64 last_taken_id;            /* to re-ack a lost TAKEN */
 
+/* Lays a finished object into the arrivals list. Read and write,
+ * never grant onward by default: what came over the wire is
+ * material, and handing it around further stays a decision, not a
+ * reflex. Takes over the caller's reference on success. */
+static bool arrivals_place(object *o)
+{
+    if (!arrivals) return false;
+
+    u64 n = obj_slots(arrivals), spot = n;
+    for (u64 i = 0; i < n; i++)
+        if (!obj_get_slot(arrivals, i)) { spot = i; break; }
+    if (spot == n && !obj_grow_slots(arrivals, n + 1)) return false;
+
+    obj_set_slot(arrivals, spot, o, CAP_READ | CAP_WRITE);
+    obj_release(o);
+    obj_touch(arrivals);
+    return true;
+}
+
+/* A job's answer becomes a small text in arrivals, so the result is
+ * material to work with and not only a line that scrolls away. */
+static void lay_answer(u32 no, const u8 *text)
+{
+    u32 tl = 0;
+    while (tl < 24 && text[tl]) tl++;
+    if (tl == 0) return;
+
+    object *o = obj_create(TYPE_TEXT, tl + 512, 0);
+    if (!o) return;
+    memcpy(obj_data(o), text, tl);
+
+    char nm[16];
+    u32 at = 0;
+    const char *p = "answer ";
+    while (*p) nm[at++] = *p++;
+    char d[10];
+    u32 nd = 0;
+    if (no == 0) d[nd++] = '0';
+    while (no && nd < 10) { d[nd++] = (char)('0' + no % 10); no /= 10; }
+    while (nd && at < 15) nm[at++] = d[--nd];
+    nm[at] = 0;
+    obj_set_name(o, nm);
+
+    if (!arrivals_place(o)) obj_release(o);
+}
+
 static void arrival_done(void)
 {
     type_id t = local_kind_of(in.kind);
@@ -498,21 +700,11 @@ static void arrival_done(void)
     for (u32 i = 0; i < in.total; i++) d[i] = in.data[i];
     if (in.name[0]) obj_set_name(o, in.name);
 
-    u64 n = obj_slots(arrivals), spot = n;
-    for (u64 i = 0; i < n; i++)
-        if (!obj_get_slot(arrivals, i)) { spot = i; break; }
-    if (spot == n && !obj_grow_slots(arrivals, n + 1)) {
+    if (!arrivals_place(o)) {
         obj_release(o);
         in.active = false;
         return;
     }
-
-    /* Read and write, never grant onward by default: what came over
-     * the wire is material, and handing it around further stays a
-     * decision, not a reflex. */
-    obj_set_slot(arrivals, spot, o, CAP_READ | CAP_WRITE);
-    obj_release(o);
-    obj_touch(arrivals);
 
     kprintf("pipe: %u bytes arrived from %u.%u.%u.%u\n",
             in.total, in.from[0], in.from[1], in.from[2], in.from[3]);
@@ -601,6 +793,117 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
             last_taken_id = in.id;
             arrival_done();
         }
+        return;
+    }
+
+    /* A job. The same ask asked again is the sender retrying, not a
+     * second job: while it runs it is ignored, once answered the
+     * old answer is repeated. Fresh asks are taken only when the
+     * settings welcome work, and one at a time. */
+    if (kind == K_ASK && len >= 24) {
+        u32 rlen = rd32(p + 16);
+        u64 budget = rd32(p + 20);
+        if (rlen == 0 || rlen > RECIPE_MAX || 24 + rlen > len) return;
+
+        if (workj.active && id == workj.id) return;
+        if (gave.valid && id == gave.id) {
+            answer_send(s, id, gave.status, gave.text);
+            return;
+        }
+
+        static const u8 none[24] = { 0 };
+        if (!settings_work()) {
+            answer_send(s, id, A_NOWORK, none);
+            kprintf("pipe: turned away a job (work is refused)\n");
+            return;
+        }
+        if (workj.active) {
+            answer_send(s, id, A_BUSY, none);
+            return;
+        }
+        if (!pipe_kdom) return;
+
+        object *script = obj_create(TYPE_TEXT, rlen + 512, 0);
+        if (!script) return;
+        memcpy(obj_data(script), p + 24, rlen);
+        obj_set_name(script, "visiting work");
+
+        object *reply = port_create(4);
+        if (!reply) { obj_release(script); return; }
+        cap_handle h = cap_insert(pipe_kdom, reply, CAP_READ);
+
+        if (budget == 0 || budget > 60) budget = ASK_BUDGET_S;
+        object *prog = work_launch(script, reply, budget);
+        obj_release(script);             /* the program holds its words */
+        if (!prog) {
+            cap_revoke(pipe_kdom, h);
+            obj_release(reply);
+            return;
+        }
+        obj_retain(prog);
+
+        workj.active = true;
+        workj.id = id;
+        for (u32 i = 0; i < 4; i++) workj.from[i] = src[i];
+        workj.started_ns = time_ns();
+        workj.budget_s = budget;
+        workj.prog = prog;
+        workj.port = reply;
+        workj.recv = h;
+
+        kprintf("pipe: running a job from %u.%u.%u.%u, %u bytes, "
+                "%llu seconds\n",
+                src[0], src[1], src[2], src[3], rlen, budget);
+        journal_says("pipe", "running a job for another machine");
+        return;
+    }
+
+    /* What became of our job. */
+    if (kind == K_ANSWER && len >= 40) {
+        if (!ask.active || id != ask.id) return;
+        u8 status = p[5];
+
+        if (status == A_OK) {
+            char line[48];
+            u32 at = 0;
+            const char *pre = "job ";
+            while (*pre) line[at++] = *pre++;
+            char dg[10];
+            u32 nd = 0;
+            u32 v = ask.no;
+            if (v == 0) dg[nd++] = '0';
+            while (v && nd < 10) { dg[nd++] = (char)('0' + v % 10); v /= 10; }
+            while (nd && at < 46) line[at++] = dg[--nd];
+            const char *mid = " answers: ";
+            while (*mid && at < 47) line[at++] = *mid++;
+            for (u32 i = 0; i < 24 && p[16 + i] && at < 47; i++)
+                line[at++] = (char)((p[16 + i] >= 0x20 &&
+                                     p[16 + i] < 0x7F) ? p[16 + i] : ' ');
+            line[at] = 0;
+            journal_says("pipe", line);
+
+            char tz[25];
+            u32 ti = 0;
+            while (ti < 24 && p[16 + ti]) { tz[ti] = (char)p[16 + ti]; ti++; }
+            tz[ti] = 0;
+            kprintf("pipe: job %u answers: %s\n", ask.no, tz);
+
+            lay_answer(ask.no, p + 16);
+        } else if (status == A_NOWORK) {
+            job_says(ask.no, ": that machine takes no work");
+            kprintf("pipe: job %u refused: no work taken\n", ask.no);
+        } else if (status == A_LATE) {
+            job_says(ask.no, ": it ran out of time");
+            kprintf("pipe: job %u ran out of time\n", ask.no);
+        } else if (status == A_BUSY) {
+            job_says(ask.no, ": the far side is busy");
+            kprintf("pipe: job %u refused: busy\n", ask.no);
+        } else {
+            job_says(ask.no, ": it ended without an answer");
+            kprintf("pipe: job %u ended silent\n", ask.no);
+        }
+        ask.active = false;
+        return;
     }
 }
 
@@ -756,15 +1059,94 @@ void pipe_service(void)
         if (!knock.last_ns || now - knock.last_ns >= 2 * SECOND) {
             if (knock.tries >= 3) {
                 knock.active = false;
-                if (out.busy) {
+                if (out.busy || ask.active) {
                     journal_says("pipe", "nobody answered the knock");
                     kprintf("pipe: the knock went unanswered\n");
                     out.busy = false;
+                    ask.active = false;
                 }
             } else {
                 knock.tries++;
                 knock.last_ns = now;
                 knock_send();
+            }
+        }
+    }
+
+    /* The job we run for someone else: its first told line is the
+     * answer; a script that ends mute, or outstays the budget the
+     * interpreter holds it to, is answered for. */
+    if (workj.active) {
+        message m;
+        u8 text[24];
+        u8 status = 0xFF;
+        memset(text, 0, 24);
+
+        if (pipe_kdom && port_try_receive(pipe_kdom, workj.recv, &m)) {
+            if (m.ncaps > 0) {
+                cap_revoke(pipe_kdom, m.caps[0]);
+                if (m.ncaps > 1) cap_revoke(pipe_kdom, m.caps[1]);
+            }
+            if (m.tag == 0x54584554ULL) {          /* "TEXT" */
+                for (u32 i = 0; i < 24; i++)
+                    text[i] = (u8)((m.words[i / 8] >> ((i % 8) * 8))
+                                   & 0xFF);
+                status = A_OK;
+            }
+        } else if (!proc_is_running(workj.prog)) {
+            /* The interpreter counts whole seconds of the day, so a
+             * script it ended for time can look a breath early from
+             * here; within a second of the budget is the budget. */
+            u64 gone = (time_ns() - workj.started_ns) / SECOND;
+            status = (gone + 1 >= workj.budget_s) ? A_LATE : A_SILENT;
+        } else if (time_ns() - workj.started_ns >
+                   (workj.budget_s + 5) * SECOND) {
+            status = A_LATE;
+        }
+
+        if (status != 0xFF) {
+            sealrec *s = seal_by_ip(workj.from);
+            if (s) answer_send(s, workj.id, status, text);
+
+            gave.valid = true;
+            gave.id = workj.id;
+            gave.status = status;
+            memcpy(gave.text, text, 24);
+
+            cap_revoke(pipe_kdom, workj.recv);
+            obj_release(workj.port);
+            obj_release(workj.prog);
+            workj.active = false;
+
+            kprintf("pipe: the job is answered (status %u)\n", status);
+            journal_says("pipe", status == A_OK
+                         ? "the job is done and answered"
+                         : "the job ended without a result");
+        }
+    }
+
+    /* The ask we have out: knock first, then repeat the ask a few
+     * times, then wait out the budget before calling it lost. */
+    if (ask.active) {
+        u8 apeer[4];
+        u16 app;
+        if (!settings_peer(apeer, &app)) {
+            ask.active = false;
+        } else {
+            sealrec *s = seal_by_ip(apeer);
+            u64 now = time_ns();
+            if (!s) {
+                knock_begin(apeer, app);
+            } else if (now - ask.started_ns >
+                       (u64)(ASK_BUDGET_S + 15) * SECOND) {
+                job_says(ask.no, ": no answer came");
+                kprintf("pipe: job %u heard nothing back\n", ask.no);
+                ask.active = false;
+            } else if (ask.tries < 3 &&
+                       (!ask.last_ns || now - ask.last_ns >= 2 * SECOND)) {
+                ask.tries++;
+                ask.last_ns = now;
+                ask_send(s);
             }
         }
     }

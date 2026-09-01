@@ -1093,6 +1093,7 @@ static void net_thread(void *arg)
 void net_prepare(domain *kernel)
 {
     kdom = kernel;
+    pipe_prepare(kernel);
     service_port = port_create(16);
     if (!service_port) return;
     obj_set_name(service_port, "the wire");

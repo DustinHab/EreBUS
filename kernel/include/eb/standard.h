@@ -23,4 +23,9 @@ object *standard_launch(u32 i);
  * program, granted its own words read-only as the first gift. */
 object *runner_launch(object *script);
 
+/* Starts the interpreter on a visiting text, for the pipe: the words
+ * read-only, a reply port send-only, and a time budget the
+ * interpreter itself enforces. Holds nothing else. */
+object *work_launch(object *script, object *reply, u64 budget_seconds);
+
 #endif /* EB_STANDARD_H */

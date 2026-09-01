@@ -23,11 +23,22 @@
 
 #define PIPE_PORT 7800
 
+/* The kernel domain, for the reply ports far work needs. */
+struct domain;
+void pipe_prepare(struct domain *k);
+
 /* Queues one object for the peer. Copies the substance and returns;
  * the network thread does the carrying. False when the pipe is
  * already carrying something, the object is not a plain data kind,
  * or no peer is named. */
 bool pipe_post(object *o);
+
+/* Asks the peer to run a text: it travels as a recipe, runs over
+ * there under the interpreter's own time budget, and its answer
+ * comes home as a journal line and a small text in arrivals. One
+ * ask at a time. The far machine refuses unless its settings say
+ * "work | welcomed". */
+bool pipe_ask(object *o);
 
 /* The list arrivals are laid in, adopted or created by main. */
 void pipe_arrivals_set(object *list);

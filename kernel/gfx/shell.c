@@ -195,7 +195,8 @@ typedef enum {
     HOT_SEND,        /* give the focused object to the pipe's peer */
     HOT_SCAN,        /* call out on the wire for other machines */
     HOT_PEERPICK,    /* a found machine: point the pipe at it */
-    HOT_SENDPICK     /* a found machine, chosen mid-send: point and go */
+    HOT_SENDPICK,    /* a found machine, chosen mid-send: point and go */
+    HOT_ASK          /* run the focused text on the peer's machine */
 } hot_kind;
 
 typedef struct {
@@ -799,8 +800,10 @@ static bool        addr_edit;       /* the address line is being typed */
 
 /* The recipient chooser: opens under the send word when no peer is
  * set yet, scanning as it opens, so choosing whom happens where the
- * sending was asked for. */
+ * sending was asked for. When it was ask that opened it, the chosen
+ * machine gets the work instead of the copy. */
 static bool sendto_open;
+static bool sendto_ask;
 static i32  sendto_x;
 
 /* Where the browser has been, so it can go back. Addresses only; the
@@ -2345,8 +2348,20 @@ static void draw_all(void)
             text_at(chip_x, 14, sw - PAD, "send", lit ? C_TEXT : C_ACCENT);
             hot_add(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, HOT_SEND, 0);
             sendto_x = chip_x;
+            chip_x += 6 * GLYPH_W;
         } else {
             sendto_open = false;
+        }
+
+        /* Far work: a text can be asked of another machine. It runs
+         * over there under its own clock, and the answer comes home.
+         * The word stands beside send because asking is sending with
+         * a request attached. */
+        if (can_send && ft == TYPE_TEXT) {
+            bool lit = is_hovered(HOT_ASK, 0);
+            if (lit) fb_rect(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(chip_x, 14, sw - PAD, "ask", lit ? C_TEXT : C_ACCENT);
+            hot_add(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, HOT_ASK, 0);
         }
     }
 
@@ -2529,7 +2544,10 @@ static void draw_all(void)
     if (settings_hints()) {
         at = put(line, at, "click anything you can see.   "
                            "arrows also move.   ");
-        if (sendto_open)
+        if (sendto_open && sendto_ask)
+            at = put(line, at, "click a machine and it does the work. "
+                               "esc keeps it here.");
+        else if (sendto_open)
             at = put(line, at, "click a machine and it goes there. "
                                "esc keeps it here.");
         else if (focus() == pipe_arrivals() && nav.at_generation == 0)
@@ -2571,7 +2589,8 @@ static void draw_all(void)
         fb_rect(px, py, pw2, ph, C_PANEL_HI);
 
         i32 ty2 = py + 8;
-        text_at(px + 8, ty2, px + pw2, "send to", C_DIM);
+        text_at(px + 8, ty2, px + pw2,
+                sendto_ask ? "ask whom" : "send to", C_DIM);
         if (!pipe_scanning()) {
             bool alit = is_hovered(HOT_SCAN, 1);
             i32 ax = px + pw2 - 10 * GLYPH_W - 8;
@@ -3053,11 +3072,12 @@ static void index_walk_to(u32 row)
 static void act_on(const hot_region *r)
 {
     /* An open recipient chooser closes on any click that is not its
-     * own; a second press on send is the closing itself. */
+     * own; a second press on the word that opened it is the closing
+     * itself. */
     if (sendto_open && r->kind != HOT_SENDPICK && r->kind != HOT_SCAN) {
         sendto_open = false;
         nav.redraw = true;
-        if (r->kind == HOT_SEND) return;
+        if (r->kind == HOT_SEND || r->kind == HOT_ASK) return;
     }
 
     switch (r->kind) {
@@ -3222,6 +3242,23 @@ static void act_on(const hot_region *r)
                 pipe_post(focus());
             } else {
                 sendto_open = true;
+                sendto_ask = false;
+                pipe_scan();
+            }
+        }
+        nav.redraw = true;
+        break;
+
+    case HOT_ASK:
+        /* The same gesture with a request attached: the text runs on
+         * the peer's machine and its answer comes home. Without a
+         * peer, the same chooser opens -- picking a machine asks it. */
+        if (focus_rights() & CAP_READ) {
+            if (settings_peer(NULL, NULL)) {
+                pipe_ask(focus());
+            } else {
+                sendto_open = true;
+                sendto_ask = true;
                 pipe_scan();
             }
         }
@@ -3245,13 +3282,15 @@ static void act_on(const hot_region *r)
 
     case HOT_SENDPICK: {
         /* Chosen mid-send: point the pipe at the machine and let the
-         * thing go in the same breath. */
+         * thing go -- or the work -- in the same breath. */
         u8 fip[4];
         char fname[24];
         if (!pipe_found_at(r->index, fip, fname)) break;
         peer_write(fip);
-        if (focus_rights() & CAP_READ)
-            pipe_post(focus());
+        if (focus_rights() & CAP_READ) {
+            if (sendto_ask) pipe_ask(focus());
+            else            pipe_post(focus());
+        }
         sendto_open = false;
         nav.redraw = true;
         break;
