@@ -311,6 +311,50 @@ built binary.
   an overview and not a side door. What only the kernel and the
   programs hold is counted beneath the list, not shown: an overview of
   what you hold is not a window into what you do not.
+* **Mark, take, put.** Drag across a text and the stretch is marked;
+  take lifts the letters and they travel with the shell -- across
+  objects, across views, even out of a past generation -- until put
+  sets them down at the caret. Marking asks only for reading; put is
+  the part that asks for write. Typing over a mark replaces it.
+* **Withdrawal, one row at a time.** The capability list of a running
+  program carries an x per row: whoever holds the right to give also
+  holds the right to take back, the voice and the letter box included,
+  and what another program passed along is reachable by the same
+  gesture. The four views sit in the footer as four clickable words.
+* **Search.** Typing while the index is open searches everything
+  reachable -- the names things are shown under and the words the
+  texts say. A content answer brings the line it was found in; enter
+  goes to the first answer. With no paths to remember, asking for what
+  a thing says is how a thing is found again.
+* **Programs start from the palette.** The add palette offers the
+  standard programs alongside text, bytes, list: making one is the
+  same act as making anything -- it comes to exist and the reference
+  is how it is held. An instance begins with a voice and a letter box;
+  what it can touch is decided by pointing its object at things.
+* **Measured memory, and a floor.** The activity table's mem column
+  counts every frame a process owns, tables included, at the moment of
+  asking. proc_create refuses when the table of the living is full or
+  the free memory is down to its last megabytes -- the reserve belongs
+  to what already runs.
+* **Pictures.** A ninth type: a width, a height, one ink per cell,
+  small enough that every lens honestly shows all of it. The picture
+  lens paints -- sixteen fixed inks, deliberately not the theme's, a
+  stroke drawing the line between pointer reports -- and bytes shows
+  the same cells raw. Ink 0 is the paper, which is what a wiped
+  picture is full of.
+* **Texts become programs.** The runner: press run beside any readable
+  text and a process starts, granted its own words read-only as the
+  first gift, reading them line by line as it goes. The text stays
+  live -- edit a running script and the next pass runs the new words;
+  cut the reference and the program is words again. The language fits
+  on one page and the page is in the graph ("the language", beside the
+  seed objects): variables a..z, say, wait, get and put against "it"
+  (the latest gift), if, skip, back, stop. Refusal lands in r rather
+  than erring: a script learns what it may do the way every program
+  here does, by trying. A wrong word stops the run and names its line.
+  The interpreter is the one C file in the user section, held to the
+  same discipline as the assembly programs: no globals, no string
+  literals, nothing that leans on kernel memory from ring 3.
 * M10 — booting real hardware from a USB stick
 
 ## A note on Secure Boot
