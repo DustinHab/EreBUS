@@ -51,7 +51,7 @@ struct object {
     u64     size;      /* payload bytes */
     u64     nslots;    /* outgoing references */
     u32     mark;      /* used by graph walks; not part of the object */
-    u32     _mark_pad;
+    u32     fleeting;  /* changes by design; its edits are not history */
     char    name[OBJ_NAME_MAX];   /* what the object calls itself */
     obj_slot *slots;              /* its own allocation, so it can grow */
 
@@ -652,4 +652,22 @@ bool obj_collect_selftest(void)
     }
 
     return obj_live_count() == before;
+}
+
+/* ------------------------------------------------------------------ */
+
+static u64 touches;
+
+void obj_touch(object *o)
+{
+    if (o && o->fleeting) return;
+    touches++;
+}
+
+u64 obj_touches(void) { return touches; }
+
+void obj_set_fleeting(object *o, bool fleeting)
+{
+    check(o, "set fleeting");
+    o->fleeting = fleeting ? 1 : 0;
 }

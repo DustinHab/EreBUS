@@ -12,6 +12,8 @@
 #include <eb/journal.h>
 #include <eb/settings.h>
 #include <eb/standard.h>
+#include <eb/net.h>
+#include <eb/html.h>
 #include <eb/time.h>
 
 #define SNAP_HISTORY_MAX 32
@@ -103,6 +105,9 @@ static struct {
      * painting until it comes back up. */
     bool paint_drag;
 
+    /* How far down a rendered page one has read. */
+    u32 html_scroll;
+
     u64  changes;
     bool redraw;
     i32  mouse_x, mouse_y;
@@ -176,7 +181,10 @@ typedef enum {
     HOT_FINDX,       /* empty the search */
     HOT_INK,         /* choose an ink */
     HOT_CANVAS,      /* a cell of a picture: paint it */
-    HOT_RUN          /* run the focused text as a program */
+    HOT_RUN,         /* run the focused text as a program */
+    HOT_GO,          /* ask the network for the page the first line names */
+    HOT_LINK,        /* a link in a rendered page: go there */
+    HOT_SCROLL       /* the page's edge: up or down a window */
 } hot_kind;
 
 typedef struct {
@@ -750,6 +758,139 @@ static void paint_at_pointer(void)
     paint_last_row = row;
 }
 
+/* ------------------------------------------------------------------ */
+/* The html lens: a fetched page as prose                              */
+/* ------------------------------------------------------------------ */
+
+/* What the last render found, for turning clicks back into links. */
+static char      link_urls[HTML_LINKS_MAX][HTML_URL_MAX];
+static u32       link_count;
+static html_spot link_spots[HTML_SPOTS_MAX];
+static u32       link_spot_count;
+static u32       html_rows;         /* the whole flow */
+static u32       html_vis;          /* rows the window holds */
+
+/* Whether a text reads like a page from outside: an address alone on
+ * the first line, markup somewhere below. The lens is offered either
+ * way; this only decides what a text opens as. */
+static bool smells_like_page(object *o)
+{
+    if (obj_type(o) != TYPE_TEXT) return false;
+    const u8 *d = (const u8 *)obj_data(o);
+    if (!d) return false;
+
+    u64 len = text_len(d, obj_size(o));
+    u64 i = 0;
+    bool dot = false;
+    while (i < len && d[i] != '\n') {
+        if (d[i] == ' ') return false;
+        if (d[i] == '.') dot = true;
+        i++;
+    }
+    if (!dot || i == 0 || i + 1 >= len) return false;
+    for (u64 j = i; j < len; j++) if (d[j] == '<') return true;
+    return false;
+}
+
+/* The current ask, split for resolving relative links. */
+static void ask_parts(const u8 *d, u64 ask, char *host, u32 hmax,
+                      u32 *hlen, char *path, u32 pmax, u32 *plen)
+{
+    u64 at = 0;
+    if (ask >= 7 && d[4] == ':' && d[5] == '/' && d[6] == '/') at = 7;
+    else if (ask >= 8 && d[5] == ':' && d[6] == '/' && d[7] == '/') at = 8;
+
+    *hlen = 0;
+    *plen = 0;
+    while (at < ask && d[at] != '/' && *hlen < hmax - 1)
+        host[(*hlen)++] = (char)d[at++];
+    while (at < ask && *plen < pmax - 1)
+        path[(*plen)++] = (char)d[at++];
+}
+
+static void lens_html(object *o, i32 x, i32 y, i32 w, i32 h, bool live)
+{
+    const u8 *d = (const u8 *)obj_data(o);
+    if (!d) { text_at(x, y, x + w, "(nothing to show)", C_FAINT); return; }
+
+    u64 len = text_len(d, obj_size(o));
+    u64 ask = 0;
+    while (ask < len && d[ask] != '\n') ask++;
+
+    /* The address, and the word that asks the network for it. */
+    char addr[72];
+    u32 an = 0;
+    while (an < sizeof(addr) - 1 && an < ask) { addr[an] = (char)d[an]; an++; }
+    addr[an] = 0;
+    text_at(x, y, x + w - 4 * GLYPH_W, addr, C_ACCENT);
+
+    bool may_ask = live && nav.at_generation == 0 && net_up() &&
+                   (focus_rights() & CAP_READ) &&
+                   (focus_rights() & CAP_WRITE);
+    if (may_ask) {
+        i32 gx = x + w - 2 * GLYPH_W - 4;
+        bool lit = is_hovered(HOT_GO, 0);
+        if (lit) fb_rect(gx - 4, y - 3, 2 * GLYPH_W + 8, ROW, C_EDGE);
+        text_at(gx, y, x + w, "go", lit ? C_TEXT : C_WRITE);
+        hot_add(gx - 4, y - 3, 2 * GLYPH_W + 8, ROW, HOT_GO, 0);
+    }
+    fb_rect(x, y + ROW - 4, w, 1, C_EDGE);
+
+    i32 by = y + ROW + 2;
+    i32 bh = h - ROW - 2;
+
+    if (ask + 1 >= len) {
+        text_at(x, by, x + w, may_ask
+                ? "nothing here yet. the first line asks; go fetches."
+                : "nothing here yet.", C_FAINT);
+        html_rows = 0;
+        if (live) link_spot_count = 0;
+        return;
+    }
+
+    html_view v = {
+        .src = d + ask + 1,
+        .len = len - ask - 1,
+        .x = x, .y = by, .w = w - 2 * GLYPH_W, .h = bh,
+        .scroll = nav.html_scroll,
+        .col = { C_TEXT, C_DIM, C_FAINT, C_ACCENT },
+    };
+
+    html_rows = html_render(&v,
+                            live ? link_urls : NULL,
+                            live ? &link_count : NULL,
+                            live ? link_spots : NULL,
+                            live ? &link_spot_count : NULL);
+    html_vis = (u32)(bh / GLYPH_H);
+
+    /* Links carry only as far as writing does: going somewhere
+     * rewrites the ask, and a page held read-only is a page, not a
+     * doorway. */
+    if (live && may_ask)
+        for (u32 i = 0; i < link_spot_count; i++)
+            hot_add(link_spots[i].x, link_spots[i].y - 2,
+                    link_spots[i].w, link_spots[i].h + 4, HOT_LINK, i);
+    else if (live)
+        link_spot_count = 0;
+
+    /* The page's edge: where it stands, and the two halves that move
+     * it. Arrows do the same, faster. */
+    if (html_rows > html_vis) {
+        i32 tx = x + w - 6;
+        fb_rect(tx, by, 2, bh, C_EDGE);
+        i32 th = bh * (i32)html_vis / (i32)html_rows;
+        if (th < 12) th = 12;
+        i32 tp = (i32)((u64)(bh - th) * nav.html_scroll /
+                       (html_rows - html_vis));
+        fb_rect(tx - 1, by + tp, 4, th, C_DIM);
+
+        hot_add(x + w - 2 * GLYPH_W, by, 2 * GLYPH_W, bh / 2,
+                HOT_SCROLL, 0);
+        hot_add(x + w - 2 * GLYPH_W, by + bh / 2, 2 * GLYPH_W,
+                bh - bh / 2, HOT_SCROLL, 1);
+    }
+}
+
 static void lens_bytes(object *o, i32 x, i32 y, i32 w, i32 h)
 {
     const u8 *d = (const u8 *)obj_data(o);
@@ -928,6 +1069,7 @@ static void draw_lens(lens_kind k, object *o, i32 x, i32 y, i32 w, i32 h,
     case LENS_BYTES:     lens_bytes(o, x, y, w, h); break;
     case LENS_STRUCTURE: lens_structure(o, x, y, w, h); break;
     case LENS_PAINT:     lens_paint(o, x, y, w, h, caret); break;
+    case LENS_HTML:      lens_html(o, x, y, w, h, caret); break;
     default: break;
     }
 }
@@ -939,6 +1081,7 @@ static const char *lens_name(lens_kind k)
     case LENS_BYTES:     return "bytes";
     case LENS_STRUCTURE: return "structure";
     case LENS_PAINT:     return "picture";
+    case LENS_HTML:      return "html";
     default:             return "?";
     }
 }
@@ -948,7 +1091,10 @@ static const char *lens_name(lens_kind k)
 static lens_kind default_lens(object *o)
 {
     switch (obj_type(o)) {
-    case TYPE_TEXT:    return LENS_TEXT;
+    case TYPE_TEXT:
+        /* A text that is a fetched page opens as the page it is;
+         * the raw markup stays one lens tab away. */
+        return smells_like_page(o) ? LENS_HTML : LENS_TEXT;
     case TYPE_BYTES:   return LENS_BYTES;
     case TYPE_PICTURE: return LENS_PAINT;
     default:           return LENS_STRUCTURE;
@@ -1030,7 +1176,8 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         i32 lx = mid_x + PAD + (i32)i * each;
         if (i > 0) fb_rect(lx - PAD / 2, cy, 1, ch, C_EDGE);
         draw_lens(nav.lens[i], f, lx, cy, each - PAD, ch,
-                  nav.lens[i] == LENS_TEXT || nav.lens[i] == LENS_PAINT);
+                  nav.lens[i] == LENS_TEXT || nav.lens[i] == LENS_PAINT ||
+                  nav.lens[i] == LENS_HTML);
     }
 
     /* --- where it leads ------------------------------------------ */
@@ -1432,7 +1579,8 @@ static void draw_tiles_shell(i32 sw, i32 sh, i32 top, i32 bottom)
                   x + PAD, top + PAD + ROW + PAD,
                   w - 2 * PAD, bottom - top - ROW - 3 * PAD,
                   last && (nav.lens[0] == LENS_TEXT ||
-                           nav.lens[0] == LENS_PAINT));
+                           nav.lens[0] == LENS_PAINT ||
+                           nav.lens[0] == LENS_HTML));
 
         x += w + gap;
     }
@@ -2074,6 +2222,7 @@ static void follow(u64 slot)
     nav.caret = (u64)-1;                 /* the end, once clamped */
     nav.sel_a = nav.sel_b = 0;
     nav.sel_drag = false;
+    nav.html_scroll = 0;
     set_lenses_for(t);
     nav.changes++;
     nav.redraw = true;
@@ -2087,6 +2236,7 @@ static void go_back(void)
     nav.caret = (u64)-1;
     nav.sel_a = nav.sel_b = 0;
     nav.sel_drag = false;
+    nav.html_scroll = 0;
     set_lenses_for(focus());
     nav.changes++;
     nav.redraw = true;
@@ -2212,11 +2362,33 @@ static void handle_keys(void)
             }
             continue;
         case KEY_UP:
-            if (nav.selected > 0) { nav.selected--; nav.redraw = true; }
-            continue;
         case KEY_DOWN: {
-            u64 n = obj_slots(focus());
-            if (n && nav.selected + 1 < n) { nav.selected++; nav.redraw = true; }
+            /* With a page open, the arrows read it; everywhere else
+             * they pick among the references. */
+            bool page_open = false;
+            for (u32 li = 0; li < nav.lens_count; li++)
+                if (nav.lens[li] == LENS_HTML) page_open = true;
+            if (page_open && nav.mode == SHELL_FOCUS &&
+                html_rows > html_vis) {
+                u32 max = html_rows - html_vis;
+                if (k.codepoint == KEY_UP)
+                    nav.html_scroll = nav.html_scroll > 3
+                                    ? nav.html_scroll - 3 : 0;
+                else
+                    nav.html_scroll = nav.html_scroll + 3 > max
+                                    ? max : nav.html_scroll + 3;
+                nav.redraw = true;
+                continue;
+            }
+            if (k.codepoint == KEY_UP) {
+                if (nav.selected > 0) { nav.selected--; nav.redraw = true; }
+            } else {
+                u64 n = obj_slots(focus());
+                if (n && nav.selected + 1 < n) {
+                    nav.selected++;
+                    nav.redraw = true;
+                }
+            }
             continue;
         }
         case KEY_RIGHT:
@@ -2282,6 +2454,25 @@ static void handle_keys(void)
 
         if (k.codepoint < 0x110000u) type_into_focus(k.codepoint);
     }
+}
+
+/* Sends the focused text to the network service, read-and-write --
+ * the kernel-side twin of what fetch does from ring 3, taken when the
+ * person themselves presses go or follows a link. */
+static void ask_the_wire(void)
+{
+    object *f = focus();
+    if (obj_type(f) != TYPE_TEXT || nav.at_generation != 0) return;
+    if (!(focus_rights() & CAP_READ) || !(focus_rights() & CAP_WRITE))
+        return;
+    if (!net_port() || !net_up()) return;
+
+    message m = { 0 };
+    m.tag = 0x45474150ULL;              /* the same word fetch says */
+    object *what = f;
+    u32 rr = CAP_READ | CAP_WRITE;
+    port_post(net_port(), &m, &what, &rr, 1, "you");
+    nav.redraw = true;
 }
 
 /* Retreats to an earlier point on the path. */
@@ -2463,6 +2654,84 @@ static void act_on(const hot_region *r)
         paint_at_pointer();
         nav.paint_drag = true;
         break;
+
+    case HOT_GO:
+        ask_the_wire();
+        break;
+
+    case HOT_LINK: {
+        /* Going where the link points: the ask line is rewritten, the
+         * page below it is blanked, and the wire is asked -- the same
+         * three things a person would do by hand, in one press. */
+        object *f = focus();
+        if (obj_type(f) != TYPE_TEXT || nav.at_generation != 0) break;
+        if (!(focus_rights() & CAP_WRITE)) break;
+        if (r->index >= link_spot_count) break;
+        u32 li = link_spots[r->index].link;
+        if (li >= link_count) break;
+
+        u8 *d = (u8 *)obj_data(f);
+        u64 size = obj_size(f);
+        if (!d) break;
+        u64 len = text_len(d, size);
+        u64 ask = 0;
+        while (ask < len && d[ask] != '\n') ask++;
+
+        char host[128], path[256];
+        u32 hlen, plen;
+        ask_parts(d, ask, host, sizeof(host), &hlen,
+                  path, sizeof(path), &plen);
+
+        const char *u = link_urls[li];
+        char na[300];
+        u32 nn = 0;
+
+        if (u[0]=='h' && u[1]=='t' && u[2]=='t' && u[3]=='p') {
+            u32 skip = (u[4] == 's') ? 8 : 7;
+            while (u[skip] && nn < sizeof(na) - 1) na[nn++] = u[skip++];
+        } else if (u[0] == '/' && u[1] == '/') {
+            u32 skip = 2;
+            while (u[skip] && nn < sizeof(na) - 1) na[nn++] = u[skip++];
+        } else if (u[0] == '/') {
+            for (u32 i = 0; i < hlen && nn < sizeof(na) - 1; i++)
+                na[nn++] = host[i];
+            for (u32 i = 0; u[i] && nn < sizeof(na) - 1; i++)
+                na[nn++] = u[i];
+        } else {
+            /* Relative to the room the page was in. */
+            u32 dir = 0;
+            for (u32 i = 0; i < plen; i++) if (path[i] == '/') dir = i + 1;
+            for (u32 i = 0; i < hlen && nn < sizeof(na) - 1; i++)
+                na[nn++] = host[i];
+            if (dir == 0 && nn < sizeof(na) - 1) na[nn++] = '/';
+            for (u32 i = 0; i < dir && nn < sizeof(na) - 1; i++)
+                na[nn++] = path[i];
+            for (u32 i = 0; u[i] && nn < sizeof(na) - 1; i++)
+                na[nn++] = u[i];
+        }
+        if (nn == 0) break;
+
+        for (u64 i = 0; i < size; i++)
+            d[i] = (i < nn) ? (u8)na[i] : (i == nn ? '\n' : 0);
+
+        nav.html_scroll = 0;
+        nav.changes++;
+        ask_the_wire();
+        break;
+    }
+
+    case HOT_SCROLL: {
+        u32 step = html_vis > 4 ? html_vis - 2 : 3;
+        u32 max = html_rows > html_vis ? html_rows - html_vis : 0;
+        if (r->index == 0)
+            nav.html_scroll = nav.html_scroll > step
+                            ? nav.html_scroll - step : 0;
+        else
+            nav.html_scroll = nav.html_scroll + step > max
+                            ? max : nav.html_scroll + step;
+        nav.redraw = true;
+        break;
+    }
 
     case HOT_RUN: {
         /* The text becomes a program. The running instance lands next

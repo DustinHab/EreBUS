@@ -383,12 +383,16 @@ static void persist_thread(void *arg)
 {
     (void)arg;
 
-    u64 seen = shell_changes();
+    u64 seen = shell_changes() + obj_touches();
     u64 written = seen;
     u64 quiet_since = time_ns();
 
     for (;;) {
-        u64 now = shell_changes();
+        /* Two hands change the graph: the person through the shell,
+         * and programs -- the network included -- writing through
+         * their capabilities. A page fetched and never typed near
+         * must survive the next boot all the same. */
+        u64 now = shell_changes() + obj_touches();
         if (now != seen) {
             seen = now;
             quiet_since = time_ns();
@@ -1200,6 +1204,7 @@ void kmain(eb_boot_info *bi)
                 object *face = obj_create(TYPE_TEXT, 16, 0);
                 if (face) {
                     obj_set_name(face, "the time");
+                    obj_set_fleeting(face, true);
 
                     u64 n = obj_slots(root), spot = n;
                     for (u64 i = 0; i < n; i++)
@@ -1285,6 +1290,16 @@ void kmain(eb_boot_info *bi)
                 obj_set_slot(root, at, activity_object(), CAP_READ);
                 obj_set_slot_name(root, at, "activity");
             }
+        }
+
+        /* A restored clock face is the same heartbeat it always was;
+         * the mark does not ride the snapshot, so it is set anew. */
+        for (u64 i = 0; i < obj_slots(root); i++) {
+            object *s = obj_get_slot(root, i);
+            const char *nm = obj_slot_name(root, i);
+            if (s && nm && strcmp(nm, "the time") == 0 &&
+                obj_type(s) == TYPE_TEXT)
+                obj_set_fleeting(s, true);
         }
 
         ensure_language(root);

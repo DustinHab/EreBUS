@@ -117,6 +117,19 @@ void obj_set_mark(object *o, bool marked);
 u64 obj_live_count(void);
 u64 obj_total_created(void);
 
+/* A count of payload changes made past the shell's back -- a program
+ * writing through a capability, the network writing a page home.
+ * Persistence watches this beside the shell's own count, so what a
+ * program wrote survives the next boot without anyone having typed.
+ *
+ * A fleeting object does not count: the clock's face changes every
+ * second by design, and a change that recurs by design is a heartbeat,
+ * not history. Without this the machine never falls quiet and either
+ * never saves or saves its whole ring full of seconds. */
+void obj_touch(object *o);
+u64  obj_touches(void);
+void obj_set_fleeting(object *o, bool fleeting);
+
 bool obj_selftest(void);
 bool obj_collect_selftest(void);
 

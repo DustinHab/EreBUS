@@ -38,6 +38,7 @@ typedef enum {
     LENS_BYTES,      /* the payload as bytes */
     LENS_STRUCTURE,  /* what it is and what it points at */
     LENS_PAINT,      /* the payload as cells of ink, drawable */
+    LENS_HTML,       /* a fetched page as prose, links and all */
     LENS_COUNT
 } lens_kind;
 

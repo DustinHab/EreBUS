@@ -384,6 +384,19 @@ built binary.
   and the refusal for https says so. No wifi: firmware blobs and a
   crypto stack are a different project, and pretending otherwise
   would be the lie this file avoids.
+* **The html lens.** A fifth way of seeing a text: as the page it is.
+  Headings stand out, paragraphs wrap, lists get their dashes, links
+  their colour and underline -- and clicking one rewrites the ask
+  line and asks the wire, which makes any page object a browser
+  window. The raw markup stays one lens tab away. Honest ceiling: a
+  text browser -- no styles, no scripts, no images beyond their alt
+  words. The service follows moved pages, introduces itself as
+  erebus/0.1, and treats https as "the same place, asked plainly",
+  since nothing here can keep a secret and a door refusing half the
+  web's links would be ornamental. Changes written past the shell's
+  back -- by programs, by the network -- now nudge persistence too;
+  the clock's face is marked fleeting so its heartbeat is not
+  mistaken for history.
 * M10 — booting real hardware from a USB stick
 
 ## A note on Secure Boot

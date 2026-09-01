@@ -156,6 +156,10 @@ static u64 do_write(domain *d, u64 handle, u64 offset, u64 value)
     if (!data || offset + 8 > obj_size(o)) return SYS_DENIED;
 
     for (u32 i = 0; i < 8; i++) data[offset + i] = (u8)(value >> (i * 8));
+
+    /* A change the shell never saw still deserves to survive the next
+     * boot; the touch is what tells persistence to look. */
+    obj_touch(o);
     return SYS_OK;
 }
 

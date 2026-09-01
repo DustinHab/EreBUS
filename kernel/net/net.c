@@ -668,8 +668,8 @@ static bool http_fetch(const u8 *addr, const char *host, u32 hlen,
     for (u32 i = 0; i < plen && at < 300; i++) req[at++] = path[i];
     a = " HTTP/1.0\r\nHost: ";
     while (*a) req[at++] = *a++;
-    for (u32 i = 0; i < hlen && at < 380; i++) req[at++] = host[i];
-    a = "\r\nConnection: close\r\n\r\n";
+    for (u32 i = 0; i < hlen && at < 360; i++) req[at++] = host[i];
+    a = "\r\nUser-Agent: erebus/0.1\r\nConnection: close\r\n\r\n";
     while (*a) req[at++] = *a++;
 
     if (!tcp_say(0x18, req, at, at)) { tcb.active = false; return false; }
@@ -702,6 +702,32 @@ static u32 write_words(u8 *d, u32 at, u32 size, const char *s)
     return at;
 }
 
+/* Splits an ask -- "host", "host/path", with or without a scheme in
+ * front -- into its two parts. https is taken as "the same place,
+ * asked plainly": nothing here can keep a secret, the readme says so,
+ * and refusing every second link would make the door ornamental. */
+static void split_ask(const char *ask, u32 alen,
+                      char *host, u32 hmax, u32 *hlen,
+                      char *path, u32 pmax, u32 *plen)
+{
+    u32 at = 0;
+    if (alen >= 7 && ask[0]=='h' && ask[1]=='t' && ask[2]=='t' &&
+        ask[3]=='p' && ask[4]==':' && ask[5]=='/' && ask[6]=='/')
+        at = 7;
+    else if (alen >= 8 && ask[0]=='h' && ask[1]=='t' && ask[2]=='t' &&
+             ask[3]=='p' && ask[4]=='s' && ask[5]==':' &&
+             ask[6]=='/' && ask[7]=='/')
+        at = 8;
+
+    *hlen = 0;
+    *plen = 0;
+    while (at < alen && ask[at] != '/' && ask[at] != ' ' &&
+           *hlen < hmax - 1)
+        host[(*hlen)++] = ask[at++];
+    while (at < alen && ask[at] != ' ' && *plen < pmax - 1)
+        path[(*plen)++] = ask[at++];
+}
+
 static void fetch_into(object *o)
 {
     u8 *d = (u8 *)obj_data(o);
@@ -715,27 +741,8 @@ static void fetch_into(object *o)
     char host[128];
     char path[256];
     u32 hlen = 0, plen = 0;
-    u32 at = 0;
-
-    /* "http://" may be said or left off; nothing else may. */
-    if (ask_end >= 7 && d[0]=='h' && d[1]=='t' && d[2]=='t' && d[3]=='p' &&
-        d[4] == ':' && d[5] == '/' && d[6] == '/')
-        at = 7;
-    if (ask_end >= 8 && at == 0 && d[0]=='h' && d[1]=='t' && d[2]=='t' &&
-        d[3]=='p' && d[4]=='s') {
-        u32 w = ask_end + 1;
-        if (w > size) w = (u32)size;
-        w = write_words(d, w, (u32)size,
-                        "this door speaks plain http only.\n");
-        for (u64 i = w; i < size; i++) d[i] = 0;
-        return;
-    }
-
-    while (at < ask_end && d[at] != '/' && d[at] != ' ' &&
-           hlen < sizeof(host) - 1)
-        host[hlen++] = (char)d[at++];
-    while (at < ask_end && d[at] != ' ' && plen < sizeof(path) - 1)
-        path[plen++] = (char)d[at++];
+    split_ask((const char *)d, ask_end, host, sizeof(host), &hlen,
+              path, sizeof(path), &plen);
 
     u32 out = ask_end;
     if (out < size) d[out] = '\n';
@@ -746,31 +753,84 @@ static void fetch_into(object *o)
     const char *said = NULL;
     u8 addr[4];
     u32 got = 0;
+    u32 body = 0;
 
     if (!nic_up() || !gateway_find()) {
         said = "the wire goes nowhere.\n";
-    } else if (!dns_resolve(host, hlen, addr)) {
-        said = "the name service does not know it.\n";
-    } else if (!http_fetch(addr, host, hlen, path, plen,
-                           page, sizeof(page), &got)) {
-        said = "no answer from there.\n";
+        goto answer;
     }
 
+    /* Fetch, and follow where it points: a page that moved says so
+     * with a number and a Location line, and stopping there would
+     * show the reader furniture tags instead of the room. */
+    for (u32 hop = 0; hop < 4; hop++) {
+        if (!dns_resolve(host, hlen, addr)) {
+            said = "the name service does not know it.\n";
+            break;
+        }
+        if (!http_fetch(addr, host, hlen, path, plen,
+                        page, sizeof(page), &got)) {
+            said = "no answer from there.\n";
+            break;
+        }
+
+        /* The status line: HTTP/1.x NNN */
+        u32 code = 0;
+        if (got > 12 && page[0] == 'H')
+            code = (u32)(page[9] - '0') * 100 +
+                   (u32)(page[10] - '0') * 10 + (u32)(page[11] - '0');
+
+        body = 0;
+        for (u32 i = 0; i + 3 < got; i++) {
+            if (page[i] == '\r' && page[i+1] == '\n' &&
+                page[i+2] == '\r' && page[i+3] == '\n') {
+                body = i + 4;
+                break;
+            }
+        }
+
+        bool moved = (code == 301 || code == 302 || code == 303 ||
+                      code == 307 || code == 308);
+        if (!moved) break;
+
+        /* Location: ... somewhere in the headers. */
+        char where[256];
+        u32 wlen = 0;
+        for (u32 i = 0; i + 9 < body; i++) {
+            if ((page[i]=='l' || page[i]=='L') &&
+                (page[i+1]=='o' || page[i+1]=='O') &&
+                page[i+2]=='c' && page[i+3]=='a' && page[i+4]=='t' &&
+                page[i+5]=='i' && page[i+6]=='o' && page[i+7]=='n' &&
+                page[i+8]==':') {
+                u32 j = i + 9;
+                while (j < body && page[j] == ' ') j++;
+                while (j < body && page[j] != '\r' && page[j] != '\n' &&
+                       wlen < sizeof(where) - 1)
+                    where[wlen++] = (char)page[j++];
+                break;
+            }
+        }
+        if (wlen == 0) break;                    /* moved, but mute */
+
+        if (where[0] == '/') {                   /* same house, new room */
+            plen = 0;
+            for (u32 i = 0; i < wlen && plen < sizeof(path) - 1; i++)
+                path[plen++] = where[i];
+        } else {
+            split_ask(where, wlen, host, sizeof(host), &hlen,
+                      path, sizeof(path), &plen);
+            if (hlen == 0) break;
+        }
+        got = 0;
+    }
+
+answer:
     if (said) {
         out = write_words(d, out, (u32)size, said);
         for (u64 i = out; i < size; i++) d[i] = 0;
+        obj_touch(o);
         journal_says("net", "a page did not come");
         return;
-    }
-
-    /* Step over the http headers; the page is what follows them. */
-    u32 body = 0;
-    for (u32 i = 0; i + 3 < got; i++) {
-        if (page[i] == '\r' && page[i+1] == '\n' &&
-            page[i+2] == '\r' && page[i+3] == '\n') {
-            body = i + 4;
-            break;
-        }
     }
 
     for (u32 i = body; i < got && out < size - 1; i++) {
@@ -781,6 +841,7 @@ static void fetch_into(object *o)
     }
     for (u64 i = out; i < size; i++) d[i] = 0;
 
+    obj_touch(o);
     journal_says("net", got + 64 > (u32)size
                  ? "a page came; the text holds what fit"
                  : "a page came");
