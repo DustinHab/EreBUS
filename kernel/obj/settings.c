@@ -35,9 +35,16 @@ typedef struct {
     bool hints;
     bool light;
     bool start_home;
+    bool peer_set;
+    u8   peer_ip[4];
+    u16  peer_port;
+    bool addr_set;
+    u8   addr_ip[4];
 } values;
 
-static values current = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false };
+static values current = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
+                          false, { 0, 0, 0, 0 }, 0,
+                          false, { 0, 0, 0, 0 } };
 
 object *settings_object(void) { return settings; }
 
@@ -46,6 +53,21 @@ i64  settings_clock_offset_min(void){ return current.clock_offset_min; }
 bool settings_hints(void)           { return current.hints; }
 bool settings_light(void)           { return current.light; }
 bool settings_start_home(void)      { return current.start_home; }
+
+bool settings_peer(u8 ip[4], u16 *port)
+{
+    if (!current.peer_set) return false;
+    if (ip) for (u32 i = 0; i < 4; i++) ip[i] = current.peer_ip[i];
+    if (port) *port = current.peer_port;
+    return true;
+}
+
+bool settings_address(u8 ip[4])
+{
+    if (!current.addr_set) return false;
+    if (ip) for (u32 i = 0; i < 4; i++) ip[i] = current.addr_ip[i];
+    return true;
+}
 
 void settings_pointer_scale(i32 *num, i32 *den)
 {
@@ -65,7 +87,8 @@ static const char seed[] =
     "pointer  | normal\n"
     "hints    | shown\n"
     "slice    | 50 ms\n"
-    "start    | where i left\n";
+    "start    | where i left\n"
+    "peer     | nobody\n";
 
 bool settings_create(void)
 {
@@ -182,6 +205,49 @@ static void read_line(values *v, const char *line, u64 len)
     } else if (matter_is(line, a, b, "start")) {
         if (line_has(val, vlen, "home")) v->start_home = true;
         if (line_has(val, vlen, "left")) v->start_home = false;
+    } else if (matter_is(line, a, b, "peer")) {
+        /* Five numbers make a peer -- four of address, one of port --
+         * and the punctuation between them is anyone's: "10.0.2.2 7802"
+         * and "10.0.2.2:7802" both say the same thing. Anything short
+         * of five numbers, "nobody" included, names no one. */
+        u64 nums[5];
+        u32 got = 0;
+        for (u64 i = 0; i < vlen && got < 5; i++) {
+            if (val[i] < '0' || val[i] > '9') continue;
+            u64 g = 0;
+            while (i < vlen && val[i] >= '0' && val[i] <= '9')
+                g = g * 10 + (u64)(val[i++] - '0');
+            nums[got++] = g;
+        }
+        if (got == 5 && nums[0] < 256 && nums[1] < 256 &&
+            nums[2] < 256 && nums[3] < 256 && nums[4] < 65536 &&
+            nums[4] > 0) {
+            for (u32 i = 0; i < 4; i++) v->peer_ip[i] = (u8)nums[i];
+            v->peer_port = (u16)nums[4];
+            v->peer_set = true;
+        } else {
+            v->peer_set = false;
+        }
+    } else if (matter_is(line, a, b, "address")) {
+        /* Four numbers claim an address of our own instead of asking
+         * the network for one -- what a wire with no landlord needs.
+         * Anything else, "by lease" included, means asking. */
+        u64 nums[4];
+        u32 got = 0;
+        for (u64 i = 0; i < vlen && got < 4; i++) {
+            if (val[i] < '0' || val[i] > '9') continue;
+            u64 g = 0;
+            while (i < vlen && val[i] >= '0' && val[i] <= '9')
+                g = g * 10 + (u64)(val[i++] - '0');
+            nums[got++] = g;
+        }
+        if (got == 4 && nums[0] > 0 && nums[0] < 256 && nums[1] < 256 &&
+            nums[2] < 256 && nums[3] > 0 && nums[3] < 255) {
+            for (u32 i = 0; i < 4; i++) v->addr_ip[i] = (u8)nums[i];
+            v->addr_set = true;
+        } else {
+            v->addr_set = false;
+        }
     }
 }
 
@@ -236,6 +302,20 @@ static void note_changes(const values *was, const values *now)
                      ? "the next start is at home"
                      : "the next start is where you left");
 
+    if (was->addr_set != now->addr_set ||
+        (now->addr_set && memcmp(was->addr_ip, now->addr_ip, 4) != 0))
+        journal_says("settings", now->addr_set
+                     ? "the machine claims its own address now"
+                     : "the machine asks for its address again");
+
+    if (was->peer_set != now->peer_set ||
+        (now->peer_set &&
+         (memcmp(was->peer_ip, now->peer_ip, 4) != 0 ||
+          was->peer_port != now->peer_port)))
+        journal_says("settings", now->peer_set
+                     ? "the pipe points at a peer now"
+                     : "the pipe points at nobody");
+
     if (was->clock_offset_min != now->clock_offset_min) {
         i64 m = now->clock_offset_min;
         if (m == 0) {
@@ -263,7 +343,9 @@ void settings_apply(void)
     u64 size = obj_size(settings);
     if (!d) return;
 
-    values next = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false };
+    values next = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
+                    false, { 0, 0, 0, 0 }, 0,
+                    false, { 0, 0, 0, 0 } };
 
     u64 start = 0;
     for (u64 i = 0; i <= size; i++) {

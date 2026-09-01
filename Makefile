@@ -102,6 +102,7 @@ KERN_C   := kernel/main.c \
             kernel/net/aes_gcm.c \
             kernel/net/crypto_selftest.c \
             kernel/net/tls.c \
+            kernel/net/pipe.c \
             kernel/net/net.c \
             kernel/user/runner.c \
             kernel/arch/x86_64/syscall.c \
@@ -225,7 +226,8 @@ QEMU := qemu-system-x86_64 \
   -vga none -device VGA,edid=on,xres=$(XRES),yres=$(YRES) \
   -drive id=store,file=$(STORE),format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
-  -device $(NIC),netdev=n0 -netdev user,id=n0
+  -device $(NIC),netdev=n0 \
+  -netdev user,id=n0,hostfwd=udp::7802-:7800
 
 run: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 	$(QEMU) -serial stdio
@@ -406,17 +408,17 @@ agent: $(IMAGE) $(BUILD)/test-vars.fd
 # when the palette gains a row, every carry click below it moves by
 # a row's 22 pixels.
 RELAY_HOME := home $(shell for i in $$(seq 17); do printf 'm100,0 '; done)
-RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,100 m0,100 m0,91 click \
+RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,100 m0,100 m0,100 m0,10 click \
               m0,22 click ret \
               down down down down down down down down down down down \
               down down down down down right \
               p a s s spc i t left \
-              up up up up up up up up up up up up right \
+              up up up up up up up up up up up up up right \
               $(RELAY_HOME) m0,100 m0,15 click \
               m0,100 m0,100 m0,100 m0,100 m0,100 m0,28 click ret \
               $(RELAY_HOME) m0,100 m0,39 click \
-              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,90 \
-              click ret
+              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 \
+              m0,12 click ret
 
 relay: $(IMAGE) $(BUILD)/test-vars.fd
 	@rm -f $(STORE)

@@ -13,6 +13,7 @@
 #include <eb/settings.h>
 #include <eb/standard.h>
 #include <eb/net.h>
+#include <eb/pipe.h>
 #include <eb/html.h>
 #include <eb/string.h>
 #include <eb/time.h>
@@ -190,7 +191,8 @@ typedef enum {
     HOT_SUBMIT,      /* a form's button: send it */
     HOT_BACK,        /* step back through where the browser has been */
     HOT_FWD,         /* and forward again */
-    HOT_ADDR         /* the address itself: type a new one */
+    HOT_ADDR,        /* the address itself: type a new one */
+    HOT_SEND         /* give the focused object to the pipe's peer */
 } hot_kind;
 
 typedef struct {
@@ -2251,12 +2253,29 @@ static void draw_all(void)
                     ? (hr & CAP_GRANT) != 0
                     : (hr & CAP_WRITE) != 0;
         }
+        i32 chip_x = tx + (i32)at * GLYPH_W + 3 * GLYPH_W;
         if (can_run) {
-            i32 rxr = tx + (i32)at * GLYPH_W + 3 * GLYPH_W;
             bool lit = is_hovered(HOT_RUN, 0);
-            if (lit) fb_rect(rxr - 4, 11, 3 * GLYPH_W + 8, ROW, C_EDGE);
-            text_at(rxr, 14, sw - PAD, "run", lit ? C_TEXT : C_ACCENT);
-            hot_add(rxr - 4, 11, 3 * GLYPH_W + 8, ROW, HOT_RUN, 0);
+            if (lit) fb_rect(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(chip_x, 14, sw - PAD, "run", lit ? C_TEXT : C_ACCENT);
+            hot_add(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, HOT_RUN, 0);
+            chip_x += 5 * GLYPH_W;
+        }
+
+        /* The pipe's offer: any plain readable thing can be sent to
+         * the peer the settings name. A system function, so it stands
+         * in the header like run does, on everything it applies to. */
+        type_id ft = obj_type(focus());
+        bool can_send = (ft == TYPE_TEXT || ft == TYPE_BYTES ||
+                         ft == TYPE_PICTURE) &&
+                        (focus_rights() & CAP_READ) &&
+                        nav.at_generation == 0 && net_up() &&
+                        settings_peer(NULL, NULL);
+        if (can_send) {
+            bool lit = is_hovered(HOT_SEND, 0);
+            if (lit) fb_rect(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(chip_x, 14, sw - PAD, "send", lit ? C_TEXT : C_ACCENT);
+            hot_add(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, HOT_SEND, 0);
         }
     }
 
@@ -3007,6 +3026,15 @@ static void act_on(const hot_region *r)
     case HOT_ADDR:
         addr_edit = true;
         field_focus = -1;
+        nav.redraw = true;
+        break;
+
+    case HOT_SEND:
+        /* Off to the peer. The substance is copied on the spot; what
+         * became of it the journal will say, since the carrying is
+         * the network thread's walk, not this click's wait. */
+        if (focus_rights() & CAP_READ)
+            pipe_post(focus());
         nav.redraw = true;
         break;
 

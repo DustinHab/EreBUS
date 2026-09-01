@@ -412,9 +412,32 @@ built binary.
   store yet -- so the channel proves privacy against eavesdroppers,
   not the identity of who answered. Table-based AES leaks timing,
   noted and accepted for a single-person machine speaking outward.
+* **The object pipe.** Objects travel between Erebus machines as a
+  core system function, not a thing to wire up: any readable data
+  object offers "send" in the header, the kernel carries its
+  substance -- type, own name, payload; never references, never
+  rights -- over udp to the peer the settings name, and what arrives
+  on the other side is laid into the always-present arrivals list as
+  a plain fresh object wearing its sender's name as a claim. Nothing
+  that runs can cross, and authority cannot cross at all: the wire
+  moves data, trust stays a human act. Offer, ordered chunks, one
+  acknowledgement; no answer is retried thrice and then said aloud.
+  Underneath, the stack learned what any real lan needs: neighbours
+  on the same street are ARPed directly instead of sent through the
+  gateway, and a machine can claim its address in the settings
+  ("address | 10.9.9.20") for wires that have no landlord.
+  tools/pipe-two.sh proves it: two machines on one emulated cable,
+  the notes sent from one, found lying in the other's arrivals with
+  the same words, surviving its reboot. Honest limits: the pipe is
+  not yet sealed (it travels plainly, unlike https), and anyone who
+  can reach the port can lay things into arrivals -- quarantined as
+  inert data, but arriving unasked; sealing and greeting are the
+  pipe's next milestones.
 * M10 — booting real hardware from a USB stick
 * Certificate verification — turning the seal from privacy into
   identity: RSA/ECDSA signatures and a root store
+* A sealed pipe — the object pipe over the same cryptography https
+  uses, so substance crosses machines unreadable to the road
 
 ## A note on Secure Boot
 

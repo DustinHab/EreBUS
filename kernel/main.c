@@ -29,6 +29,7 @@
 #include <eb/activity.h>
 #include <eb/standard.h>
 #include <eb/net.h>
+#include <eb/pipe.h>
 #include <eb/string.h>
 #include <eb/syscall.h>
 #include <eb/pic.h>
@@ -1290,6 +1291,37 @@ void kmain(eb_boot_info *bi)
                 obj_set_slot(root, at, activity_object(), CAP_READ);
                 obj_set_slot_name(root, at, "activity");
             }
+        }
+
+        /* Where the pipe lays what other machines send: a plain list,
+         * found again by its name or made fresh, held read-and-write
+         * -- what arrived is the person's to keep, rename, or throw
+         * out, and the kernel only ever appends. */
+        {
+            object *arr = NULL;
+            for (u64 i = 0; i < obj_slots(root); i++) {
+                object *s = obj_get_slot(root, i);
+                const char *nm = obj_slot_name(root, i);
+                if (s && nm && strcmp(nm, "arrivals") == 0 &&
+                    obj_type(s) == TYPE_LIST) { arr = s; break; }
+            }
+            if (!arr) {
+                object *made = obj_create(TYPE_LIST, 0, 4);
+                if (made) {
+                    obj_set_name(made, "arrivals");
+                    u64 n = obj_slots(root), at = n;
+                    for (u64 i = 0; i < n; i++)
+                        if (!obj_get_slot(root, i)) { at = i; break; }
+                    if (at < n || obj_grow_slots(root, n + 1)) {
+                        obj_set_slot(root, at, made,
+                                     CAP_READ | CAP_WRITE);
+                        obj_set_slot_name(root, at, "arrivals");
+                        arr = made;
+                    }
+                    obj_release(made);
+                }
+            }
+            if (arr) pipe_arrivals_set(arr);
         }
 
         /* A restored clock face is the same heartbeat it always was;

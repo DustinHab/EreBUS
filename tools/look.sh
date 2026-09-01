@@ -31,7 +31,8 @@ QEMU="qemu-system-x86_64 -machine q35 -m 512M -cpu max \
   -vga none -device VGA,edid=on,xres=1280,yres=800 \
   -drive id=store,file=$BUILD/teststore.img,format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
-  -device ${NIC:-e1000},netdev=n0 -netdev user,id=n0 \
+  -device ${NIC:-e1000},netdev=n0 \
+  -netdev ${NETDEV:-user,id=n0,hostfwd=udp::7802-:7800} \
   -display none -monitor stdio"
 
 rm -f "$BUILD/screen.ppm"

@@ -69,6 +69,10 @@ void tcp_close(void);
  * loops in tls.c call this between records. */
 void net_breathe(void);
 
+/* One udp datagram to dst. The pipe rides on this. */
+bool net_udp_send(const u8 dst[4], u16 sport, u16 dport,
+                  const u8 *data, u32 len);
+
 /* TLS 1.3 over that stream: connect to addr:443, run the handshake,
  * send the http request sealed, and hand back the decrypted response
  * exactly as http_fetch would hand back a plain one. The channel is

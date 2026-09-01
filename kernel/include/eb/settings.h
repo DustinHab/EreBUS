@@ -33,4 +33,12 @@ bool settings_hints(void);
 bool settings_light(void);
 bool settings_start_home(void);
 
+/* Where the object pipe points: an address and a port, or nobody.
+ * False when no peer is named. */
+bool settings_peer(u8 ip[4], u16 *port);
+
+/* An address of our own, claimed instead of leased. False when the
+ * machine asks the network (dhcp) as usual. */
+bool settings_address(u8 ip[4]);
+
 #endif /* EB_SETTINGS_H */

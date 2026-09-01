@@ -23,9 +23,11 @@
  * travels readable, and the page says "http" so nobody mistakes it.
  */
 #include <eb/net.h>
+#include <eb/pipe.h>
 #include <eb/crypto.h>
 #include <eb/msg.h>
 #include <eb/thread.h>
+#include <eb/settings.h>
 #include <eb/journal.h>
 #include <eb/time.h>
 #include <eb/fmt.h>
@@ -82,6 +84,23 @@ static u16 csum(const void *data, u32 len, u32 seed)
 
 static u8 mac_gw[6];
 static bool have_gw;
+
+/* Neighbours answered for directly: a machine on our own street is
+ * spoken to by its own door, not sent through the gateway -- which is
+ * what lets two Erebus machines on one wire find each other with no
+ * router in between. */
+#define ARP_CACHE 4
+static struct {
+    bool used;
+    u8   ip[4];
+    u8   mac[6];
+} neigh[ARP_CACHE];
+
+static bool on_link(const u8 *dst)
+{
+    return dst[0] == ip_ours[0] && dst[1] == ip_ours[1] &&
+           dst[2] == ip_ours[2];
+}
 
 static u8 frame_out[1600];
 static u8 frame_in[1600];
@@ -302,9 +321,23 @@ static void net_pump(void)
         if (type == ETH_ARP && plen >= 28) {
             if (p[7] == 1 && ip4_eq(p + 24, ip_ours)) {
                 arp_say(p + 8, p + 14, 2);         /* they ask, we answer */
-            } else if (p[7] == 2 && ip4_eq(p + 14, ip_gw)) {
-                for (u32 i = 0; i < 6; i++) mac_gw[i] = p[8 + i];
-                have_gw = true;
+            } else if (p[7] == 2) {
+                if (ip4_eq(p + 14, ip_gw)) {
+                    for (u32 i = 0; i < 6; i++) mac_gw[i] = p[8 + i];
+                    have_gw = true;
+                }
+                /* Any answering neighbour is worth remembering. */
+                u32 slot = ARP_CACHE;
+                for (u32 i = 0; i < ARP_CACHE; i++) {
+                    if (neigh[i].used && ip4_eq(neigh[i].ip, p + 14))
+                        { slot = i; break; }
+                    if (!neigh[i].used && slot == ARP_CACHE) slot = i;
+                }
+                if (slot < ARP_CACHE) {
+                    neigh[slot].used = true;
+                    for (u32 i = 0; i < 4; i++) neigh[slot].ip[i] = p[14 + i];
+                    for (u32 i = 0; i < 6; i++) neigh[slot].mac[i] = p[8 + i];
+                }
             }
             continue;
         }
@@ -333,6 +366,8 @@ static void net_pump(void)
             u16 dport = ((u16)inner[2] << 8) | inner[3];
             if (sport == 53) dns_input(inner + 8, ilen - 8);
             if (dport == 68) dhcp_input(inner + 8, ilen - 8);
+            if (dport == PIPE_PORT)
+                pipe_input(p + 12, sport, inner + 8, ilen - 8);
         } else if (proto == 1 && ilen >= 8 && inner[0] == 8) {
             /* An echo request: answer it. Being pingable costs one
              * buffer and makes the whole path checkable from outside. */
@@ -371,13 +406,51 @@ void net_breathe(void)
 
 static u16 ip_ident = 1;
 
-/* Builds and sends one ip packet to `dst` via the gateway. */
+static bool gateway_find(void);
+
+/* The door to knock on for dst: a neighbour's own, or the gateway's.
+ * A neighbour not yet known is asked for and waited on briefly; the
+ * cache remembers the answer for everything after. */
+static bool mac_for(const u8 *dst, u8 out_mac[6])
+{
+    if (!on_link(dst)) {
+        if (!gateway_find()) return false;
+        for (u32 i = 0; i < 6; i++) out_mac[i] = mac_gw[i];
+        return true;
+    }
+
+    for (u32 i = 0; i < ARP_CACHE; i++)
+        if (neigh[i].used && ip4_eq(neigh[i].ip, dst)) {
+            for (u32 j = 0; j < 6; j++) out_mac[j] = neigh[i].mac[j];
+            return true;
+        }
+
+    static const u8 nobody[6] = { 0 };
+    for (u32 try = 0; try < 3; try++) {
+        arp_say(nobody, dst, 1);
+        u64 from = time_ns();
+        while (time_ns() - from < 500000000ULL) {
+            net_pump();
+            for (u32 i = 0; i < ARP_CACHE; i++)
+                if (neigh[i].used && ip4_eq(neigh[i].ip, dst)) {
+                    for (u32 j = 0; j < 6; j++) out_mac[j] = neigh[i].mac[j];
+                    return true;
+                }
+            sched_yield();
+        }
+    }
+    return false;
+}
+
+/* Builds and sends one ip packet to `dst`, by its own door when it is
+ * on our street and through the gateway when it is not. */
 static bool ip_send(u8 proto, const u8 *dst, const u8 *payload, u32 len)
 {
-    if (!have_gw) return false;
+    u8 door[6];
+    if (!mac_for(dst, door)) return false;
 
     u8 *f = frame_out;
-    eth_head(f, mac_gw, ETH_IP);
+    eth_head(f, door, ETH_IP);
     u8 *ip = f + 14;
     u16 tot = (u16)(20 + len);
 
@@ -395,6 +468,34 @@ static bool ip_send(u8 proto, const u8 *dst, const u8 *payload, u32 len)
 
     for (u32 i = 0; i < len; i++) ip[20 + i] = payload[i];
     return nic_send(f, 14 + 20 + len);
+}
+
+static u32 pseudo_seed(const u8 *dst, u8 proto, u32 len);
+
+bool net_udp_send(const u8 dst[4], u16 sport, u16 dport,
+                  const u8 *data, u32 len)
+{
+    if (!nic_up()) return false;
+    if (len > 1400) return false;
+
+    u8 u[8 + 1400];
+    u16 ulen = (u16)(8 + len);
+    u[0] = (u8)(sport >> 8); u[1] = (u8)sport;
+    u[2] = (u8)(dport >> 8); u[3] = (u8)dport;
+    u[4] = (u8)(ulen >> 8);  u[5] = (u8)ulen;
+    u[6] = 0; u[7] = 0;
+    for (u32 i = 0; i < len; i++) u[8 + i] = data[i];
+
+    /* A real checksum, not the permitted zero: the zero survives the
+     * emulator's own little services but not every road beyond them,
+     * and a datagram that only works on friendly roads is a datagram
+     * that fails exactly when it matters. */
+    u16 c = csum(u, ulen, pseudo_seed(dst, 17, ulen));
+    if (c == 0) c = 0xFFFF;
+    u[6] = (u8)(c >> 8);
+    u[7] = (u8)c;
+
+    return ip_send(17, dst, u, ulen);
 }
 
 /* The pseudo-header seed tcp and udp checksums start from. */
@@ -511,6 +612,21 @@ static void dhcp_send(u8 kind)
  * test machine neither waits long nor lies about it. */
 static void dhcp_run(void)
 {
+    /* A claimed address needs no landlord: the settings said who we
+     * are, and on a wire with no dhcp -- two machines and a cable --
+     * asking would only be six seconds of silence. */
+    u8 claimed[4];
+    if (settings_address(claimed)) {
+        for (u32 i = 0; i < 4; i++) ip_ours[i] = claimed[i];
+        ip_gw[0] = claimed[0]; ip_gw[1] = claimed[1];
+        ip_gw[2] = claimed[2]; ip_gw[3] = 2;
+        for (u32 i = 0; i < 4; i++) ip_dns[i] = ip_gw[i];
+        configured = true;
+        kprintf("net:  %u.%u.%u.%u by claim\n",
+                ip_ours[0], ip_ours[1], ip_ours[2], ip_ours[3]);
+        return;
+    }
+
     wait_dhcp.want = true;
     wait_dhcp.xid = (u32)(time_ns() ^ 0x9E3779B9u) | 1;
 
@@ -920,22 +1036,41 @@ static void net_thread(void *arg)
     (void)arg;
     dhcp_run();
 
+    /* The loop is a walk, not a wait: fetch requests are taken when
+     * they queue, but the wire is watched between them -- the pipe
+     * receives whenever the other machine cares to send, which is
+     * exactly the part a blocking receive would sleep through. */
     for (;;) {
         message m;
-        const char *from = NULL;
-        if (!port_receive_labelled(kdom, service_receive, &m, &from)) {
-            sched_yield();
-            continue;
+        if (port_try_receive(kdom, service_receive, &m)) {
+            if (m.ncaps >= 1) {
+                /* The capability names the object and carries the
+                 * right; the lookup is the only door, and it opens
+                 * for read-and-write or not at all. */
+                object *o = cap_lookup(kdom, m.caps[0],
+                                       CAP_READ | CAP_WRITE);
+                if (o && obj_type(o) == TYPE_TEXT) fetch_into(o);
+                cap_revoke(kdom, m.caps[0]);
+                if (m.ncaps > 1) cap_revoke(kdom, m.caps[1]);
+            }
         }
-        if (m.ncaps < 1) continue;
 
-        /* The capability names the object and carries the right; the
-         * lookup is the only door, and it opens for read-and-write or
-         * not at all. */
-        object *o = cap_lookup(kdom, m.caps[0], CAP_READ | CAP_WRITE);
-        if (o && obj_type(o) == TYPE_TEXT) fetch_into(o);
-        cap_revoke(kdom, m.caps[0]);
-        if (m.ncaps > 1) cap_revoke(kdom, m.caps[1]);
+        /* A newly claimed address takes effect as it is typed, like
+         * every other setting: the person writes who the machine is,
+         * and the machine is it from then on. */
+        u8 claimed[4];
+        if (settings_address(claimed) && !ip4_eq(claimed, ip_ours)) {
+            for (u32 i = 0; i < 4; i++) ip_ours[i] = claimed[i];
+            ip_gw[0] = claimed[0]; ip_gw[1] = claimed[1];
+            ip_gw[2] = claimed[2]; ip_gw[3] = 2;
+            have_gw = false;
+            for (u32 i = 0; i < ARP_CACHE; i++) neigh[i].used = false;
+            kprintf("net:  %u.%u.%u.%u by claim\n",
+                    ip_ours[0], ip_ours[1], ip_ours[2], ip_ours[3]);
+        }
+
+        pipe_service();
+        net_breathe();
     }
 }
 
