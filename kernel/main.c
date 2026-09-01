@@ -27,6 +27,7 @@
 #include <eb/journal.h>
 #include <eb/settings.h>
 #include <eb/fat.h>
+#include <eb/term.h>
 #include <eb/activity.h>
 #include <eb/standard.h>
 #include <eb/net.h>
@@ -1596,6 +1597,12 @@ void kmain(eb_boot_info *bi)
 
         shell_init(kernel_domain, root, CAP_READ | CAP_WRITE | CAP_GRANT,
                    resume);
+
+        /* The terminal walks the same graph from the same beginning,
+         * with the same rights in hand. Its view is the shell's sixth
+         * mode; the core it talks to knows nothing of screens, which
+         * is what will let a remote line speak to it one day. */
+        term_init(root, CAP_READ | CAP_WRITE | CAP_GRANT);
         kprintf("shell: %s, %u generations kept on the disk\n",
                 resume ? "resumed where it was left"
                        : "starting at the root",

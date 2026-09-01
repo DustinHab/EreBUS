@@ -31,6 +31,7 @@ typedef enum {
     SHELL_TILES,     /* the path as columns, side by side */
     SHELL_INDEX,     /* everything reachable, one line each */
     SHELL_SPLIT,     /* two independent walks, side by side */
+    SHELL_TERM,      /* the system spoken to in lines */
     SHELL_MODE_COUNT
 } shell_mode;
 

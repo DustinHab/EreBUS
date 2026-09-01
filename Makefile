@@ -106,6 +106,7 @@ KERN_C   := kernel/main.c \
             kernel/fs/fat.c \
             kernel/net/pipe.c \
             kernel/net/net.c \
+            kernel/term/term.c \
             kernel/user/runner.c \
             kernel/user/foreman.c \
             kernel/user/reckon.c \

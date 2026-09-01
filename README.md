@@ -602,6 +602,21 @@ built binary.
   snapshot and the drawing goes on across a reboot. The breath
   between columns is deliberate: a canvas touched every second
   would never be still enough to save.
+* **The terminal.** The sixth way of looking: the system spoken to
+  in lines. The grammar is one sentence shape everywhere -- a verb,
+  a name, and "to" or "at" when two things meet; names may have
+  spaces, numbers count slots, and there are no flags, no paths, no
+  punctuation to remember. The walk is the same walk the shell makes
+  with clicks: go follows a reference the standpoint can see and
+  only ever narrows what is held. look, read, write, make, copy,
+  rename, let go, run, give, end, find across everything reachable,
+  and the wire's whole reach -- scan, found, point at, send, ask,
+  say. The core knows nothing of screens: it takes lines and appends
+  to a transcript, the screen's view is one feeder, and a remote
+  line arriving over the network later is meant to be another,
+  through the same doors -- once the identity question below has an
+  answer, because a terminal that anyone on the wire may feed is not
+  a door, it is a hole.
 * **The line.** One running conversation with whoever else is on
   the pipe, kept as a read-only text on the system shelf. With it
   in focus the footer becomes a mouth: letters gather, enter says
