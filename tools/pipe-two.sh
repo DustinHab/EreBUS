@@ -4,15 +4,19 @@
 # QEMU's socket netdev is the cable: no NAT, no landlord, just two
 # cards on a wire -- which is exactly what two real machines in one
 # room would be. Each machine claims its address in its settings by
-# typed keys; then B names A as its peer and sends its notes across.
-# Afterwards, A's serial log says what arrived, and A's store can be
-# opened with look.sh to see the arrival lying in the list.
+# typed keys; then B walks the shortest path there is: it stands on
+# its notes and presses send. Nobody is set, so the chooser opens
+# under the word, the scan goes out by itself, A answers, and one
+# click on the answer sends the notes across. Afterwards, A's serial
+# log says what arrived, and A's store can be opened with look.sh to
+# see the arrival lying in the list.
 
 cd "$(dirname "$0")/.."
 BUILD=build
 
 rm -f $BUILD/peerstore.img $BUILD/peer-vars.fd $BUILD/peer-serial.log \
-      $BUILD/peer-esp.img $BUILD/teststore.img $BUILD/serial.log
+      $BUILD/peer-esp.img $BUILD/teststore.img $BUILD/serial.log \
+      $BUILD/pipe-choose.ppm
 dd if=/dev/zero of=$BUILD/peerstore.img bs=1M count=32 status=none
 dd if=/dev/zero of=$BUILD/teststore.img bs=1M count=32 status=none
 cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/peer-vars.fd
@@ -62,21 +66,22 @@ A_JOB=$!
 
 sleep 3
 
-# --- machine B: claim 10.9.9.21, then find A the intuitive way:
-# stand on arrivals, press scan, click the machine that answers,
-# stand on the notes, press send. No address typed for the peer.
+# --- machine B: claim 10.9.9.21, then send the shortest way there is:
+# stand on the notes, press send. No peer is set, so the chooser opens
+# under the word and scans by itself; one click on the machine that
+# answers points the pipe and lets the notes go, in the same breath.
 {
     sleep 12
     keys tab tab tab t h e m e ret \
          ret a d d r e s s spc shift-backslash spc \
          1 0 dot 9 dot 9 dot 2 1 \
-         left down down right \
-         home m100,100 m100,100 m100,70 m100,0 m15,0 click \
-         m0,1 m0,1 m0,1 m0,1 m0,1 m0,1 \
-         m85,45 click \
-         left up up up up up up up up up up up up up up up up up right \
+         left up up up up up up up up up up up up up up up right \
          home m100,20 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m100,0 m100,0 m100,0 m95,0 click \
+         m0,1 m0,1 m0,1 m0,1 m0,1 m0,1
+    echo "screendump $BUILD/pipe-choose.ppm"
+    sleep 1
+    keys m105,49 click \
          m0,1 m0,1 m0,1 m0,1 m0,1 m0,1
     sleep 3
     echo "screendump $BUILD/pipe-b.ppm"
@@ -98,6 +103,7 @@ wait $A_JOB 2>/dev/null
 
 python3 tools/ppm2png.py $BUILD/pipe-a.ppm $BUILD/pipe-a.png 2>/dev/null
 python3 tools/ppm2png.py $BUILD/pipe-b.ppm $BUILD/pipe-b.png 2>/dev/null
+python3 tools/ppm2png.py $BUILD/pipe-choose.ppm $BUILD/pipe-choose.png 2>/dev/null
 
 echo "--- sender (B) ---"
 grep -a 'net:.*claim\|pipe' $BUILD/serial.log

@@ -194,7 +194,8 @@ typedef enum {
     HOT_ADDR,        /* the address itself: type a new one */
     HOT_SEND,        /* give the focused object to the pipe's peer */
     HOT_SCAN,        /* call out on the wire for other machines */
-    HOT_PEERPICK     /* a found machine: point the pipe at it */
+    HOT_PEERPICK,    /* a found machine: point the pipe at it */
+    HOT_SENDPICK     /* a found machine, chosen mid-send: point and go */
 } hot_kind;
 
 typedef struct {
@@ -795,6 +796,12 @@ static u32         field_spot_count;
 static i32         field_focus = -1;
 static u32         field_shape;     /* a print of the fields, to spot change */
 static bool        addr_edit;       /* the address line is being typed */
+
+/* The recipient chooser: opens under the send word when no peer is
+ * set yet, scanning as it opens, so choosing whom happens where the
+ * sending was asked for. */
+static bool sendto_open;
+static i32  sendto_x;
 
 /* Where the browser has been, so it can go back. Addresses only; the
  * bodies are re-fetched, which is honest -- the page may have moved
@@ -2323,19 +2330,23 @@ static void draw_all(void)
         }
 
         /* The pipe's offer: any plain readable thing can be sent to
-         * the peer the settings name. A system function, so it stands
-         * in the header like run does, on everything it applies to. */
+         * another machine. A system function, so it stands in the
+         * header like run does, on everything it applies to -- and
+         * with nobody chosen yet, pressing it opens the choosing,
+         * rather than the word hiding and leaving no trail to why. */
         type_id ft = obj_type(focus());
         bool can_send = (ft == TYPE_TEXT || ft == TYPE_BYTES ||
                          ft == TYPE_PICTURE) &&
                         (focus_rights() & CAP_READ) &&
-                        nav.at_generation == 0 && net_up() &&
-                        settings_peer(NULL, NULL);
+                        nav.at_generation == 0 && net_up();
         if (can_send) {
             bool lit = is_hovered(HOT_SEND, 0);
             if (lit) fb_rect(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, C_EDGE);
             text_at(chip_x, 14, sw - PAD, "send", lit ? C_TEXT : C_ACCENT);
             hot_add(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, HOT_SEND, 0);
+            sendto_x = chip_x;
+        } else {
+            sendto_open = false;
         }
     }
 
@@ -2518,7 +2529,10 @@ static void draw_all(void)
     if (settings_hints()) {
         at = put(line, at, "click anything you can see.   "
                            "arrows also move.   ");
-        if (focus() == pipe_arrivals() && nav.at_generation == 0)
+        if (sendto_open)
+            at = put(line, at, "click a machine and it goes there. "
+                               "esc keeps it here.");
+        else if (focus() == pipe_arrivals() && nav.at_generation == 0)
             at = put(line, at, "scan finds machines; "
                                "click one and send reaches it.");
         else if (nav.mode == SHELL_INDEX)
@@ -2539,6 +2553,64 @@ static void draw_all(void)
     }
     line[at] = 0;
     text_at(mx, sh - 28 + 6, sw - PAD, line, C_FAINT);
+
+    /* The recipient chooser: send was pressed with nobody set, so the
+     * choosing happens under the word itself. The scan is already
+     * out; whoever answers stands here as a line, and a click on a
+     * line points the pipe and lets the thing go in the same breath.
+     * Drawn last so it lies over the panels and its clicks win. */
+    if (sendto_open) {
+        u32 nfound = pipe_found_count();
+        i32 pw2 = 40 * GLYPH_W;
+        i32 px = sendto_x - 4;
+        if (px + pw2 > sw - PAD) px = sw - PAD - pw2;
+        i32 py = 38;
+        i32 ph = (i32)(1 + (nfound ? nfound : 1)) * ROW + 12;
+
+        fb_rect(px - 1, py - 1, pw2 + 2, ph + 2, C_EDGE);
+        fb_rect(px, py, pw2, ph, C_PANEL_HI);
+
+        i32 ty2 = py + 8;
+        text_at(px + 8, ty2, px + pw2, "send to", C_DIM);
+        if (!pipe_scanning()) {
+            bool alit = is_hovered(HOT_SCAN, 1);
+            i32 ax = px + pw2 - 10 * GLYPH_W - 8;
+            if (alit) fb_rect(ax - 4, ty2 - 3, 10 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(ax, ty2, px + pw2, "look again",
+                    alit ? C_TEXT : C_ACCENT);
+            hot_add(ax - 4, ty2 - 3, 10 * GLYPH_W + 8, ROW, HOT_SCAN, 1);
+        }
+        ty2 += ROW;
+
+        if (nfound == 0) {
+            text_at(px + 8, ty2, px + pw2,
+                    pipe_scanning() ? "listening..."
+                                    : "nobody answered -- is the other "
+                                      "machine on?",
+                    C_FAINT);
+            ty2 += ROW;
+        }
+        for (u32 i = 0; i < nfound; i++) {
+            u8 fip[4];
+            char fname[24];
+            if (!pipe_found_at(i, fip, fname)) break;
+
+            at = put(line, 0, "  ");
+            at = put(line, at, fname);
+            while (at < 20) line[at++] = ' ';
+            at = put_dec(line, at, fip[0]); line[at++] = '.';
+            at = put_dec(line, at, fip[1]); line[at++] = '.';
+            at = put_dec(line, at, fip[2]); line[at++] = '.';
+            at = put_dec(line, at, fip[3]);
+            line[at] = 0;
+
+            bool plit = is_hovered(HOT_SENDPICK, i);
+            if (plit) fb_rect(px, ty2 - 3, pw2, ROW, C_EDGE);
+            text_at(px + 8, ty2, px + pw2, line, plit ? C_TEXT : C_ACCENT);
+            hot_add(px, ty2 - 3, pw2, ROW, HOT_SENDPICK, i);
+            ty2 += ROW;
+        }
+    }
 
     draw_cursor();
 }
@@ -2581,6 +2653,7 @@ static void follow(u64 slot)
     field_focus = -1;
     field_shape = 0;
     addr_edit = false;
+    sendto_open = false;
     browse_back_count = browse_fwd_count = 0;
     set_lenses_for(t);
     nav.changes++;
@@ -2599,6 +2672,7 @@ static void go_back(void)
     field_focus = -1;
     field_shape = 0;
     addr_edit = false;
+    sendto_open = false;
     browse_back_count = browse_fwd_count = 0;
     set_lenses_for(focus());
     nav.changes++;
@@ -2785,7 +2859,10 @@ static void handle_keys(void)
             if (nav.at_generation > 0) go_to_generation(nav.at_generation - 1);
             continue;
         case KEY_ESCAPE:
-            if (nav.mode == SHELL_INDEX && find_len) {
+            if (sendto_open) {
+                sendto_open = false;
+                nav.redraw = true;
+            } else if (nav.mode == SHELL_INDEX && find_len) {
                 find_len = 0;
                 nav.redraw = true;
             } else {
@@ -2887,6 +2964,39 @@ static void handle_keys(void)
     }
 }
 
+/* Points the pipe at a machine by writing the peer line into the
+ * settings, exactly as a hand would -- so it persists, the journal
+ * notes it, and the settings text stays the one honest record. The
+ * new line takes effect at once, since choosing a recipient and then
+ * sending must not race the next redraw. */
+static void peer_write(const u8 ip[4])
+{
+    object *s = settings_object();
+    if (!s) return;
+    u8 *d = (u8 *)obj_data(s);
+    if (!d) return;
+    u64 size = obj_size(s);
+    u64 len = text_len(d, size);
+
+    char pl[64];
+    u32 at = put(pl, 0, "peer     | ");
+    at = put_dec(pl, at, ip[0]); pl[at++] = '.';
+    at = put_dec(pl, at, ip[1]); pl[at++] = '.';
+    at = put_dec(pl, at, ip[2]); pl[at++] = '.';
+    at = put_dec(pl, at, ip[3]);
+    at = put(pl, at, " 7800");
+    pl[at++] = '\n';
+    pl[at] = 0;
+
+    if (len && d[len - 1] != '\n' && len + 1 < size) d[len++] = '\n';
+    for (u32 i = 0; pl[i] && len + 1 < size; i++) d[len++] = (u8)pl[i];
+    d[len] = 0;
+
+    settings_apply();
+    nav.changes++;
+    nav.redraw = true;
+}
+
 /* Sends the focused text to the network service, read-and-write --
  * the kernel-side twin of what fetch does from ring 3, taken when the
  * person themselves presses go or follows a link. */
@@ -2942,6 +3052,14 @@ static void index_walk_to(u32 row)
  * somewhere else, so there is nothing to be careful about. */
 static void act_on(const hot_region *r)
 {
+    /* An open recipient chooser closes on any click that is not its
+     * own; a second press on send is the closing itself. */
+    if (sendto_open && r->kind != HOT_SENDPICK && r->kind != HOT_SCAN) {
+        sendto_open = false;
+        nav.redraw = true;
+        if (r->kind == HOT_SEND) return;
+    }
+
     switch (r->kind) {
     case HOT_REFERENCE:
         nav.selected = r->index;
@@ -3093,11 +3211,20 @@ static void act_on(const hot_region *r)
         break;
 
     case HOT_SEND:
-        /* Off to the peer. The substance is copied on the spot; what
-         * became of it the journal will say, since the carrying is
-         * the network thread's walk, not this click's wait. */
-        if (focus_rights() & CAP_READ)
-            pipe_post(focus());
+        /* Off to the peer -- and with no peer named yet, the press
+         * opens the choosing right here: a scan goes out, whoever
+         * answers stands below as a line, and clicking a line sends.
+         * The substance is copied on the spot; what became of it the
+         * journal will say, since the carrying is the network
+         * thread's walk, not this click's wait. */
+        if (focus_rights() & CAP_READ) {
+            if (settings_peer(NULL, NULL)) {
+                pipe_post(focus());
+            } else {
+                sendto_open = true;
+                pipe_scan();
+            }
+        }
         nav.redraw = true;
         break;
 
@@ -3108,35 +3235,24 @@ static void act_on(const hot_region *r)
 
     case HOT_PEERPICK: {
         /* Connecting is one click: the found machine's address goes
-         * into the settings as a written line, exactly as a hand
-         * would write it -- so it persists, the journal notes it, and
-         * the settings text stays the one honest record. */
+         * into the settings as a written line. */
         u8 fip[4];
         char fname[24];
         if (!pipe_found_at(r->index, fip, fname)) break;
+        peer_write(fip);
+        break;
+    }
 
-        object *s = settings_object();
-        if (!s) break;
-        u8 *d = (u8 *)obj_data(s);
-        if (!d) break;
-        u64 size = obj_size(s);
-        u64 len = text_len(d, size);
-
-        char pl[64];
-        u32 at2 = put(pl, 0, "peer     | ");
-        at2 = put_dec(pl, at2, fip[0]); pl[at2++] = '.';
-        at2 = put_dec(pl, at2, fip[1]); pl[at2++] = '.';
-        at2 = put_dec(pl, at2, fip[2]); pl[at2++] = '.';
-        at2 = put_dec(pl, at2, fip[3]);
-        at2 = put(pl, at2, " 7800");
-        pl[at2++] = '\n';
-        pl[at2] = 0;
-
-        if (len && d[len - 1] != '\n' && len + 1 < size) d[len++] = '\n';
-        for (u32 i = 0; pl[i] && len + 1 < size; i++) d[len++] = (u8)pl[i];
-        d[len] = 0;
-
-        nav.changes++;               /* the settings apply as written */
+    case HOT_SENDPICK: {
+        /* Chosen mid-send: point the pipe at the machine and let the
+         * thing go in the same breath. */
+        u8 fip[4];
+        char fname[24];
+        if (!pipe_found_at(r->index, fip, fname)) break;
+        peer_write(fip);
+        if (focus_rights() & CAP_READ)
+            pipe_post(focus());
+        sendto_open = false;
         nav.redraw = true;
         break;
     }
@@ -3490,7 +3606,12 @@ static void handle_mouse(void)
 
         if (is && !was) {
             i32 h = hot_at(nav.mouse_x, nav.mouse_y);
-            if (h >= 0) act_on(&hots[h]);
+            if (h >= 0) {
+                act_on(&hots[h]);
+            } else if (sendto_open) {
+                sendto_open = false;     /* clicked past the chooser */
+                nav.redraw = true;
+            }
         }
         if (!is && was) {
             nav.sel_drag = false;

@@ -446,6 +446,15 @@ built binary.
   machine is on your own wire. The call is a broadcast, so it
   reaches your wire and not the world beyond a router; the named
   peer is also asked directly, wherever it lives.
+* **Sending starts where the thing is.** The send word stands in the
+  header of every readable data object whether a peer is set or not;
+  hiding it would leave no trail to why. Pressed with a peer set, it
+  sends. Pressed with nobody set, the choosing opens under the word
+  itself: a scan goes out unasked, whoever answers stands there as a
+  line, and one click points the pipe and lets the thing go in the
+  same breath. Escape or a click elsewhere puts it away. The proof
+  script walks exactly this shortest path: stand on the notes, press
+  send, click the machine that answered.
 * M10 — booting real hardware from a USB stick
 * Certificate verification — turning the seal from privacy into
   identity: RSA/ECDSA signatures and a root store
