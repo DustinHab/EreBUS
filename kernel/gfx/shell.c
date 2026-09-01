@@ -133,6 +133,8 @@ static void session_store(void);
 static void leave_past(void);
 static void go_to_generation(u32 index);
 static void follow(u64 slot);
+static void index_walk_to(u32 row);
+static void build_index(void);
 
 /* ------------------------------------------------------------------ */
 /* What can be pointed at                                              */
@@ -2026,9 +2028,23 @@ static void handle_keys(void)
             follow(nav.selected);
             continue;
         case KEY_ENTER:
-            /* In a text one is writing, enter makes a line; anywhere
-             * else it follows, like the right arrow. A table row can
-             * only be added by someone who can press enter. */
+            /* In the index with a search on, enter goes to the first
+             * answer. In a text one is writing, it makes a line;
+             * anywhere else it follows, like the right arrow. */
+            if (nav.mode == SHELL_INDEX) {
+                if (find_len) {
+                    build_index();
+                    for (u32 i = 0; i < icount; i++) {
+                        char why[44];
+                        if (row_matches(&irows[i], why, sizeof(why))) {
+                            index_walk_to(i);
+                            find_len = 0;
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
             if (obj_type(focus()) == TYPE_TEXT &&
                 (focus_rights() & CAP_WRITE) && nav.at_generation == 0)
                 type_into_focus('\n');
@@ -2080,6 +2096,27 @@ static void go_back_to(u32 index)
     while (nav.depth > index + 1) go_back();
 }
 
+/* Walks to an index row, the honest way: back to home, then reference
+ * by reference along the way the row was found. Every step passes
+ * through follow(), so what one arrives holding is what the path
+ * grants -- the list is an overview, not a side door. */
+static void index_walk_to(u32 row)
+{
+    if (row >= icount) return;
+
+    u32 chain[64];
+    u32 n = 0;
+    for (i32 i = (i32)row;
+         irows[i].parent >= 0 && n < 64;
+         i = irows[i].parent)
+        chain[n++] = irows[i].via;
+
+    go_back_to(0);
+    while (n) follow(chain[--n]);
+    nav.mode = SHELL_FOCUS;
+    nav.redraw = true;
+}
+
 /* Acts on whatever was clicked.
  *
  * One gesture, one meaning: pointing at a thing and pressing goes to
@@ -2124,27 +2161,9 @@ static void act_on(const hot_region *r)
         go_to_generation(r->index);
         break;
 
-    case HOT_INDEX: {
-        /* Clicking a row walks there, the honest way: back to home,
-         * then reference by reference along the way the row was found.
-         * Every step passes through follow(), so what one arrives
-         * holding is what the path grants -- the list is an overview,
-         * not a side door. */
-        if (r->index >= icount) break;
-
-        u32 chain[64];
-        u32 n = 0;
-        for (i32 i = (i32)r->index;
-             irows[i].parent >= 0 && n < 64;
-             i = irows[i].parent)
-            chain[n++] = irows[i].via;
-
-        go_back_to(0);
-        while (n) follow(chain[--n]);
-        nav.mode = SHELL_FOCUS;
-        nav.redraw = true;
+    case HOT_INDEX:
+        index_walk_to(r->index);
         break;
-    }
 
     case HOT_TEXT: {
         /* A click into the writing puts the caret there, and starts a

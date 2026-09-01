@@ -149,6 +149,32 @@ static void addrspace_destroy(phys_addr pml4)
     if (pml4) free_table_level(pml4, 4, 256);
 }
 
+/* The same walk, counting instead of freeing: every frame the lower
+ * half owns, tables included, shared code excluded. What a process
+ * costs should be a measured number, not a guess -- the activity
+ * table asks this once a second and the walk is a handful of pages. */
+static u64 count_table_level(phys_addr table, u32 level, u64 top_limit)
+{
+    u64 frames = 1;                       /* this table itself */
+    const u64 *e = (const u64 *)phys_to_virt(table);
+
+    for (u64 i = 0; i < top_limit; i++) {
+        if (!(e[i] & PTE_PRESENT)) continue;
+        phys_addr down = e[i] & 0x000FFFFFFFFFF000ULL;
+
+        if (level > 1)
+            frames += count_table_level(down, level - 1, 512);
+        else if (!frame_is_shared_code(down))
+            frames += 1;
+    }
+    return frames;
+}
+
+static u64 addrspace_frames(phys_addr pml4)
+{
+    return pml4 ? count_table_level(pml4, 4, 256) : 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Processes                                                           */
 /* ------------------------------------------------------------------ */
@@ -161,6 +187,12 @@ process *proc_create(const char *name, const void *entry_point,
      * see -- running and invisible is the one combination this system
      * must never produce. */
     if (live_count >= MAX_PROCESSES) return NULL;
+
+    /* And so does an empty larder. The last megabytes belong to what
+     * is already running -- the shell, the writer of snapshots, the
+     * heap under the object graph. A machine that spends its reserve
+     * on one more process is a machine that soon does nothing at all. */
+    if (pmm_free_frames() < 1024) return NULL;
 
     process *p = (process *)kzalloc(sizeof(process));
     if (!p) return NULL;
@@ -253,7 +285,7 @@ u32 proc_live_count(void)
 }
 
 bool proc_live_at(u32 i, const char **name, u64 *id, u64 *holds,
-                  u64 *ran_ns)
+                  u64 *ran_ns, u64 *mem_kib)
 {
     /* One row of the living, for the activity table. Kernel-side only,
      * like the capability inspection: no system call leads here, and
@@ -266,6 +298,7 @@ bool proc_live_at(u32 i, const char **name, u64 *id, u64 *holds,
     if (id)     *id = p->id;
     if (holds)  *holds = domain_used(p->dom);
     if (ran_ns) *ran_ns = p->first ? thread_ran_ns(p->first) : 0;
+    if (mem_kib) *mem_kib = addrspace_frames(p->pml4) * (PAGE_SIZE / 1024);
     irq_restore(flags);
     return true;
 }

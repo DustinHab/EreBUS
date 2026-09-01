@@ -44,10 +44,12 @@ bool    proc_is_running(object *program);
  * can show what the program holds. NULL unless it is running. */
 domain *proc_domain_of(object *program);
 
-/* The living, one row at a time, for the activity table. */
+/* The living, one row at a time, for the activity table. mem_kib is
+ * measured, not booked: the walk counts every frame the lower half
+ * owns, tables included, shared code excluded. */
 u32  proc_live_count(void);
 bool proc_live_at(u32 i, const char **name, u64 *id, u64 *holds,
-                  u64 *ran_ns);
+                  u64 *ran_ns, u64 *mem_kib);
 
 domain     *proc_domain(process *p);
 const char *proc_name(const process *p);

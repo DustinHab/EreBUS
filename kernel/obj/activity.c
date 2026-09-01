@@ -132,13 +132,13 @@ void activity_update(void)
     at = put_dec(d, at, sched_switches());
     at = put(d, at, " switches\n\n");
 
-    at = put(d, at, " id  program    cpu  holds\n");
+    at = put(d, at, " id  program    cpu  holds      mem\n");
 
     u32 count = proc_live_count();
     for (u32 i = 0; i < count && i < 32 && at + 64 < ACTIVITY_BYTES; i++) {
         const char *name = "?";
-        u64 id = 0, holds = 0, ran = 0;
-        if (!proc_live_at(i, &name, &id, &holds, &ran)) break;
+        u64 id = 0, holds = 0, ran = 0, mem = 0;
+        if (!proc_live_at(i, &name, &id, &holds, &ran, &mem)) break;
 
         /* The share since the last look, matched to the same process
          * last time -- or a newborn, whose past hour is not held
@@ -157,7 +157,8 @@ void activity_update(void)
         at = put_num(d, at, pct, 2);
         at = put(d, at, "%");
         at = put_num(d, at, holds, 7);
-        at = put(d, at, "\n");
+        at = put_num(d, at, mem, 7);
+        at = put(d, at, " KiB\n");
     }
 
     /* Whatever stood here before ends exactly where the new text does. */
