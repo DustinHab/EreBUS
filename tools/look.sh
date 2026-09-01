@@ -96,6 +96,12 @@ cp /usr/share/OVMF/OVMF_VARS_4M.fd "$BUILD/test-vars.fd"
                 sleep 0.2
                 echo "mouse_button 0"
                 ;;
+            w*)
+                # The wheel. qemu's monitor negates the device's sign,
+                # so here w5 scrolls back up and w-5 rolls onward.
+                echo "mouse_move 0 0 ${k#w}"
+                sleep 0.1
+                ;;
             press)
                 # Half a click, for dragging: press, move, release.
                 echo "mouse_button 1"

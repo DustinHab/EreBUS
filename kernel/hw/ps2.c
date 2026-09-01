@@ -74,6 +74,16 @@ static int mouse_command(u8 cmd)
     return read_data();          /* the device acknowledges with 0xFA */
 }
 
+/* A mouse command that takes an argument: the command, its ack, the
+ * argument, its ack. */
+static int mouse_arg_command(u8 cmd, u8 arg)
+{
+    if (mouse_command(cmd) != 0xFA) return -1;
+    command(CMD_TO_MOUSE);
+    write_data(arg);
+    return read_data();
+}
+
 /* ------------------------------------------------------------------ */
 /* Event queues                                                        */
 /* ------------------------------------------------------------------ */
@@ -217,14 +227,17 @@ static void on_keyboard(trap_frame *f)
 /* Mouse                                                               */
 /* ------------------------------------------------------------------ */
 
+static bool mouse_wheel;             /* the fourth byte carries the wheel */
+
 static void on_mouse(trap_frame *f)
 {
     (void)f;
 
-    static u8 packet[3];
+    static u8 packet[4];
     static u32 index;
 
     u8 byte = inb(PS2_DATA);
+    u32 want = mouse_wheel ? 4 : 3;
 
     /* Bit 3 of the first byte is always set. If it is not, we are out
      * of step with the device -- which happens after a dropped byte --
@@ -233,7 +246,7 @@ static void on_mouse(trap_frame *f)
     if (index == 0 && !(byte & 0x08)) return;
 
     packet[index++] = byte;
-    if (index < 3) return;
+    if (index < want) return;
     index = 0;
 
     /* Overflow bits mean the counters saturated; the movement in that
@@ -241,13 +254,19 @@ static void on_mouse(trap_frame *f)
     if (packet[0] & 0xC0) return;
 
     /* The counters are nine bits: eight in the byte, the sign in the
-     * first byte. */
+     * first byte. The wheel, when there is one, is a small signed
+     * count in the fourth: rolling toward oneself reads positive,
+     * which is also the direction that reads further down a page. */
     i32 dx = (i32)packet[1] - ((packet[0] & 0x10) ? 256 : 0);
     i32 dy = (i32)packet[2] - ((packet[0] & 0x20) ? 256 : 0);
+    i32 dz = mouse_wheel ? (i32)(i8)packet[3] : 0;
+    if (dz > 8) dz = 8;
+    if (dz < -8) dz = -8;
 
     mouse_event e = {
         .dx = dx,
         .dy = -dy,          /* the device counts up, screens count down */
+        .dz = dz,
         .buttons = (u8)(packet[0] & 0x07),
     };
     mouse_total++;
@@ -283,10 +302,29 @@ void ps2_init(void)
     command(CMD_ENABLE_KBD);
     command(CMD_ENABLE_MOUSE);
 
-    /* Defaults, then start reporting. A device that acknowledges both
-     * is a device that is there. */
-    mouse_ok = (mouse_command(0xF6) == 0xFA) && (mouse_command(0xF4) == 0xFA);
+    /* Defaults first. Then the knock that wakes the wheel: three
+     * sample rates in a row -- 200, 100, 80 -- is the sequence the
+     * IntelliMouse protocol listens for, and a device that knows it
+     * answers the next identify with 3 and grows a fourth byte. A
+     * device that does not stays a three-byte mouse and none of this
+     * did any harm. */
+    mouse_ok = (mouse_command(0xF6) == 0xFA);
+    if (mouse_ok) {
+        mouse_arg_command(0xF3, 200);
+        mouse_arg_command(0xF3, 100);
+        mouse_arg_command(0xF3, 80);
+        if (mouse_command(0xF2) == 0xFA) {
+            int id = read_data();
+            mouse_wheel = (id == 3);
+        }
+        mouse_arg_command(0xF3, 100);       /* a sane rate to live at */
+        mouse_ok = (mouse_command(0xF4) == 0xFA);
+    }
     kbd_ok = true;
+
+    kprintf("ps2:  mouse %s\n",
+            !mouse_ok ? "missing" :
+            mouse_wheel ? "present, with a wheel" : "present, no wheel");
 
     irq_install(1, on_keyboard);
     if (mouse_ok) irq_install(12, on_mouse);

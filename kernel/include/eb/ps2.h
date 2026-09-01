@@ -36,6 +36,7 @@ typedef struct {
 
 typedef struct {
     i32 dx, dy;       /* movement since the last packet, y already flipped */
+    i32 dz;           /* wheel steps; positive rolls the page down */
     u8  buttons;      /* bit 0 left, bit 1 right, bit 2 middle */
 } mouse_event;
 

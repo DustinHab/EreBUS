@@ -238,6 +238,115 @@ static bool is_hovered(hot_kind k, u32 index)
 }
 
 /* ------------------------------------------------------------------ */
+/* Scrolling                                                           */
+/* ------------------------------------------------------------------ */
+
+/* Every area that can hold more than it shows scrolls the same way:
+ * the wheel over it, the clickable edge beside it, and a thumb that
+ * says where one is. One table holds them all, keyed by which area,
+ * so a page, a text, a listing and a panel are not four inventions. */
+enum {
+    SCR_HTML,        /* the rendered page (kept in nav.html_scroll) */
+    SCR_TEXT,        /* the focused text */
+    SCR_BYTES,       /* the byte view */
+    SCR_STRUCT,      /* the structure lens */
+    SCR_CONTENTS,    /* the references panel on the right */
+    SCR_INDEX,       /* the index listing */
+    SCR_COUNT
+};
+
+static u32 scrolls[SCR_COUNT];      /* SCR_HTML aliases nav.html_scroll */
+static u32 scr_rows[SCR_COUNT];
+static u32 scr_vis[SCR_COUNT];
+
+/* Where each area was drawn this frame, for the wheel to find. */
+typedef struct { i32 x, y, w, h; u8 area; } scr_target;
+static scr_target scr_targets[8];
+static u32 scr_target_count;
+
+static u32 *scroll_var(u8 area)
+{
+    return area == SCR_HTML ? &nav.html_scroll : &scrolls[area];
+}
+
+/* The journal reads newest-last, so it opens at its end and stays
+ * there while new lines come -- until one scrolls up to read back,
+ * which unpins it. */
+static bool log_pinned = true;
+
+static void scroll_by(u8 area, i32 delta_rows)
+{
+    if (area >= SCR_COUNT) return;
+    u32 *s = scroll_var(area);
+    u32 max = scr_rows[area] > scr_vis[area]
+            ? scr_rows[area] - scr_vis[area] : 0;
+    i64 v = (i64)*s + delta_rows;
+    if (v < 0) v = 0;
+    if (v > (i64)max) v = (i64)max;
+    if ((u32)v != *s) {
+        *s = (u32)v;
+        nav.redraw = true;
+    }
+
+    /* Scrolling up in the journal means reading back: stop following
+     * the newest line until one returns to the end. */
+    if (area == SCR_TEXT && delta_rows < 0 &&
+        focus() == journal_object())
+        log_pinned = false;
+}
+
+/* Notes an area's size and place, clamps its scroll, and -- when there
+ * is more than fits -- draws the thumb and offers the edge: upper half
+ * back, lower half onward, the same gesture everywhere. */
+static void scroll_area(u8 area, i32 x, i32 y, i32 w, i32 h,
+                        u32 rows, u32 vis)
+{
+    if (area >= SCR_COUNT) return;
+    scr_rows[area] = rows;
+    scr_vis[area] = vis;
+
+    u32 *s = scroll_var(area);
+    u32 max = rows > vis ? rows - vis : 0;
+    if (*s > max) *s = max;
+
+    if (scr_target_count < 8)
+        scr_targets[scr_target_count++] = (scr_target){ x, y, w, h, area };
+
+    if (rows <= vis || h <= 0) return;
+
+    i32 tx = x + w - 6;
+    fb_rect(tx, y, 2, h, C_EDGE);
+    i32 th = (i32)((u64)h * vis / rows);
+    if (th < 12) th = 12;
+    i32 tp = (i32)((u64)(h - th) * *s / max);
+    fb_rect(tx - 1, y + tp, 4, th, C_DIM);
+
+    hot_add(x + w - 2 * GLYPH_W, y, 2 * GLYPH_W, h / 2,
+            HOT_SCROLL, (u32)area * 2);
+    hot_add(x + w - 2 * GLYPH_W, y + h / 2, 2 * GLYPH_W, h - h / 2,
+            HOT_SCROLL, (u32)area * 2 + 1);
+}
+
+/* The wheel scrolls whatever it is over. Last drawn wins, like the
+ * clicks. */
+static void wheel_at(i32 mx, i32 my, i32 dz)
+{
+    for (i32 i = (i32)scr_target_count - 1; i >= 0; i--) {
+        if (mx < scr_targets[i].x ||
+            mx >= scr_targets[i].x + scr_targets[i].w ||
+            my < scr_targets[i].y ||
+            my >= scr_targets[i].y + scr_targets[i].h)
+            continue;
+        scroll_by(scr_targets[i].area, dz * 3);
+        return;
+    }
+}
+
+/* Typing and pasting pull the window to the caret; plain redraws do
+ * not, so reading far from the caret is not snatched away. */
+static bool caret_chase;
+
+/* ------------------------------------------------------------------ */
 /* Making and shaping                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -537,6 +646,7 @@ static void rights_text(u32 r, char *out)
  * when none is, the width is zero and no region is offered. */
 static struct {
     i32 x, y, cols, rows;
+    u32 scroll;
 } text_area;
 
 static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
@@ -546,16 +656,57 @@ static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
 
     u64 len = text_len(d, obj_size(o));
     i32 cols = w / GLYPH_W;
-    i32 cx = 0, cy = 0;
+    i32 vis = h / GLYPH_H;
+    if (cols < 1) cols = 1;
+    if (vis < 1) vis = 1;
 
     if (nav.caret > len) nav.caret = len;
+
+    /* One quick pass for the shape of the flow: how many wrapped rows
+     * there are, and which one the caret is on. */
+    u32 rows, crow = 0;
+    {
+        i32 mx = 0;
+        u32 my = 0;
+        for (u64 i = 0; i < len; i++) {
+            if (caret && i == nav.caret) crow = my;
+            u8 ch = d[i];
+            if (ch == '\n' || mx >= cols) {
+                mx = 0; my++;
+                if (ch == '\n') continue;
+            }
+            mx++;
+        }
+        if (caret && nav.caret == len) crow = my;
+        rows = my + 1;
+    }
+
+    u32 scroll = 0;
+    if (caret) {
+        u32 *s = &scrolls[SCR_TEXT];
+        u32 max = rows > (u32)vis ? rows - (u32)vis : 0;
+
+        /* The journal opens at its end and stays pinned there while
+         * lines come, until one scrolls back to read. */
+        if (o == journal_object()) {
+            if (log_pinned) *s = max;
+            else if (*s >= max) log_pinned = true;
+        } else if (caret_chase) {
+            if (crow < *s) *s = crow;
+            else if (crow >= *s + (u32)vis) *s = crow - (u32)vis + 1;
+        }
+        caret_chase = false;
+        if (*s > max) *s = max;
+        scroll = *s;
+    }
 
     u64 lo = 0, hi = 0;
     if (caret) {
         text_area.x = x;
         text_area.y = y;
         text_area.cols = cols;
-        text_area.rows = h / GLYPH_H;
+        text_area.rows = vis;
+        text_area.scroll = scroll;
         hot_add(x, y, cols * GLYPH_W, h, HOT_TEXT, 0);
         marked_range(len, &lo, &hi);
     }
@@ -574,36 +725,42 @@ static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
     bool table = (o == settings_object());
     bool past_bar = false;
 
-    for (u64 i = 0; i <= len && cy * GLYPH_H < h; i++) {
+    i32 cx = 0;
+    u32 cy = 0;
+    for (u64 i = 0; i <= len && cy < scroll + (u32)vis; i++) {
         u8 ch = (i < len) ? d[i] : 0;
+        bool on = (cy >= scroll);
+        i32 py = y + (i32)(cy - scroll) * GLYPH_H;
 
-        if (bar && i == nav.caret)
-            fb_rect(x + cx * GLYPH_W - 1, y + cy * GLYPH_H, 2, GLYPH_H,
-                    C_ACCENT);
+        if (bar && i == nav.caret && on)
+            fb_rect(x + cx * GLYPH_W - 1, py, 2, GLYPH_H, C_ACCENT);
         if (i == len) break;
 
         if (ch == '\n' || cx >= cols) {
-            if (i >= lo && i < hi && ch == '\n')
-                fb_rect(x + cx * GLYPH_W, y + cy * GLYPH_H,
-                        GLYPH_W / 2, GLYPH_H, C_EDGE);
+            if (i >= lo && i < hi && ch == '\n' && on)
+                fb_rect(x + cx * GLYPH_W, py, GLYPH_W / 2, GLYPH_H,
+                        C_EDGE);
             cx = 0; cy++;
             past_bar = false;
             if (ch == '\n') continue;
+            on = (cy >= scroll);
+            py = y + (i32)(cy - scroll) * GLYPH_H;
         }
-        if (cy * GLYPH_H >= h) break;
+        if (cy >= scroll + (u32)vis) break;
 
-        if (i >= lo && i < hi)
-            fb_rect(x + cx * GLYPH_W, y + cy * GLYPH_H, GLYPH_W, GLYPH_H,
-                    C_EDGE);
+        if (i >= lo && i < hi && on)
+            fb_rect(x + cx * GLYPH_W, py, GLYPH_W, GLYPH_H, C_EDGE);
 
         color c = C_TEXT;
         if (table) {
             if (ch == '|') { c = C_FAINT; past_bar = true; }
             else if (!past_bar) c = C_DIM;
         }
-        fb_glyph(x + cx * GLYPH_W, y + cy * GLYPH_H, ch, c, 0, false);
+        if (on) fb_glyph(x + cx * GLYPH_W, py, ch, c, 0, false);
         cx++;
     }
+
+    if (caret) scroll_area(SCR_TEXT, x, y, w, h, rows, (u32)vis);
 }
 
 /* The walk above, run backwards: which place in the text sits at this
@@ -1162,20 +1319,7 @@ static void lens_html(object *o, i32 x, i32 y, i32 w, i32 h, bool live)
         field_spot_count = 0;
     }
 
-    if (html_rows > html_vis) {
-        i32 tx = x + w - 6;
-        fb_rect(tx, by, 2, bh, C_EDGE);
-        i32 th = bh * (i32)html_vis / (i32)html_rows;
-        if (th < 12) th = 12;
-        i32 tp = (i32)((u64)(bh - th) * nav.html_scroll /
-                       (html_rows - html_vis));
-        fb_rect(tx - 1, by + tp, 4, th, C_DIM);
-
-        hot_add(x + w - 2 * GLYPH_W, by, 2 * GLYPH_W, bh / 2,
-                HOT_SCROLL, 0);
-        hot_add(x + w - 2 * GLYPH_W, by + bh / 2, 2 * GLYPH_W,
-                bh - bh / 2, HOT_SCROLL, 1);
-    }
+    scroll_area(SCR_HTML, x, by, w, bh, html_rows, html_vis);
 }
 
 static void lens_bytes(object *o, i32 x, i32 y, i32 w, i32 h)
@@ -1188,17 +1332,24 @@ static void lens_bytes(object *o, i32 x, i32 y, i32 w, i32 h)
     if (per > 16) per = 16;
     if (per < 4) per = 4;
 
+    u32 total = (u32)((size + (u64)per - 1) / (u64)per);
+    u32 vis = (u32)(h / GLYPH_H);
+    if (vis < 1) vis = 1;
+    u32 scroll = scrolls[SCR_BYTES];
+    if (total > vis && scroll > total - vis) scroll = total - vis;
+    if (total <= vis) scroll = 0;
+
     const char *hex = "0123456789abcdef";
-    for (i32 row = 0; row * GLYPH_H < h; row++) {
-        u64 base = (u64)row * per;
+    for (u32 row = 0; row < vis; row++) {
+        u64 base = (u64)(scroll + row) * (u64)per;
         if (base >= size) break;
 
         char line[96];
         u32 at = 0;
+        line[at++] = hex[(base >> 12) & 0xF];
         line[at++] = hex[(base >> 8) & 0xF];
         line[at++] = hex[(base >> 4) & 0xF];
         line[at++] = hex[base & 0xF];
-        line[at++] = ' ';
         line[at++] = ' ';
         for (i32 i = 0; i < per && base + (u64)i < size; i++) {
             u8 b = d[base + i];
@@ -1207,47 +1358,60 @@ static void lens_bytes(object *o, i32 x, i32 y, i32 w, i32 h)
             line[at++] = ' ';
         }
         line[at] = 0;
-        text_at(x, y + row * GLYPH_H, x + w, line, C_DIM);
+        text_at(x, y + (i32)row * GLYPH_H, x + w, line, C_DIM);
     }
+
+    scroll_area(SCR_BYTES, x, y, w, h, total, vis);
 }
 
 static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
 {
     char line[96];
-    i32 ty = y;
+    u32 scroll = scrolls[SCR_STRUCT];
+    i32 ty = y - (i32)scroll * ROW;
     u32 at;
 
-    text_at(x, ty, x + w, "type", C_DIM);
-    text_at(x + 9 * GLYPH_W, ty, x + w, type_name(obj_type(o)),
-            type_color(obj_type(o)));
+    /* Everything below advances ty whether or not the row lands in
+     * the window; drawing and click regions are offered only where it
+     * does. That one rule is the whole scrolling. */
+#define ROW_ON (ty >= y && ty + GLYPH_H <= y + h)
+
+    if (ROW_ON) {
+        text_at(x, ty, x + w, "type", C_DIM);
+        text_at(x + 9 * GLYPH_W, ty, x + w, type_name(obj_type(o)),
+                type_color(obj_type(o)));
+    }
     ty += ROW;
 
     at = put(line, 0, "identity ");
     at = put_dec(line, at, obj_id(o));
     line[at] = 0;
-    text_at(x, ty, x + w, line, C_DIM);
+    if (ROW_ON) text_at(x, ty, x + w, line, C_DIM);
     ty += ROW;
 
     at = put(line, 0, "held by  ");
     at = put_dec(line, at, obj_refs(o));
     at = put(line, at, " references");
     line[at] = 0;
-    text_at(x, ty, x + w, line, C_DIM);
+    if (ROW_ON) text_at(x, ty, x + w, line, C_DIM);
     ty += ROW;
 
     at = put(line, 0, "payload  ");
     at = put_dec(line, at, obj_size(o));
     at = put(line, at, " bytes");
     line[at] = 0;
-    text_at(x, ty, x + w, line, C_DIM);
+    if (ROW_ON) text_at(x, ty, x + w, line, C_DIM);
     ty += ROW;
 
     /* For a program, the one fact that changes everything about it. */
     if (obj_type(o) == TYPE_PROGRAM) {
         bool alive = proc_is_running(o);
-        text_at(x, ty, x + w, "state", C_DIM);
-        text_at(x + 9 * GLYPH_W, ty, x + w, alive ? "running" : "ended",
-                alive ? C_WRITE : C_READONLY);
+        if (ROW_ON) {
+            text_at(x, ty, x + w, "state", C_DIM);
+            text_at(x + 9 * GLYPH_W, ty, x + w,
+                    alive ? "running" : "ended",
+                    alive ? C_WRITE : C_READONLY);
+        }
         ty += ROW;
     }
     ty += ROW / 2;
@@ -1259,35 +1423,38 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
         if (obj_get_slot(o, i)) filled++; else vacant++;
 
     if (filled == 0) {
-        text_at(x, ty, x + w, "no references", C_FAINT);
+        if (ROW_ON) text_at(x, ty, x + w, "no references", C_FAINT);
         ty += ROW;
     } else {
-        text_at(x, ty, x + w, "references", C_DIM);
+        if (ROW_ON) text_at(x, ty, x + w, "references", C_DIM);
         ty += ROW;
-        for (u64 i = 0; i < obj_slots(o) && ty < y + h; i++) {
+        for (u64 i = 0; i < obj_slots(o); i++) {
             object *t = obj_get_slot(o, i);
             if (!t) continue;
-            char what[48], r[4];
-            label_of(o, i, t, what, sizeof(what));
-            rights_text(obj_slot_rights(o, i), r);
 
-            at = put(line, 0, "  ");
-            at = put_dec(line, at, i);
-            at = put(line, at, "  ");
-            at = put(line, at, r);
-            at = put(line, at, "  ");
-            at = put(line, at, what);
-            line[at] = 0;
-            text_at(x, ty, x + w, line, C_DIM);
+            if (ROW_ON) {
+                char what[48], r[4];
+                label_of(o, i, t, what, sizeof(what));
+                rights_text(obj_slot_rights(o, i), r);
+
+                at = put(line, 0, "  ");
+                at = put_dec(line, at, i);
+                at = put(line, at, "  ");
+                at = put(line, at, r);
+                at = put(line, at, "  ");
+                at = put(line, at, what);
+                line[at] = 0;
+                text_at(x, ty, x + w, line, C_DIM);
+            }
             ty += ROW;
         }
     }
-    if (vacant > 0 && ty < y + h) {
+    if (vacant > 0) {
         at = put(line, 0, "  ");
         at = put_dec(line, at, vacant);
-        at = put(line, at, filled ? " empty slots" : " empty slots");
+        at = put(line, at, " empty slots");
         line[at] = 0;
-        text_at(x, ty, x + w, line, C_FAINT);
+        if (ROW_ON) text_at(x, ty, x + w, line, C_FAINT);
         ty += ROW;
     }
 
@@ -1306,61 +1473,67 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
      * way a hand would, and the journal says so. */
     if (o == pipe_arrivals() && o == focus() && nav.at_generation == 0) {
         ty += ROW / 2;
-        text_at(x, ty, x + w, "the pipe", C_DIM);
+        if (ROW_ON) {
+            text_at(x, ty, x + w, "the pipe", C_DIM);
 
-        bool lit = is_hovered(HOT_SCAN, 0);
-        i32 sx2 = x + 10 * GLYPH_W;
-        if (lit) fb_rect(sx2 - 4, ty - 3, 4 * GLYPH_W + 8, ROW, C_EDGE);
-        text_at(sx2, ty, x + w, "scan", lit ? C_TEXT : C_ACCENT);
-        hot_add(sx2 - 4, ty - 3, 4 * GLYPH_W + 8, ROW, HOT_SCAN, 0);
+            bool lit = is_hovered(HOT_SCAN, 0);
+            i32 sx2 = x + 10 * GLYPH_W;
+            if (lit) fb_rect(sx2 - 4, ty - 3, 4 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(sx2, ty, x + w, "scan", lit ? C_TEXT : C_ACCENT);
+            hot_add(sx2 - 4, ty - 3, 4 * GLYPH_W + 8, ROW, HOT_SCAN, 0);
+        }
         ty += ROW;
 
         u8 pip[4];
         u16 ppt;
-        if (settings_peer(pip, &ppt)) {
-            at = put(line, 0, "  points at ");
-            at = put_dec(line, at, pip[0]); line[at++] = '.';
-            at = put_dec(line, at, pip[1]); line[at++] = '.';
-            at = put_dec(line, at, pip[2]); line[at++] = '.';
-            at = put_dec(line, at, pip[3]);
-            line[at] = 0;
-            text_at(x, ty, x + w, line, C_TEXT);
-        } else {
-            text_at(x, ty, x + w, "  points at nobody", C_FAINT);
+        if (ROW_ON) {
+            if (settings_peer(pip, &ppt)) {
+                at = put(line, 0, "  points at ");
+                at = put_dec(line, at, pip[0]); line[at++] = '.';
+                at = put_dec(line, at, pip[1]); line[at++] = '.';
+                at = put_dec(line, at, pip[2]); line[at++] = '.';
+                at = put_dec(line, at, pip[3]);
+                line[at] = 0;
+                text_at(x, ty, x + w, line, C_TEXT);
+            } else {
+                text_at(x, ty, x + w, "  points at nobody", C_FAINT);
+            }
         }
         ty += ROW;
 
         u32 nfound = pipe_found_count();
         if (pipe_scanning() && nfound == 0) {
-            text_at(x, ty, x + w, "  listening...", C_FAINT);
+            if (ROW_ON) text_at(x, ty, x + w, "  listening...", C_FAINT);
             ty += ROW;
         }
-        for (u32 i = 0; i < nfound && ty < y + h; i++) {
+        for (u32 i = 0; i < nfound; i++) {
             u8 fip[4];
             char fname[24];
             bool fworks;
             u32 fmib;
             if (!pipe_found_at(i, fip, fname, &fworks, &fmib)) break;
 
-            at = put(line, 0, "  ");
-            at = put(line, at, fname);
-            while (at < 20) line[at++] = ' ';
-            at = put_dec(line, at, fip[0]); line[at++] = '.';
-            at = put_dec(line, at, fip[1]); line[at++] = '.';
-            at = put_dec(line, at, fip[2]); line[at++] = '.';
-            at = put_dec(line, at, fip[3]);
-            if (fworks) {
-                while (at < 40) line[at++] = ' ';
-                at = put(line, at, "takes work, ");
-                at = put_dec(line, at, fmib);
-                at = put(line, at, "M free");
-            }
-            line[at] = 0;
+            if (ROW_ON) {
+                at = put(line, 0, "  ");
+                at = put(line, at, fname);
+                while (at < 20) line[at++] = ' ';
+                at = put_dec(line, at, fip[0]); line[at++] = '.';
+                at = put_dec(line, at, fip[1]); line[at++] = '.';
+                at = put_dec(line, at, fip[2]); line[at++] = '.';
+                at = put_dec(line, at, fip[3]);
+                if (fworks) {
+                    while (at < 40) line[at++] = ' ';
+                    at = put(line, at, "takes work, ");
+                    at = put_dec(line, at, fmib);
+                    at = put(line, at, "M free");
+                }
+                line[at] = 0;
 
-            bool plit = is_hovered(HOT_PEERPICK, i);
-            if (plit) fb_rect(x, ty - 3, w, ROW, C_EDGE);
-            text_at(x, ty, x + w, line, plit ? C_TEXT : C_ACCENT);
-            hot_add(x, ty - 3, w, ROW, HOT_PEERPICK, i);
+                bool plit = is_hovered(HOT_PEERPICK, i);
+                if (plit) fb_rect(x, ty - 3, w, ROW, C_EDGE);
+                text_at(x, ty, x + w, line, plit ? C_TEXT : C_ACCENT);
+                hot_add(x, ty - 3, w, ROW, HOT_PEERPICK, i);
+            }
             ty += ROW;
         }
     }
@@ -1368,7 +1541,7 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
     domain *pd = proc_domain_of(o);
     if (pd) {
         ty += ROW / 2;
-        text_at(x, ty, x + w, "capabilities", C_DIM);
+        if (ROW_ON) text_at(x, ty, x + w, "capabilities", C_DIM);
         ty += ROW;
 
         /* Whoever may give may also take back -- any of it, the voice
@@ -1378,40 +1551,48 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
                        (focus_rights() & CAP_GRANT);
 
         u64 held = 0;
-        for (u64 i = 1; i <= domain_capacity(pd) && ty < y + h; i++) {
+        for (u64 i = 1; i <= domain_capacity(pd); i++) {
             u32 hr = 0;
             object *t = domain_cap_at(pd, i, &hr);
             if (!t) continue;
             held++;
 
-            char r[4];
-            rights_text(hr, r);
-            const char *claim = obj_name(t);
+            if (ROW_ON) {
+                char r[4];
+                rights_text(hr, r);
+                const char *claim = obj_name(t);
 
-            at = put(line, 0, "  ");
-            at = put(line, at, r);
-            if (hr & CAP_CALL) { line[at - 1] = 'c'; }
-            at = put(line, at, "  ");
-            at = put(line, at, type_name(obj_type(t)));
-            if (claim) {
+                at = put(line, 0, "  ");
+                at = put(line, at, r);
+                if (hr & CAP_CALL) { line[at - 1] = 'c'; }
                 at = put(line, at, "  ");
-                at = put(line, at, claim);
-            }
-            line[at] = 0;
-            text_at(x, ty, x + w, line, C_DIM);
+                at = put(line, at, type_name(obj_type(t)));
+                if (claim) {
+                    at = put(line, at, "  ");
+                    at = put(line, at, claim);
+                }
+                line[at] = 0;
+                text_at(x, ty, x + w, line, C_DIM);
 
-            if (may_cut) {
-                bool lit = is_hovered(HOT_CAPCUT, (u32)i);
-                text_at(x + w - 2 * GLYPH_W, ty, x + w, "x",
-                        lit ? C_READONLY : C_FAINT);
-                hot_add(x + w - 2 * GLYPH_W - 2, ty - 2, 2 * GLYPH_W,
-                        ROW - 2, HOT_CAPCUT, (u32)i);
+                if (may_cut) {
+                    bool lit = is_hovered(HOT_CAPCUT, (u32)i);
+                    text_at(x + w - 2 * GLYPH_W, ty, x + w, "x",
+                            lit ? C_READONLY : C_FAINT);
+                    hot_add(x + w - 2 * GLYPH_W - 2, ty - 2, 2 * GLYPH_W,
+                            ROW - 2, HOT_CAPCUT, (u32)i);
+                }
             }
             ty += ROW;
         }
-        if (held == 0 && ty < y + h)
-            text_at(x, ty, x + w, "  none", C_FAINT);
+        if (held == 0) {
+            if (ROW_ON) text_at(x, ty, x + w, "  none", C_FAINT);
+            ty += ROW;
+        }
     }
+
+    u32 total = (u32)((ty - (y - (i32)scroll * ROW) + ROW - 1) / ROW);
+    scroll_area(SCR_STRUCT, x, y, w, h, total, (u32)(h / ROW));
+#undef ROW_ON
 }
 
 static void draw_lens(lens_kind k, object *o, i32 x, i32 y, i32 w, i32 h,
@@ -1539,7 +1720,8 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     text_at(rx + PAD, top + PAD, sw - PAD, "contents", C_FAINT);
     fb_rect(rx + PAD, top + PAD + ROW - 2, right_w - 2 * PAD, 1, C_EDGE);
 
-    ty = top + PAD + ROW + 4;
+    i32 list_top = top + PAD + ROW + 4;
+    ty = list_top - (i32)scrolls[SCR_CONTENTS] * ROW;
     bool may_shape = can_shape();
 
     u64 slots = obj_slots(f);
@@ -1547,15 +1729,20 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     for (u64 i = 0; i < slots; i++) if (obj_get_slot(f, i)) used++;
 
     if (used == 0 && !may_shape)
-        text_at(rx + PAD, ty, sw - PAD, "no references", C_FAINT);
+        text_at(rx + PAD, list_top, sw - PAD, "no references", C_FAINT);
 
     i32 col_rights = rx + PAD + 2 * GLYPH_W;
     i32 col_name   = rx + PAD + 7 * GLYPH_W;
     i32 col_clear  = rx + right_w - PAD - 2 * GLYPH_W;
 
-    for (u64 i = 0; i < slots && ty < bottom - 2 * ROW; i++) {
+/* Rows advance whether drawn or not; only the visible get ink and
+ * click regions. The same rule as every other scrolling area. */
+#define CROW_ON (ty >= list_top && ty + GLYPH_H <= bottom - 4)
+
+    for (u64 i = 0; i < slots; i++) {
         object *t = obj_get_slot(f, i);
         if (!t) continue;                     /* empty slots are not shown */
+        if (!CROW_ON) { ty += ROW; continue; }
 
         char what[40], r[4];
         label_of(f, i, t, what, sizeof(what));
@@ -1638,13 +1825,15 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
      * because making one without pointing at it from somewhere would
      * produce something unreachable that vanishes immediately. The two
      * are one act, and this is where it happens. */
-    if (may_shape && ty < bottom - ROW) {
+    if (may_shape) {
         ty += 4;
-        bool lit = is_hovered(HOT_ADD, 0);
-        if (lit) fb_rect(rx, ty - 3, right_w, ROW, C_EDGE);
-        text_at(rx + PAD, ty, sw - PAD, "+  add",
-                lit ? C_TEXT : C_FAINT);
-        hot_add(rx, ty - 3, right_w, ROW, HOT_ADD, 0);
+        if (CROW_ON) {
+            bool lit = is_hovered(HOT_ADD, 0);
+            if (lit) fb_rect(rx, ty - 3, right_w, ROW, C_EDGE);
+            text_at(rx + PAD, ty, sw - PAD, "+  add",
+                    lit ? C_TEXT : C_FAINT);
+            hot_add(rx, ty - 3, right_w, ROW, HOT_ADD, 0);
+        }
         ty += ROW;
 
         if (edit.kind == EDIT_PICK) {
@@ -1652,12 +1841,14 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
                 "  text", "  bytes", "  list", "  picture", "  script",
                 "  page"
             };
-            for (u32 p = 0; p < PALETTE_FIXED && ty < bottom - ROW; p++) {
-                bool on = is_hovered(HOT_PALETTE, p);
-                if (on) fb_rect(rx, ty - 3, right_w, ROW, C_PANEL_HI);
-                text_at(rx + PAD, ty, sw - PAD, fixed[p],
-                        on ? C_TEXT : C_DIM);
-                hot_add(rx, ty - 3, right_w, ROW, HOT_PALETTE, p);
+            for (u32 p = 0; p < PALETTE_FIXED; p++) {
+                if (CROW_ON) {
+                    bool on = is_hovered(HOT_PALETTE, p);
+                    if (on) fb_rect(rx, ty - 3, right_w, ROW, C_PANEL_HI);
+                    text_at(rx + PAD, ty, sw - PAD, fixed[p],
+                            on ? C_TEXT : C_DIM);
+                    hot_add(rx, ty - 3, right_w, ROW, HOT_PALETTE, p);
+                }
                 ty += ROW;
             }
 
@@ -1667,57 +1858,71 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
              * how it is held. It starts with a voice and a letter box;
              * everything beyond that is given the ordinary way. */
             u32 sc = standard_count();
-            if (sc > 0 && ty < bottom - ROW) {
-                text_at(rx + PAD, ty, sw - PAD,
-                        "  or a program, started fresh:", C_FAINT);
+            if (sc > 0) {
+                if (CROW_ON)
+                    text_at(rx + PAD, ty, sw - PAD,
+                            "  or a program, started fresh:", C_FAINT);
                 ty += ROW;
             }
-            for (u32 p = 0; p < sc && ty < bottom - ROW; p++) {
-                bool on = is_hovered(HOT_PALETTE, PALETTE_FIXED + p);
-                if (on) fb_rect(rx, ty - 3, right_w, ROW, C_PANEL_HI);
+            for (u32 p = 0; p < sc; p++) {
+                if (CROW_ON) {
+                    bool on = is_hovered(HOT_PALETTE, PALETTE_FIXED + p);
+                    if (on) fb_rect(rx, ty - 3, right_w, ROW, C_PANEL_HI);
 
-                char nm[40];
-                u32 n = put(nm, 0, "  ");
-                n = put(nm, n, standard_name(p));
-                nm[n] = 0;
-                text_at(rx + PAD + 2 * GLYPH_W, ty, sw - PAD, nm,
-                        on ? C_TEXT : C_WRITE);
-                hot_add(rx, ty - 3, right_w, ROW, HOT_PALETTE,
-                        PALETTE_FIXED + p);
+                    char nm[40];
+                    u32 n = put(nm, 0, "  ");
+                    n = put(nm, n, standard_name(p));
+                    nm[n] = 0;
+                    text_at(rx + PAD + 2 * GLYPH_W, ty, sw - PAD, nm,
+                            on ? C_TEXT : C_WRITE);
+                    hot_add(rx, ty - 3, right_w, ROW, HOT_PALETTE,
+                            PALETTE_FIXED + p);
+                }
                 ty += ROW;
             }
 
             carried carry[CARRY_MAX];
             u32 carried_count = gather(carry);
 
-            if (carried_count > 0 && ty < bottom - ROW) {
-                text_at(rx + PAD, ty, sw - PAD,
-                        "  or something you already have:", C_FAINT);
+            if (carried_count > 0) {
+                if (CROW_ON)
+                    text_at(rx + PAD, ty, sw - PAD,
+                            "  or something you already have:", C_FAINT);
                 ty += ROW;
             }
-            for (u32 c = 0; c < carried_count && ty < bottom - ROW; c++) {
-                char nm[40], r[4];
-                label_of(carry[c].holder, carry[c].slot, carry[c].o,
-                         nm, sizeof(nm));
-                rights_text(carry[c].rights, r);
+            for (u32 c = 0; c < carried_count; c++) {
+                if (CROW_ON) {
+                    char nm[40], r[4];
+                    label_of(carry[c].holder, carry[c].slot, carry[c].o,
+                             nm, sizeof(nm));
+                    rights_text(carry[c].rights, r);
 
-                bool on = is_hovered(HOT_PALETTE,
-                                     PALETTE_FIXED + standard_count() + c);
-                if (on) fb_rect(rx, ty - 3, right_w, ROW, C_PANEL_HI);
+                    bool on = is_hovered(HOT_PALETTE,
+                                         PALETTE_FIXED + standard_count() + c);
+                    if (on) fb_rect(rx, ty - 3, right_w, ROW, C_PANEL_HI);
 
-                /* The rights come along on the label. What is being
-                 * offered is not the object but a particular hold on
-                 * it, and the difference is the whole point. */
-                text_at(rx + PAD + 2 * GLYPH_W, ty, sw - PAD, r,
-                        (carry[c].rights & CAP_WRITE) ? C_WRITE : C_READONLY);
-                text_at(rx + PAD + 7 * GLYPH_W, ty, sw - PAD, nm,
-                        on ? C_TEXT : C_DIM);
-                hot_add(rx, ty - 3, right_w, ROW, HOT_PALETTE,
-                        PALETTE_FIXED + standard_count() + c);
+                    /* The rights come along on the label. What is being
+                     * offered is not the object but a particular hold on
+                     * it, and the difference is the whole point. */
+                    text_at(rx + PAD + 2 * GLYPH_W, ty, sw - PAD, r,
+                            (carry[c].rights & CAP_WRITE) ? C_WRITE
+                                                          : C_READONLY);
+                    text_at(rx + PAD + 7 * GLYPH_W, ty, sw - PAD, nm,
+                            on ? C_TEXT : C_DIM);
+                    hot_add(rx, ty - 3, right_w, ROW, HOT_PALETTE,
+                            PALETTE_FIXED + standard_count() + c);
+                }
                 ty += ROW;
             }
         }
     }
+
+    u32 ctotal = (u32)((ty - (list_top - (i32)scrolls[SCR_CONTENTS] * ROW)
+                        + ROW - 1) / ROW);
+    scroll_area(SCR_CONTENTS, rx, list_top, right_w,
+                bottom - 4 - list_top, ctotal,
+                (u32)((bottom - 4 - list_top) / ROW));
+#undef CROW_ON
 }
 
 /* ------------------------------------------------------------------ */
@@ -2119,7 +2324,12 @@ static void draw_index_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     fb_rect(x, ty + ROW - 4, sw - 4 * PAD, 1, C_EDGE);
     ty += ROW + 4;
 
+    i32 list_y = ty;
+    u32 ivis = (u32)((bottom - 2 * ROW - list_y) / ROW);
+    if (ivis < 1) ivis = 1;
+
     u32 shown = 0, matched = 0;
+    u32 skip = scrolls[SCR_INDEX];
     for (u32 i = 0; i < icount; i++) {
         object *o = irows[i].o;
         index_row *r = &irows[i];
@@ -2127,6 +2337,7 @@ static void draw_index_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         char why[44];
         if (!row_matches(r, why, sizeof(why))) continue;
         matched++;
+        if (matched <= skip) continue;        /* scrolled past, above */
         if (ty >= bottom - 2 * ROW) continue;
         shown++;
 
@@ -2193,14 +2404,17 @@ static void draw_index_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         ty += ROW;
     }
 
-    if (shown < matched) {
+    if (skip + shown < matched) {
         at = put(line, 0, "  and ");
-        at = put_dec(line, at, matched - shown);
-        at = put(line, at, " more below the edge of the screen");
+        at = put_dec(line, at, matched - skip - shown);
+        at = put(line, at, " more below; the wheel or the edge scrolls");
         line[at] = 0;
         text_at(x, ty, sw - PAD, line, C_FAINT);
         ty += ROW;
     }
+
+    scroll_area(SCR_INDEX, PAD, list_y, sw - 2 * PAD,
+                bottom - 2 * ROW - list_y, matched, ivis);
 
     if (find_len && ty < bottom) {
         at = put(line, 0, "  ");
@@ -2262,6 +2476,7 @@ static void draw_all(void)
     pal = settings_light() ? pal_light : pal_dark;
 
     hot_reset();
+    scr_target_count = 0;
     fb_rect(0, 0, sw, sh, C_BACK);
 
     /* Header: what is in focus and what may be done with it. Rights are
@@ -2550,8 +2765,8 @@ static void draw_all(void)
 
     at = 0;
     if (settings_hints()) {
-        at = put(line, at, "click anything you can see.   "
-                           "arrows also move.   ");
+        at = put(line, at, "click anything you can see.  arrows move; "
+                           "the wheel scrolls.  ");
         if (sendto_open && sendto_ask)
             at = put(line, at, "click a machine and it does the work. "
                                "esc keeps it here.");
@@ -2682,6 +2897,10 @@ static void follow(u64 slot)
     nav.sel_a = nav.sel_b = 0;
     nav.sel_drag = false;
     nav.html_scroll = 0;
+    scrolls[SCR_TEXT] = scrolls[SCR_BYTES] = 0;
+    scrolls[SCR_STRUCT] = scrolls[SCR_CONTENTS] = 0;
+    log_pinned = true;
+    caret_chase = false;
     field_focus = -1;
     field_shape = 0;
     addr_edit = false;
@@ -2701,6 +2920,10 @@ static void go_back(void)
     nav.sel_a = nav.sel_b = 0;
     nav.sel_drag = false;
     nav.html_scroll = 0;
+    scrolls[SCR_TEXT] = scrolls[SCR_BYTES] = 0;
+    scrolls[SCR_STRUCT] = scrolls[SCR_CONTENTS] = 0;
+    log_pinned = true;
+    caret_chase = false;
     field_focus = -1;
     field_shape = 0;
     addr_edit = false;
@@ -2749,14 +2972,14 @@ static void type_into_focus(u32 codepoint)
     if (codepoint == '\b') {
         if (struck) { nav.changes++; nav.redraw = true; return; }
         if (nav.caret == 0) return;
-        for (u64 i = nav.caret - 1; i < len; i++) d[i] = d[i + 1];
-        d[len - 1] = 0;
+        for (u64 i = nav.caret - 1; i + 1 < size; i++) d[i] = d[i + 1];
+        d[size - 1] = 0;
         nav.caret--;
     } else if (codepoint == KEY_DELETE) {
         if (struck) { nav.changes++; nav.redraw = true; return; }
         if (nav.caret >= len) return;
-        for (u64 i = nav.caret; i < len; i++) d[i] = d[i + 1];
-        d[len - 1] = 0;
+        for (u64 i = nav.caret; i + 1 < size; i++) d[i] = d[i + 1];
+        d[size - 1] = 0;
     } else if (len + 1 < size) {
         for (u64 i = len + 1; i > nav.caret; i--) d[i] = d[i - 1];
         d[nav.caret] = (u8)codepoint;
@@ -2764,6 +2987,7 @@ static void type_into_focus(u32 codepoint)
     } else if (!struck) {
         return;
     }
+    caret_chase = true;
     nav.changes++;
     nav.redraw = true;
 }
@@ -3020,6 +3244,13 @@ static void peer_write(const u8 ip[4])
     pl[at++] = '\n';
     pl[at] = 0;
 
+    /* A full settings page would swallow the click without a trace;
+     * saying so beats writing half a line. */
+    if (len + (u64)at + 2 > size) {
+        journal_says("settings", "the page is full; make room first");
+        return;
+    }
+
     if (len && d[len - 1] != '\n' && len + 1 < size) d[len++] = '\n';
     for (u32 i = 0; pl[i] && len + 1 < size; i++) d[len++] = (u8)pl[i];
     d[len] = 0;
@@ -3143,6 +3374,7 @@ static void act_on(const hot_region *r)
         i32 col = (nav.mouse_x - text_area.x + GLYPH_W / 2) / GLYPH_W;
         if (row < 0) row = 0;
         if (col < 0) col = 0;
+        row += (i32)text_area.scroll;
         nav.caret = text_index_at(focus(), row, col);
         nav.sel_a = nav.sel_b = nav.caret;
         nav.sel_drag = true;
@@ -3185,6 +3417,7 @@ static void act_on(const hot_region *r)
         }
         for (u64 i = 0; i < n; i++) d[nav.caret + i] = (u8)held_text[i];
         nav.caret += n;
+        caret_chase = true;
         nav.changes++;
         nav.redraw = true;
         break;
@@ -3368,15 +3601,13 @@ static void act_on(const hot_region *r)
         break;
 
     case HOT_SCROLL: {
-        u32 step = html_vis > 4 ? html_vis - 2 : 3;
-        u32 max = html_rows > html_vis ? html_rows - html_vis : 0;
-        if (r->index == 0)
-            nav.html_scroll = nav.html_scroll > step
-                            ? nav.html_scroll - step : 0;
-        else
-            nav.html_scroll = nav.html_scroll + step > max
-                            ? max : nav.html_scroll + step;
-        nav.redraw = true;
+        /* The edge pages: upper half back, lower half onward, in any
+         * area that scrolls. Which one is in the index. */
+        u8 area = (u8)(r->index >> 1);
+        if (area >= SCR_COUNT) break;
+        u32 vis = scr_vis[area];
+        i32 step = (i32)(vis > 4 ? vis - 2 : 3);
+        scroll_by(area, (r->index & 1) ? step : -step);
         break;
     }
 
@@ -3656,6 +3887,9 @@ static void handle_mouse(void)
         bool is = (m.buttons & 1) != 0;
         nav.buttons = m.buttons;
 
+        /* The wheel reads whatever it is over. */
+        if (m.dz) wheel_at(nav.mouse_x, nav.mouse_y, m.dz);
+
         if (is && !was) {
             i32 h = hot_at(nav.mouse_x, nav.mouse_y);
             if (h >= 0) {
@@ -3685,6 +3919,7 @@ static void handle_mouse(void)
         i32 col = (nav.mouse_x - text_area.x + GLYPH_W / 2) / GLYPH_W;
         if (row < 0) row = 0;
         if (col < 0) col = 0;
+        row += (i32)text_area.scroll;
         u64 at = text_index_at(focus(), row, col);
         if (at != nav.sel_b) {
             nav.sel_b = at;

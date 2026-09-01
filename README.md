@@ -490,6 +490,17 @@ built binary.
   second run. The proof run computes 6 times 7 across the cable and
   hears 42 back, then sends a second recipe that loops forever and
   hears, honestly, that it ran out of time.
+* **Everything that holds more than it shows scrolls.** The mouse
+  grew its wheel -- the driver knocks the IntelliMouse knock, and a
+  device that knows it answers with a fourth byte -- and one scroll
+  mechanism serves every area: the rendered page, the focused text,
+  the byte view, the structure lens, the references panel, and the
+  index. The wheel works over whichever area it is over; the
+  clickable edge pages up and down; a thumb says where one is.
+  Typing pulls the window to the caret, so writing below the fold
+  is never invisible. The journal opens at its end -- the newest
+  line is why one came -- and stays pinned there as lines arrive,
+  until scrolling back up to read history unpins it.
 * **What a result is worth.** An answer is a claim by the machine
   that answered, nothing more. Nothing here proves the arithmetic
   was actually done: there are no attestations, no redundant runs,
