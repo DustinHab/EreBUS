@@ -92,6 +92,8 @@ KERN_C   := kernel/main.c \
             kernel/obj/activity.c \
             kernel/sched/thread.c \
             kernel/sched/proc.c \
+            kernel/net/e1000.c \
+            kernel/net/net.c \
             kernel/user/runner.c \
             kernel/arch/x86_64/syscall.c \
             kernel/arch/x86_64/gdt.c \
@@ -108,7 +110,8 @@ KERN_S   := kernel/arch/x86_64/start.S \
             kernel/user/tally.S \
             kernel/user/sums.S \
             kernel/user/watch.S \
-            kernel/user/wipe.S
+            kernel/user/wipe.S \
+            kernel/user/fetch.S
 
 KERN_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(KERN_C)) \
             $(patsubst %.S,$(BUILD)/%.o,$(KERN_S))
@@ -200,6 +203,11 @@ $(BUILD)/test-vars.fd: $(OVMF_VARS) FORCE
 FORCE:
 
 # --- running ----------------------------------------------------------
+# Which card the test machine wears. The default is the Intel e1000;
+# "make run NIC=rtl8139" proves the other driver against the same
+# tests, which is as close to real hardware as an emulator gets.
+NIC ?= e1000
+
 QEMU := qemu-system-x86_64 \
   -machine q35 -m 512M -cpu max \
   -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
@@ -208,7 +216,7 @@ QEMU := qemu-system-x86_64 \
   -vga none -device VGA,edid=on,xres=$(XRES),yres=$(YRES) \
   -drive id=store,file=$(STORE),format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
-  -net none
+  -device $(NIC),netdev=n0 -netdev user,id=n0
 
 run: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 	$(QEMU) -serial stdio
@@ -387,16 +395,16 @@ agent: $(IMAGE) $(BUILD)/test-vars.fd
 # when the palette gains a row, every carry click below it moves by
 # a row's 22 pixels.
 RELAY_HOME := home $(shell for i in $$(seq 17); do printf 'm100,0 '; done)
-RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,100 m0,100 m0,69 click \
+RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,100 m0,100 m0,91 click \
               m0,22 click ret \
               down down down down down down down down down down down \
               down down down down down right \
               p a s s spc i t left \
-              up up up up up up up up up up up right \
+              up up up up up up up up up up up up right \
               $(RELAY_HOME) m0,100 m0,15 click \
-              m0,100 m0,100 m0,100 m0,100 m0,84 click ret \
+              m0,100 m0,100 m0,100 m0,100 m0,100 m0,28 click ret \
               $(RELAY_HOME) m0,100 m0,39 click \
-              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,24 \
+              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,90 \
               click ret
 
 relay: $(IMAGE) $(BUILD)/test-vars.fd

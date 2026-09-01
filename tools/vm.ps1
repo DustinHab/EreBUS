@@ -48,6 +48,6 @@ Copy-Item $vars (Join-Path $build "win-vars.fd") -Force
     -vga none -device "VGA,edid=on,xres=1280,yres=800" `
     -drive "id=store,file=$store,format=raw,if=none" `
     -device "ide-hd,drive=store,bus=ide.1" `
-    -net none `
+    -device "e1000,netdev=n0" -netdev "user,id=n0" `
     -name "Erebus" `
     -serial "file:$(Join-Path $build 'vm-serial.log')"

@@ -273,7 +273,7 @@ static bool cut_marked(u8 *d, u64 size, u64 *len)
 /* What the palette offers. The fixed entries make something new; the
  * rest are objects already in hand, so pointing at something that
  * exists needs no dragging and no second window. */
-#define PALETTE_FIXED 5
+#define PALETTE_FIXED 6
 #define CARRY_MAX 24
 
 /* What a picture is born as: room enough to draw in, small enough to
@@ -1146,7 +1146,8 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
 
         if (edit.kind == EDIT_PICK) {
             static const char *fixed[PALETTE_FIXED] = {
-                "  text", "  bytes", "  list", "  picture", "  script"
+                "  text", "  bytes", "  list", "  picture", "  script",
+                "  page"
             };
             for (u32 p = 0; p < PALETTE_FIXED && ty < bottom - ROW; p++) {
                 bool on = is_hovered(HOT_PALETTE, p);
@@ -2641,6 +2642,19 @@ static void act_on(const hot_region *r)
                     sd[i] = (u8)first[i];
             }
             suggest = "script";
+            created = true;
+        }
+        else if (r->index == 5) {
+            /* Room for a page from outside. The first line names it;
+             * hand the page to fetch and the rest fills in. */
+            made = obj_create(TYPE_TEXT, 16384, 0);
+            if (made) {
+                static const char ask[] = "example.com\n";
+                u8 *pdta = (u8 *)obj_data(made);
+                for (u32 i = 0; i < sizeof(ask); i++)
+                    pdta[i] = (u8)ask[i];
+            }
+            suggest = "page";
             created = true;
         }
         else if (r->index < PALETTE_FIXED + standard_count()) {

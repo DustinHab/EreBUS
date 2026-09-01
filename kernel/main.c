@@ -28,6 +28,7 @@
 #include <eb/settings.h>
 #include <eb/activity.h>
 #include <eb/standard.h>
+#include <eb/net.h>
 #include <eb/string.h>
 #include <eb/syscall.h>
 #include <eb/pic.h>
@@ -123,6 +124,7 @@ extern char user_tally[];
 extern char user_sums[];
 extern char user_watch[];
 extern char user_wipe[];
+extern char user_fetch[];
 
 /* What the system ships with. hello and trespass make their point at
  * start-up and end; these stay, each doing one thing to whatever it is
@@ -142,6 +144,7 @@ static const struct {
     { "sums",    user_sums,    "sums" },
     { "watch",   user_watch,   "watch" },
     { "wipe",    user_wipe,    "wipe" },
+    { "fetch",   user_fetch,   "fetch" },
 };
 #define STANDARD_COUNT ((u32)ARRAY_LEN(standard))
 
@@ -163,6 +166,17 @@ const char *standard_name(u32 i)
     return i < STANDARD_COUNT ? standard[i].name : "?";
 }
 
+/* What some programs are born holding beyond the voice and the letter
+ * box. fetch gets the wire, send-only -- recorded on its object like
+ * every giving, so the graph itself says who can reach outside. */
+static void standard_wire(const char *name, object *prog)
+{
+    if (!prog || strcmp(name, "fetch") != 0 || !net_port()) return;
+    obj_set_slot(prog, 0, net_port(), CAP_CALL);
+    obj_set_slot_name(prog, 0, "the wire");
+    proc_grant(prog, net_port(), CAP_CALL);
+}
+
 object *standard_launch(u32 i)
 {
     if (i >= STANDARD_COUNT || !console_port) return NULL;
@@ -171,6 +185,7 @@ object *standard_launch(u32 i)
                              console_port);
     if (!p) return NULL;
     if (!proc_start(p)) return NULL;
+    standard_wire(standard[i].name, proc_object(p));
 
     kprintf("proc: %llu (%s) started from the shell\n",
             proc_id(p), proc_name(p));
@@ -900,6 +915,11 @@ void kmain(eb_boot_info *bi)
                                  CAP_READ | CAP_CALL | CAP_GRANT);
     thread_create("console", console_server, NULL, kernel_domain);
 
+    /* The network's door has to exist before fetch starts holding a
+     * way to it; the card behind the door is sought later, once the
+     * bus has been scanned. Requests simply queue until then. */
+    net_prepare(kernel_domain);
+
     static const struct { const char *name; char *entry; } programs[] = {
         { "hello",    user_hello },
         { "trespass", user_trespass },
@@ -934,6 +954,7 @@ void kmain(eb_boot_info *bi)
         }
         if (proc_start(proc)) {
             standard_obj[i] = proc_object(proc);
+            standard_wire(standard[i].name, standard_obj[i]);
             kprintf("proc: %llu (%s) waiting on its letter box\n",
                     proc_id(proc), proc_name(proc));
         }
@@ -983,6 +1004,9 @@ void kmain(eb_boot_info *bi)
     } else {
         kprintf("blk:  no ahci disk found\n");
     }
+
+    if (!net_start())
+        kprintf("net:  no network card found; the wire goes nowhere\n");
 
     /* --- the desktop ------------------------------------------------- */
 
@@ -1063,6 +1087,11 @@ void kmain(eb_boot_info *bi)
             for (u64 j = 0; j < obj_slots(records[k]); j++) {
                 object *t = obj_get_slot(records[k], j);
                 if (!t) continue;
+
+                /* The wire is wired afresh at every start; a record's
+                 * copy of it is last boot's door, not this one's. */
+                const char *sn = obj_slot_name(records[k], j);
+                if (sn && strcmp(sn, "the wire") == 0) continue;
                 for (u32 k2 = 0; k2 < STANDARD_COUNT; k2++)
                     if (t == records[k2] && standard_obj[k2])
                         t = standard_obj[k2];
