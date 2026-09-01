@@ -490,11 +490,32 @@ built binary.
   second run. The proof run computes 6 times 7 across the cable and
   hears 42 back, then sends a second recipe that loops forever and
   hears, honestly, that it ran out of time.
+* **What a result is worth.** An answer is a claim by the machine
+  that answered, nothing more. Nothing here proves the arithmetic
+  was actually done: there are no attestations, no redundant runs,
+  no majority votes, and the journal's wording keeps that visible --
+  "job 1 answers: 42" reports what the far side said, not what is
+  true. On your own wire, among your own machines, a result is
+  worth exactly what those machines are worth to you, which for the
+  network this pipe is built to span -- one person's machines
+  lending each other their processors -- is the honest and
+  sufficient answer. In an open network it would not be: there, ask
+  a machine you have reason to trust, or ask the same job of two
+  and compare, by hand, knowing the pipe does neither for you. The
+  same caveat wears the seal's clothes: the knock encrypts the road
+  but does not prove who answered it, so until identity lands under
+  the knock, "the peer" means "whoever answers at that address".
+  Writing this down is the feature; a distributed system that
+  implies its results are verified when they are not would be lying
+  in its architecture.
 * M10 — booting real hardware from a USB stick
 * Certificate verification — turning the seal from privacy into
   identity: RSA/ECDSA signatures and a root store
 * Identity under the pipe's knock — remembering who a machine was
   the last time, so an impostor answering the knock is caught
+* Work at scale — several jobs in flight and several lent
+  processors at once, and repeated answers compared by the system
+  instead of by hand
 
 ## A note on Secure Boot
 
