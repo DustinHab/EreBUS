@@ -94,6 +94,13 @@ cp /usr/share/OVMF/OVMF_VARS_4M.fd "$BUILD/test-vars.fd"
                 sleep 0.2
                 echo "mouse_button 0"
                 ;;
+            press)
+                # Half a click, for dragging: press, move, release.
+                echo "mouse_button 1"
+                ;;
+            release)
+                echo "mouse_button 0"
+                ;;
             *)
                 echo "sendkey $k"
                 ;;

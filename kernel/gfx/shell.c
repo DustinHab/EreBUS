@@ -92,6 +92,12 @@ static struct {
      * use, so it survives the text shrinking under it. */
     u64 caret;
 
+    /* The marked stretch of the focused text: the anchor where the
+     * button went down, and the moving end. Equal means nothing is
+     * marked. Byte places, clamped like the caret. */
+    u64  sel_a, sel_b;
+    bool sel_drag;
+
     u64  changes;
     bool redraw;
     i32  mouse_x, mouse_y;
@@ -153,7 +159,10 @@ typedef enum {
     HOT_PALETTE,     /* one choice of what to add */
     HOT_JOURNAL,     /* the newest journal line: go to the journal */
     HOT_TEXT,        /* the text itself: put the caret there */
-    HOT_INDEX        /* a row of the index: walk there */
+    HOT_INDEX,       /* a row of the index: walk there */
+    HOT_TAKE,        /* lift the marked letters out */
+    HOT_PUT,         /* set the lifted letters down at the caret */
+    HOT_DROP         /* let the lifted letters go */
 } hot_kind;
 
 typedef struct {
@@ -212,6 +221,40 @@ static struct {
     char buf[OBJ_NAME_MAX];
     u32  len;
 } edit;
+
+/* Letters lifted out of one text, waiting to be set down in another.
+ * The shell carries them, not any object, so they survive every step
+ * of the walk -- including a walk into the past, which is how a line
+ * from an old generation gets back into the present. */
+static char held_text[256];
+static u32  held_len;
+
+/* The marked stretch, ordered and clamped to the text in focus. */
+static void marked_range(u64 len, u64 *lo, u64 *hi)
+{
+    *lo = nav.sel_a < nav.sel_b ? nav.sel_a : nav.sel_b;
+    *hi = nav.sel_a < nav.sel_b ? nav.sel_b : nav.sel_a;
+    if (*lo > len) *lo = len;
+    if (*hi > len) *hi = len;
+}
+
+/* Removes the marked letters, closes the gap, and leaves the caret
+ * where they stood. Answers whether anything was removed. */
+static bool cut_marked(u8 *d, u64 size, u64 *len)
+{
+    u64 lo, hi;
+    marked_range(*len, &lo, &hi);
+    if (lo >= hi) return false;
+
+    u64 gap = hi - lo;
+    for (u64 i = lo; i + gap < size; i++) d[i] = d[i + gap];
+    for (u64 i = size - gap; i < size; i++) d[i] = 0;
+
+    *len -= gap;
+    nav.caret = lo;
+    nav.sel_a = nav.sel_b = 0;
+    return true;
+}
 
 /* What the palette offers. The fixed entries make something new; the
  * rest are objects already in hand, so pointing at something that
@@ -457,13 +500,21 @@ static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
 
     if (nav.caret > len) nav.caret = len;
 
+    u64 lo = 0, hi = 0;
     if (caret) {
         text_area.x = x;
         text_area.y = y;
         text_area.cols = cols;
         text_area.rows = h / GLYPH_H;
         hot_add(x, y, cols * GLYPH_W, h, HOT_TEXT, 0);
+        marked_range(len, &lo, &hi);
     }
+
+    /* The caret bar is drawn only where typing would land something --
+     * marking and lifting work in any readable text, the bar does not
+     * pretend more than that. */
+    bool bar = caret && (focus_rights() & CAP_WRITE) &&
+               nav.at_generation == 0;
 
     /* The settings read as a table, and they are drawn as one: the
      * matter column dimmed, the bar fainter still, the value in full
@@ -476,17 +527,24 @@ static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
     for (u64 i = 0; i <= len && cy * GLYPH_H < h; i++) {
         u8 ch = (i < len) ? d[i] : 0;
 
-        if (caret && i == nav.caret)
+        if (bar && i == nav.caret)
             fb_rect(x + cx * GLYPH_W - 1, y + cy * GLYPH_H, 2, GLYPH_H,
                     C_ACCENT);
         if (i == len) break;
 
         if (ch == '\n' || cx >= cols) {
+            if (i >= lo && i < hi && ch == '\n')
+                fb_rect(x + cx * GLYPH_W, y + cy * GLYPH_H,
+                        GLYPH_W / 2, GLYPH_H, C_EDGE);
             cx = 0; cy++;
             past_bar = false;
             if (ch == '\n') continue;
         }
         if (cy * GLYPH_H >= h) break;
+
+        if (i >= lo && i < hi)
+            fb_rect(x + cx * GLYPH_W, y + cy * GLYPH_H, GLYPH_W, GLYPH_H,
+                    C_EDGE);
 
         color c = C_TEXT;
         if (table) {
@@ -789,8 +847,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         i32 lx = mid_x + PAD + (i32)i * each;
         if (i > 0) fb_rect(lx - PAD / 2, cy, 1, ch, C_EDGE);
         draw_lens(nav.lens[i], f, lx, cy, each - PAD, ch,
-                  nav.lens[i] == LENS_TEXT &&
-                  (focus_rights() & CAP_WRITE) != 0);
+                  nav.lens[i] == LENS_TEXT);
     }
 
     /* --- where it leads ------------------------------------------ */
@@ -1160,7 +1217,7 @@ static void draw_tiles_shell(i32 sw, i32 sh, i32 top, i32 bottom)
                   nav.node[idx],
                   x + PAD, top + PAD + ROW + PAD,
                   w - 2 * PAD, bottom - top - ROW - 3 * PAD,
-                  last && (nav.rights[idx] & CAP_WRITE) != 0);
+                  last && nav.lens[0] == LENS_TEXT);
 
         x += w + gap;
     }
@@ -1436,6 +1493,70 @@ static void draw_all(void)
     text_at(tx, 14, sw - PAD, line,
             (focus_rights() & CAP_WRITE) ? C_WRITE : C_READONLY);
 
+    /* Marked letters, and letters being carried. The mark offers
+     * "take"; what was taken travels with the shell and offers "put"
+     * wherever writing is allowed. Both live in the header because
+     * they concern the walk, not any one object. */
+    {
+        u64 flen = 0;
+        const u8 *fd = (const u8 *)obj_data(focus());
+        if (fd && obj_type(focus()) == TYPE_TEXT)
+            flen = text_len(fd, obj_size(focus()));
+
+        u64 mlo, mhi;
+        marked_range(flen, &mlo, &mhi);
+
+        i32 hx = sw / 2 + PAD;
+        i32 hy = 12 + ROW;
+
+        if (mhi > mlo) {
+            at = put(line, 0, "");
+            at = put_dec(line, at, mhi - mlo);
+            at = put(line, at, mhi - mlo == 1 ? " letter marked"
+                                              : " letters marked");
+            line[at] = 0;
+            text_at(hx, hy, sw - PAD, line, C_DIM);
+            hx += (i32)at * GLYPH_W + 2 * GLYPH_W;
+
+            bool lit = is_hovered(HOT_TAKE, 0);
+            if (lit) fb_rect(hx - 4, hy - 3, 4 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(hx, hy, sw, "take", lit ? C_TEXT : C_ACCENT);
+            hot_add(hx - 4, hy - 3, 4 * GLYPH_W + 8, ROW, HOT_TAKE, 0);
+        } else if (held_len) {
+            char ex[20];
+            u32 exn = 0;
+            while (exn < 18 && exn < held_len) {
+                char c = held_text[exn];
+                ex[exn++] = (c == '\n' || (u8)c < 0x20) ? ' ' : c;
+            }
+            ex[exn] = 0;
+
+            at = put(line, 0, "carrying \"");
+            at = put(line, at, ex);
+            if (held_len > 18) at = put(line, at, "...");
+            at = put(line, at, "\"");
+            line[at] = 0;
+            text_at(hx, hy, sw - PAD, line, C_DIM);
+            hx += (i32)at * GLYPH_W + 2 * GLYPH_W;
+
+            bool may_put = obj_type(focus()) == TYPE_TEXT &&
+                           (focus_rights() & CAP_WRITE) &&
+                           nav.at_generation == 0;
+            if (may_put) {
+                bool lit = is_hovered(HOT_PUT, 0);
+                if (lit) fb_rect(hx - 4, hy - 3, 3 * GLYPH_W + 8, ROW,
+                                 C_EDGE);
+                text_at(hx, hy, sw, "put", lit ? C_TEXT : C_ACCENT);
+                hot_add(hx - 4, hy - 3, 3 * GLYPH_W + 8, ROW, HOT_PUT, 0);
+                hx += 3 * GLYPH_W + 2 * GLYPH_W;
+            }
+
+            bool litx = is_hovered(HOT_DROP, 0);
+            text_at(hx, hy, sw, "x", litx ? C_READONLY : C_FAINT);
+            hot_add(hx - 2, hy - 3, 2 * GLYPH_W, ROW, HOT_DROP, 0);
+        }
+    }
+
     /* Far right, quietly: which generation is on the disk, and how long
      * the system has been up. Not a status bar -- two facts. */
     at = put(line, 0, "generation ");
@@ -1534,9 +1655,12 @@ static void draw_all(void)
                            "tab: switch view.   arrows also move.   ");
         if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
             at = put(line, at, "point it at something to hand it over.");
+        else if (nav.sel_a != nav.sel_b)
+            at = put(line, at, "typing replaces the marked letters.");
         else if (obj_type(focus()) == TYPE_TEXT &&
                  (focus_rights() & CAP_WRITE) && nav.at_generation == 0)
-            at = put(line, at, "typing goes where the caret is.");
+            at = put(line, at, "typing goes where the caret is. "
+                               "drag to mark.");
         else
             at = put(line, at, "typing changes the object.");
     }
@@ -1578,6 +1702,8 @@ static void follow(u64 slot)
     nav.depth++;
     nav.selected = 0;
     nav.caret = (u64)-1;                 /* the end, once clamped */
+    nav.sel_a = nav.sel_b = 0;
+    nav.sel_drag = false;
     set_lenses_for(t);
     nav.changes++;
     nav.redraw = true;
@@ -1589,6 +1715,8 @@ static void go_back(void)
     nav.depth--;
     nav.selected = nav.via[nav.depth];
     nav.caret = (u64)-1;
+    nav.sel_a = nav.sel_b = 0;
+    nav.sel_drag = false;
     set_lenses_for(focus());
     nav.changes++;
     nav.redraw = true;
@@ -1621,19 +1749,30 @@ static void type_into_focus(u32 codepoint)
     u64 len = text_len(d, size);
     if (nav.caret > len) nav.caret = len;
 
+    /* A marked stretch goes first: erasing erases it, and a letter
+     * takes its place. That is the whole meaning of marking something
+     * and then typing. */
+    bool struck = cut_marked(d, size, &len);
+
     /* Typing happens at the caret, and the caret goes where it is
      * clicked -- so a line in the middle can be reworked in place,
      * which is what makes a text of one-line facts editable at all. */
     if (codepoint == '\b') {
+        if (struck) { nav.changes++; nav.redraw = true; return; }
         if (nav.caret == 0) return;
         for (u64 i = nav.caret - 1; i < len; i++) d[i] = d[i + 1];
         d[len - 1] = 0;
         nav.caret--;
+    } else if (codepoint == KEY_DELETE) {
+        if (struck) { nav.changes++; nav.redraw = true; return; }
+        if (nav.caret >= len) return;
+        for (u64 i = nav.caret; i < len; i++) d[i] = d[i + 1];
+        d[len - 1] = 0;
     } else if (len + 1 < size) {
         for (u64 i = len + 1; i > nav.caret; i--) d[i] = d[i - 1];
         d[nav.caret] = (u8)codepoint;
         nav.caret++;
-    } else {
+    } else if (!struck) {
         return;
     }
     nav.changes++;
@@ -1720,6 +1859,9 @@ static void handle_keys(void)
             continue;
         case KEY_LEFT:
             go_back();
+            continue;
+        case KEY_DELETE:
+            type_into_focus(KEY_DELETE);
             continue;
         default: break;
         }
@@ -1814,18 +1956,66 @@ static void act_on(const hot_region *r)
     }
 
     case HOT_TEXT: {
-        /* A click into the writing puts the caret there. The pixel is
-         * turned back into a row and a column, and the column walk
-         * finds which letter that is. */
-        if (!(focus_rights() & CAP_WRITE)) break;
+        /* A click into the writing puts the caret there, and starts a
+         * mark: holding the button and moving stretches it. The pixel
+         * is turned back into a row and a column, and the column walk
+         * finds which letter that is. Reading is enough -- marking and
+         * lifting take nothing a reader does not have. */
         i32 row = (nav.mouse_y - text_area.y) / GLYPH_H;
         i32 col = (nav.mouse_x - text_area.x + GLYPH_W / 2) / GLYPH_W;
         if (row < 0) row = 0;
         if (col < 0) col = 0;
         nav.caret = text_index_at(focus(), row, col);
+        nav.sel_a = nav.sel_b = nav.caret;
+        nav.sel_drag = true;
         nav.redraw = true;
         break;
     }
+
+    case HOT_TAKE: {
+        object *f = focus();
+        const u8 *d = (const u8 *)obj_data(f);
+        if (!d) break;
+        u64 len = text_len(d, obj_size(f));
+        u64 lo, hi;
+        marked_range(len, &lo, &hi);
+        held_len = 0;
+        for (u64 i = lo; i < hi && held_len < sizeof(held_text); i++)
+            held_text[held_len++] = (char)d[i];
+        nav.sel_a = nav.sel_b = 0;
+        nav.redraw = true;
+        break;
+    }
+
+    case HOT_PUT: {
+        object *f = focus();
+        if (obj_type(f) != TYPE_TEXT) break;
+        if (!(focus_rights() & CAP_WRITE) || nav.at_generation != 0) break;
+        u8 *d = (u8 *)obj_data(f);
+        if (!d || held_len == 0) break;
+
+        u64 size = obj_size(f);
+        u64 len = text_len(d, size);
+        if (nav.caret > len) nav.caret = len;
+        if (len + 1 >= size) break;
+
+        u64 room = size - 1 - len;
+        u64 n = held_len > room ? room : held_len;
+        for (u64 j = len; j + 1 > nav.caret; j--) {
+            d[j + n] = d[j];
+            if (j == 0) break;
+        }
+        for (u64 i = 0; i < n; i++) d[nav.caret + i] = (u8)held_text[i];
+        nav.caret += n;
+        nav.changes++;
+        nav.redraw = true;
+        break;
+    }
+
+    case HOT_DROP:
+        held_len = 0;
+        nav.redraw = true;
+        break;
 
     case HOT_JOURNAL: {
         /* The line leads to the record. The walk is a real walk -- back
@@ -2018,9 +2208,26 @@ static void handle_mouse(void)
             i32 h = hot_at(nav.mouse_x, nav.mouse_y);
             if (h >= 0) act_on(&hots[h]);
         }
+        if (!is && was) nav.sel_drag = false;
     }
 
     if (!moved) return;
+
+    /* Dragging with the button down stretches the mark. The moving end
+     * is also the caret, so letting go leaves one standing exactly at
+     * the edge of what was marked. */
+    if (nav.sel_drag && (nav.buttons & 1)) {
+        i32 row = (nav.mouse_y - text_area.y) / GLYPH_H;
+        i32 col = (nav.mouse_x - text_area.x + GLYPH_W / 2) / GLYPH_W;
+        if (row < 0) row = 0;
+        if (col < 0) col = 0;
+        u64 at = text_index_at(focus(), row, col);
+        if (at != nav.sel_b) {
+            nav.sel_b = at;
+            nav.caret = at;
+            nav.redraw = true;
+        }
+    }
 
     /* Whatever is under the pointer lights up. Without that one has to
      * click to find out whether anything was there at all, and guessing
