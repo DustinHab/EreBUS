@@ -28,6 +28,8 @@
 #define K_OFFER   1
 #define K_CHUNK   2
 #define K_TAKEN   3
+#define K_SEEK    4                  /* who else is on this wire? */
+#define K_HERE    5                  /* i am, and this is my name */
 
 #define CHUNK_MAX 1024
 #define CARRY_MAX_BYTES 65536
@@ -46,6 +48,100 @@ void pipe_arrivals_set(object *list)
     if (arrivals) obj_release(arrivals);
     arrivals = list;
     if (arrivals) obj_retain(arrivals);
+}
+
+object *pipe_arrivals(void) { return arrivals; }
+
+static u32 rd32(const u8 *p);
+static u64 rd64(const u8 *p);
+static void wr32(u8 *p, u32 v);
+static void wr64(u8 *p, u64 v);
+
+/* ------------------------------------------------------------------ */
+/* Company on the wire                                                 */
+/* ------------------------------------------------------------------ */
+
+#define FOUND_MAX 8
+
+static struct {
+    bool used;
+    u8   ip[4];
+    char name[24];
+} found[FOUND_MAX];
+
+static u64 scan_until_ns;            /* while set, seeks go out */
+static u64 scan_last_call_ns;
+
+void pipe_scan(void)
+{
+    for (u32 i = 0; i < FOUND_MAX; i++) found[i].used = false;
+    scan_until_ns = time_ns() + 3ULL * 1000000000ULL;
+    scan_last_call_ns = 0;
+    journal_says("pipe", "calling out on the wire");
+}
+
+bool pipe_scanning(void)
+{
+    return time_ns() < scan_until_ns;
+}
+
+u32 pipe_found_count(void)
+{
+    u32 n = 0;
+    for (u32 i = 0; i < FOUND_MAX; i++) if (found[i].used) n++;
+    return n;
+}
+
+bool pipe_found_at(u32 i, u8 ip[4], char name[24])
+{
+    u32 n = 0;
+    for (u32 k = 0; k < FOUND_MAX; k++) {
+        if (!found[k].used) continue;
+        if (n == i) {
+            for (u32 j = 0; j < 4; j++) ip[j] = found[k].ip[j];
+            for (u32 j = 0; j < 24; j++) name[j] = found[k].name[j];
+            return true;
+        }
+        n++;
+    }
+    return false;
+}
+
+static bool ip4_same(const u8 *a, const u8 *b)
+{
+    return a[0]==b[0] && a[1]==b[1] && a[2]==b[2] && a[3]==b[3];
+}
+
+static void found_note(const u8 *ip, const u8 *name, u32 nmax)
+{
+    u32 slot = FOUND_MAX;
+    for (u32 i = 0; i < FOUND_MAX; i++) {
+        if (found[i].used && ip4_same(found[i].ip, ip)) { slot = i; break; }
+        if (!found[i].used && slot == FOUND_MAX) slot = i;
+    }
+    if (slot == FOUND_MAX) return;
+
+    found[slot].used = true;
+    for (u32 i = 0; i < 4; i++) found[slot].ip[i] = ip[i];
+    u32 n = 0;
+    while (n < 23 && n < nmax && name[n]) {
+        char c = (char)name[n];
+        found[slot].name[n] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+        n++;
+    }
+    found[slot].name[n] = 0;
+}
+
+/* magic, kind, pad, then the name. */
+static void say_who(u8 kind, const u8 dst[4], u16 dport)
+{
+    u8 pkt[32];
+    wr32(pkt, MAGIC);
+    pkt[4] = kind; pkt[5] = pkt[6] = pkt[7] = 0;
+    char nm[24];
+    settings_name(nm, sizeof(nm));
+    for (u32 i = 0; i < 24; i++) pkt[8 + i] = (u8)nm[i];
+    net_udp_send(dst, PIPE_PORT, dport, pkt, 32);
 }
 
 /* ------------------------------------------------------------------ */
@@ -247,7 +343,20 @@ static void arrival_done(void)
 
     kprintf("pipe: %u bytes arrived from %u.%u.%u.%u\n",
             in.total, in.from[0], in.from[1], in.from[2], in.from[3]);
-    journal_says("pipe", "something arrived");
+
+    char said[48];
+    u32 sa = 0;
+    const char *pre = "arrived: ";
+    while (*pre) said[sa++] = *pre++;
+    if (in.name[0])
+        for (u32 i = 0; in.name[i] && sa < sizeof(said) - 1; i++)
+            said[sa++] = in.name[i];
+    else {
+        const char *un = "something unnamed";
+        while (*un && sa < sizeof(said) - 1) said[sa++] = *un++;
+    }
+    said[sa] = 0;
+    journal_says("pipe", said);
     in.active = false;
 }
 
@@ -261,6 +370,19 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         if (out.busy && id == out.id) {
             out.taken = true;
         }
+        return;
+    }
+
+    /* Company. A seeker is answered and remembered both -- one scan
+     * and the two machines know each other. Our own voice, come back
+     * around the wire, is not company. */
+    if (kind == K_SEEK || kind == K_HERE) {
+        if (len < 32) return;
+        u8 self[4];
+        if (net_own_address(self) && ip4_same(src, self)) return;
+
+        found_note(src, p + 8, 24);
+        if (kind == K_SEEK) say_who(K_HERE, src, sport);
         return;
     }
 
@@ -316,6 +438,20 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
 
 void pipe_service(void)
 {
+    /* While a scan runs, the call goes out once a second: to everyone
+     * on the wire, and to the named peer besides -- who may live past
+     * a router where no broadcast reaches. */
+    if (time_ns() < scan_until_ns &&
+        time_ns() - scan_last_call_ns > SECOND) {
+        scan_last_call_ns = time_ns();
+        static const u8 everyone[4] = { 255, 255, 255, 255 };
+        say_who(K_SEEK, everyone, PIPE_PORT);
+
+        u8 peer[4];
+        u16 pp;
+        if (settings_peer(peer, &pp)) say_who(K_SEEK, peer, pp);
+    }
+
     /* A half-arrived thing whose sender went quiet is let go. */
     if (in.active && time_ns() - in.started_ns > 10 * SECOND)
         in.active = false;

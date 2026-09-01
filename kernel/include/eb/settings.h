@@ -41,4 +41,7 @@ bool settings_peer(u8 ip[4], u16 *port);
  * machine asks the network (dhcp) as usual. */
 bool settings_address(u8 ip[4]);
 
+/* What this machine calls itself when another asks. */
+void settings_name(char *out, u32 max);
+
 #endif /* EB_SETTINGS_H */

@@ -40,11 +40,12 @@ typedef struct {
     u16  peer_port;
     bool addr_set;
     u8   addr_ip[4];
+    char name[24];
 } values;
 
 static values current = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                           false, { 0, 0, 0, 0 }, 0,
-                          false, { 0, 0, 0, 0 } };
+                          false, { 0, 0, 0, 0 }, "erebus" };
 
 object *settings_object(void) { return settings; }
 
@@ -69,6 +70,13 @@ bool settings_address(u8 ip[4])
     return true;
 }
 
+void settings_name(char *out, u32 max)
+{
+    u32 i = 0;
+    while (current.name[i] && i < max - 1) { out[i] = current.name[i]; i++; }
+    out[i] = 0;
+}
+
 void settings_pointer_scale(i32 *num, i32 *den)
 {
     if (num) *num = current.pointer_num;
@@ -88,6 +96,8 @@ static const char seed[] =
     "hints    | shown\n"
     "slice    | 50 ms\n"
     "start    | where i left\n"
+    "name     | erebus\n"
+    "address  | by lease\n"
     "peer     | nobody\n";
 
 bool settings_create(void)
@@ -248,6 +258,22 @@ static void read_line(values *v, const char *line, u64 len)
         } else {
             v->addr_set = false;
         }
+    } else if (matter_is(line, a, b, "name")) {
+        /* What this machine calls itself when another asks: shown to
+         * the other side as a claim, like every self-given name. */
+        u64 from = 0, to = vlen;
+        while (from < to && val[from] == ' ') from++;
+        while (to > from && (val[to-1] == ' ' || val[to-1] == '\r')) to--;
+        u32 n = 0;
+        for (u64 i = from; i < to && n < sizeof(v->name) - 1; i++)
+            if ((u8)val[i] >= 0x20 && (u8)val[i] < 0x7F)
+                v->name[n++] = val[i];
+        v->name[n] = 0;
+        if (n == 0) {
+            const char *fb = "erebus";
+            for (n = 0; fb[n]; n++) v->name[n] = fb[n];
+            v->name[n] = 0;
+        }
     }
 }
 
@@ -302,6 +328,9 @@ static void note_changes(const values *was, const values *now)
                      ? "the next start is at home"
                      : "the next start is where you left");
 
+    if (strcmp(was->name, now->name) != 0)
+        journal_says("settings", "the machine goes by a new name");
+
     if (was->addr_set != now->addr_set ||
         (now->addr_set && memcmp(was->addr_ip, now->addr_ip, 4) != 0))
         journal_says("settings", now->addr_set
@@ -345,7 +374,7 @@ void settings_apply(void)
 
     values next = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                     false, { 0, 0, 0, 0 }, 0,
-                    false, { 0, 0, 0, 0 } };
+                    false, { 0, 0, 0, 0 }, "erebus" };
 
     u64 start = 0;
     for (u64 i = 0; i <= size; i++) {

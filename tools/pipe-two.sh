@@ -62,16 +62,19 @@ A_JOB=$!
 
 sleep 3
 
-# --- machine B: claim 10.9.9.21, point at A, send the notes -------------
+# --- machine B: claim 10.9.9.21, then find A the intuitive way:
+# stand on arrivals, press scan, click the machine that answers,
+# stand on the notes, press send. No address typed for the peer.
 {
     sleep 12
     keys tab tab tab t h e m e ret \
          ret a d d r e s s spc shift-backslash spc \
          1 0 dot 9 dot 9 dot 2 1 \
-         ret p e e r spc shift-backslash spc \
-         1 0 dot 9 dot 9 dot 2 0 spc 7 8 0 0 \
-         left \
-         up up up up up up up up up up up up up up up up right \
+         left down down right \
+         home m100,100 m100,100 m100,70 m100,0 m15,0 click \
+         m0,1 m0,1 m0,1 m0,1 m0,1 m0,1 \
+         m85,45 click \
+         left up up up up up up up up up up up up up up up up up right \
          home m100,20 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m100,0 m100,0 m100,0 m95,0 click \
          m0,1 m0,1 m0,1 m0,1 m0,1 m0,1

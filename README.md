@@ -433,6 +433,19 @@ built binary.
   can reach the port can lay things into arrivals -- quarantined as
   inert data, but arriving unasked; sealing and greeting are the
   pipe's next milestones.
+* **Finding each other.** Standing on the arrivals list shows the
+  pipe whole: where it points, and a scan that calls out on the wire.
+  Machines running this system answer with the name their settings
+  give them ("name | erebus"), the answering machines stand there as
+  clickable lines, and one click on a found machine points the pipe
+  at it -- by writing the peer line into the settings the way a hand
+  would, so the record stays honest and the journal says so. A seek
+  is answered and remembered both ways: after one scan, both
+  machines know each other. Connect is a click, send is a click,
+  arrival is a journal line; no address needs typing when the other
+  machine is on your own wire. The call is a broadcast, so it
+  reaches your wire and not the world beyond a router; the named
+  peer is also asked directly, wherever it lives.
 * M10 — booting real hardware from a USB stick
 * Certificate verification — turning the seal from privacy into
   identity: RSA/ECDSA signatures and a root store

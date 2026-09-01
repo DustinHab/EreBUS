@@ -40,4 +40,16 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *data, u32 len);
 /* Carrying and housekeeping, called from the net thread's loop. */
 void pipe_service(void);
 
+/* The arrivals list, for the shell to recognise. */
+object *pipe_arrivals(void);
+
+/* Looking for company: a scan calls out on the wire, and machines
+ * running this same system answer with their names. The found stand
+ * in a small table until the next scan; pointing the pipe at one is
+ * the shell's single click. */
+void pipe_scan(void);
+bool pipe_scanning(void);
+u32  pipe_found_count(void);
+bool pipe_found_at(u32 i, u8 ip[4], char name[24]);
+
 #endif /* EB_PIPE_H */

@@ -49,6 +49,13 @@ static bool       running;
 object *net_port(void) { return service_port; }
 bool    net_up(void)   { return running; }
 
+bool net_own_address(u8 ip[4])
+{
+    if (!configured) return false;
+    if (ip) for (u32 i = 0; i < 4; i++) ip[i] = ip_ours[i];
+    return true;
+}
+
 /* How the last page came, for the shell to show a seal or its absence. */
 static bool last_secure;
 static bool last_verified;
@@ -413,6 +420,13 @@ static bool gateway_find(void);
  * cache remembers the answer for everything after. */
 static bool mac_for(const u8 *dst, u8 out_mac[6])
 {
+    /* Spoken to everyone: the broadcast door, no asking needed. */
+    static const u8 everyone4[4] = { 255, 255, 255, 255 };
+    if (ip4_eq(dst, everyone4)) {
+        for (u32 i = 0; i < 6; i++) out_mac[i] = 0xFF;
+        return true;
+    }
+
     if (!on_link(dst)) {
         if (!gateway_find()) return false;
         for (u32 i = 0; i < 6; i++) out_mac[i] = mac_gw[i];

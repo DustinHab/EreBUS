@@ -73,6 +73,9 @@ void net_breathe(void);
 bool net_udp_send(const u8 dst[4], u16 sport, u16 dport,
                   const u8 *data, u32 len);
 
+/* Our own address, once the machine has one. */
+bool net_own_address(u8 ip[4]);
+
 /* TLS 1.3 over that stream: connect to addr:443, run the handshake,
  * send the http request sealed, and hand back the decrypted response
  * exactly as http_fetch would hand back a plain one. The channel is

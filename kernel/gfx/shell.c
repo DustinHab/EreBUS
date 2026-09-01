@@ -192,7 +192,9 @@ typedef enum {
     HOT_BACK,        /* step back through where the browser has been */
     HOT_FWD,         /* and forward again */
     HOT_ADDR,        /* the address itself: type a new one */
-    HOT_SEND         /* give the focused object to the pipe's peer */
+    HOT_SEND,        /* give the focused object to the pipe's peer */
+    HOT_SCAN,        /* call out on the wire for other machines */
+    HOT_PEERPICK     /* a found machine: point the pipe at it */
 } hot_kind;
 
 typedef struct {
@@ -1287,6 +1289,64 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
      * narrowings and withdrawals included. Whoever delegates can see
      * what came of it; authority handed out and forgotten is how every
      * other system rots. */
+    /* The arrivals list is the pipe's face, so standing on it shows
+     * the pipe whole: where it points, who else is on the wire, and
+     * the one word that looks for them. Connecting is a click on a
+     * found machine -- it writes the peer line into the settings the
+     * way a hand would, and the journal says so. */
+    if (o == pipe_arrivals() && o == focus() && nav.at_generation == 0) {
+        ty += ROW / 2;
+        text_at(x, ty, x + w, "the pipe", C_DIM);
+
+        bool lit = is_hovered(HOT_SCAN, 0);
+        i32 sx2 = x + 10 * GLYPH_W;
+        if (lit) fb_rect(sx2 - 4, ty - 3, 4 * GLYPH_W + 8, ROW, C_EDGE);
+        text_at(sx2, ty, x + w, "scan", lit ? C_TEXT : C_ACCENT);
+        hot_add(sx2 - 4, ty - 3, 4 * GLYPH_W + 8, ROW, HOT_SCAN, 0);
+        ty += ROW;
+
+        u8 pip[4];
+        u16 ppt;
+        if (settings_peer(pip, &ppt)) {
+            at = put(line, 0, "  points at ");
+            at = put_dec(line, at, pip[0]); line[at++] = '.';
+            at = put_dec(line, at, pip[1]); line[at++] = '.';
+            at = put_dec(line, at, pip[2]); line[at++] = '.';
+            at = put_dec(line, at, pip[3]);
+            line[at] = 0;
+            text_at(x, ty, x + w, line, C_TEXT);
+        } else {
+            text_at(x, ty, x + w, "  points at nobody", C_FAINT);
+        }
+        ty += ROW;
+
+        u32 nfound = pipe_found_count();
+        if (pipe_scanning() && nfound == 0) {
+            text_at(x, ty, x + w, "  listening...", C_FAINT);
+            ty += ROW;
+        }
+        for (u32 i = 0; i < nfound && ty < y + h; i++) {
+            u8 fip[4];
+            char fname[24];
+            if (!pipe_found_at(i, fip, fname)) break;
+
+            at = put(line, 0, "  ");
+            at = put(line, at, fname);
+            while (at < 20) line[at++] = ' ';
+            at = put_dec(line, at, fip[0]); line[at++] = '.';
+            at = put_dec(line, at, fip[1]); line[at++] = '.';
+            at = put_dec(line, at, fip[2]); line[at++] = '.';
+            at = put_dec(line, at, fip[3]);
+            line[at] = 0;
+
+            bool plit = is_hovered(HOT_PEERPICK, i);
+            if (plit) fb_rect(x, ty - 3, w, ROW, C_EDGE);
+            text_at(x, ty, x + w, line, plit ? C_TEXT : C_ACCENT);
+            hot_add(x, ty - 3, w, ROW, HOT_PEERPICK, i);
+            ty += ROW;
+        }
+    }
+
     domain *pd = proc_domain_of(o);
     if (pd) {
         ty += ROW / 2;
@@ -2458,7 +2518,10 @@ static void draw_all(void)
     if (settings_hints()) {
         at = put(line, at, "click anything you can see.   "
                            "arrows also move.   ");
-        if (nav.mode == SHELL_INDEX)
+        if (focus() == pipe_arrivals() && nav.at_generation == 0)
+            at = put(line, at, "scan finds machines; "
+                               "click one and send reaches it.");
+        else if (nav.mode == SHELL_INDEX)
             at = put(line, at, "typing searches what you can reach.");
         else if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
             at = put(line, at, "point it at something to hand it over.");
@@ -3037,6 +3100,46 @@ static void act_on(const hot_region *r)
             pipe_post(focus());
         nav.redraw = true;
         break;
+
+    case HOT_SCAN:
+        pipe_scan();
+        nav.redraw = true;
+        break;
+
+    case HOT_PEERPICK: {
+        /* Connecting is one click: the found machine's address goes
+         * into the settings as a written line, exactly as a hand
+         * would write it -- so it persists, the journal notes it, and
+         * the settings text stays the one honest record. */
+        u8 fip[4];
+        char fname[24];
+        if (!pipe_found_at(r->index, fip, fname)) break;
+
+        object *s = settings_object();
+        if (!s) break;
+        u8 *d = (u8 *)obj_data(s);
+        if (!d) break;
+        u64 size = obj_size(s);
+        u64 len = text_len(d, size);
+
+        char pl[64];
+        u32 at2 = put(pl, 0, "peer     | ");
+        at2 = put_dec(pl, at2, fip[0]); pl[at2++] = '.';
+        at2 = put_dec(pl, at2, fip[1]); pl[at2++] = '.';
+        at2 = put_dec(pl, at2, fip[2]); pl[at2++] = '.';
+        at2 = put_dec(pl, at2, fip[3]);
+        at2 = put(pl, at2, " 7800");
+        pl[at2++] = '\n';
+        pl[at2] = 0;
+
+        if (len && d[len - 1] != '\n' && len + 1 < size) d[len++] = '\n';
+        for (u32 i = 0; pl[i] && len + 1 < size; i++) d[len++] = (u8)pl[i];
+        d[len] = 0;
+
+        nav.changes++;               /* the settings apply as written */
+        nav.redraw = true;
+        break;
+    }
 
     case HOT_GO:
         addr_edit = false;
