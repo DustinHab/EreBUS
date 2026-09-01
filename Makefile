@@ -370,7 +370,10 @@ agent: $(IMAGE) $(BUILD)/test-vars.fd
 # The coordinates track the root's slot layout: seed objects in 0-3,
 # the standard programs in 4-11, the time in 12, the log in 13, the
 # settings in 14, the activity in 15, so the note made here becomes
-# slot 16. When the seed graph changes, this changes.
+# slot 16. When the seed graph changes, this changes. They also track
+# the add palette: three fixed offers, then a header and the eight
+# startable programs (nine rows), then the carries -- when the palette
+# gains a section, every carry click below it moves by that much.
 RELAY_HOME := home $(shell for i in $$(seq 17); do printf 'm100,0 '; done)
 RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,100 m0,100 m0,69 click \
               m0,22 click ret \
@@ -379,9 +382,9 @@ RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,100 m0,100 m0,69 click \
               p a s s spc i t left \
               up up up up up up up up up up up right \
               $(RELAY_HOME) m0,100 m0,15 click \
-              m0,100 m0,100 m0,42 click ret \
+              m0,100 m0,100 m0,100 m0,100 m0,40 click ret \
               $(RELAY_HOME) m0,100 m0,39 click \
-              m0,100 m0,100 m0,100 m0,100 m0,82 click ret
+              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,80 click ret
 
 relay: $(IMAGE) $(BUILD)/test-vars.fd
 	@rm -f $(STORE)
