@@ -316,6 +316,8 @@ static void dns_input(const u8 *p, u32 len)
     }
 }
 
+static void sntp_input(const u8 *p, u32 len);
+
 /* Sorts one arriving frame. Called until the wire is quiet. */
 static void net_pump(void)
 {
@@ -374,6 +376,7 @@ static void net_pump(void)
             u16 sport = ((u16)inner[0] << 8) | inner[1];
             u16 dport = ((u16)inner[2] << 8) | inner[3];
             if (sport == 53) dns_input(inner + 8, ilen - 8);
+            if (sport == 123) sntp_input(inner + 8, ilen - 8);
             if (dport == 68) dhcp_input(inner + 8, ilen - 8);
             if (dport == PIPE_PORT)
                 pipe_input(p + 12, sport, inner + 8, ilen - 8);
@@ -763,6 +766,39 @@ static bool dns_resolve(const char *host, u32 hlen, u8 *out_ip)
     return true;
 }
 
+/* ------------------------------------------------------------------ */
+/* The clock from the net                                              */
+/* ------------------------------------------------------------------ */
+
+/* One SNTP question, and the answer sets the wall clock. The time
+ * that comes back is utc; where the machine actually stands stays the
+ * settings' clock line to say, on top. */
+static void sntp_input(const u8 *p, u32 len)
+{
+    if (len < 48) return;
+
+    /* The transmit timestamp: seconds since 1900, big-endian. */
+    u64 secs = ((u64)p[40] << 24) | ((u64)p[41] << 16) |
+               ((u64)p[42] << 8) | p[43];
+    if (secs == 0) return;
+
+    u32 day = (u32)(secs % 86400);
+    time_set_wall(day / 3600, (day / 60) % 60, day % 60);
+    kprintf("net:  the clock was set from the net (utc)\n");
+    journal_says("system", "the clock was set from the net");
+}
+
+static void sntp_ask(void)
+{
+    u8 srv[4];
+    if (!dns_resolve("pool.ntp.org", 12, srv)) return;
+
+    u8 q[48];
+    memset(q, 0, sizeof(q));
+    q[0] = 0x23;                       /* version 4, a client asking */
+    net_udp_send(srv, 40123, 123, q, 48);
+}
+
 static u16 tcp_port_next = 49200;
 
 /* Sends what is unsent and waits for the acknowledgement, resending a
@@ -1096,6 +1132,15 @@ static void net_thread(void *arg)
             for (u32 i = 0; i < ARP_CACHE; i++) neigh[i].used = false;
             kprintf("net:  %u.%u.%u.%u by claim\n",
                     ip_ours[0], ip_ours[1], ip_ours[2], ip_ours[3]);
+        }
+
+        /* The clock from the net: soon after the wires are up, then
+         * once an hour. A wire with no time server on it costs a few
+         * quiet seconds and is left in peace for the next hour. */
+        static u64 sntp_next_ns;
+        if (configured && time_ns() >= sntp_next_ns) {
+            sntp_next_ns = time_ns() + 3600ULL * SECOND;
+            sntp_ask();
         }
 
         pipe_service();

@@ -30,4 +30,8 @@ object *runner_launch(object *script);
 object *work_launch(object *script, object *reply, u64 budget_seconds,
                     i64 lo, i64 hi);
 
+/* Saves the graph and asks the machine to sleep. Comes back only on
+ * hardware that ignored the asking. */
+void system_off(void);
+
 #endif /* EB_STANDARD_H */

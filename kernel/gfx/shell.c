@@ -196,7 +196,9 @@ typedef enum {
     HOT_SCAN,        /* call out on the wire for other machines */
     HOT_PEERPICK,    /* a found machine: point the pipe at it */
     HOT_SENDPICK,    /* a found machine, chosen mid-send: point and go */
-    HOT_ASK          /* run the focused text on the peer's machine */
+    HOT_ASK,         /* run the focused text on the peer's machine */
+    HOT_OFF,         /* save everything and put the machine to sleep */
+    HOT_END          /* end the focused running program */
 } hot_kind;
 
 typedef struct {
@@ -2632,6 +2634,19 @@ static void draw_all(void)
             text_at(chip_x, 14, sw - PAD, "ask", lit ? C_TEXT : C_ACCENT);
             hot_add(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, HOT_ASK, 0);
         }
+
+        /* A running program can be ended by whoever may give to it:
+         * the same authority that hands things over may close the
+         * hand. It ends at its next step and is reaped like any
+         * other end. */
+        if (ft == TYPE_PROGRAM && proc_is_running(focus()) &&
+            (focus_rights() & CAP_GRANT) && nav.at_generation == 0) {
+            bool lit = is_hovered(HOT_END, 0);
+            if (lit) fb_rect(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(chip_x, 14, sw - PAD, "end",
+                    lit ? C_TEXT : C_READONLY);
+            hot_add(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, HOT_END, 0);
+        }
     }
 
     /* Marked letters, and letters being carried. The mark offers
@@ -2841,8 +2856,20 @@ static void draw_all(void)
         else
             at = put(line, at, "typing changes the object.");
     }
+    /* The one deliberate end, far right where nothing reaches for it
+     * by accident: everything is saved, then the machine sleeps. */
+    i32 off_x = sw - PAD - 8 * GLYPH_W;
+    {
+        bool lit = is_hovered(HOT_OFF, 0);
+        if (lit) fb_rect(off_x - 4, sh - 28 + 3, 8 * GLYPH_W + 8,
+                         ROW, C_EDGE);
+        text_at(off_x, sh - 28 + 6, sw, "turn off",
+                lit ? C_READONLY : C_FAINT);
+        hot_add(off_x - 4, sh - 28, 8 * GLYPH_W + 8, 28, HOT_OFF, 0);
+    }
+
     line[at] = 0;
-    text_at(mx, sh - 28 + 6, sw - PAD, line, C_FAINT);
+    text_at(mx, sh - 28 + 6, off_x - 2 * GLYPH_W, line, C_FAINT);
 
     /* The recipient chooser: send was pressed with nobody set, so the
      * choosing happens under the word itself. The scan is already
@@ -3793,6 +3820,53 @@ static void act_on(const hot_region *r)
         if (obj_type(focus()) == TYPE_PROGRAM && target)
             proc_revoke(focus(), target);
 
+        /* What is let go of steps into the bin first, petname and
+         * rights along -- a slip of the pointer should cost a walk to
+         * the bin, not the thing. Letting go inside the bin itself is
+         * final, and so is letting go of the bin. The bin is made the
+         * first time it is needed, next to everything else on home. */
+        object *home = nav.node[0];
+        object *bin = NULL;
+        if (nav.rights[0] & CAP_WRITE) {
+            for (u64 i = 0; i < obj_slots(home); i++) {
+                object *s = obj_get_slot(home, i);
+                const char *n = obj_slot_name(home, i);
+                if (s && n && strcmp(n, "bin") == 0 &&
+                    obj_type(s) == TYPE_LIST) { bin = s; break; }
+            }
+        }
+
+        bool final = !target || focus() == bin || target == bin ||
+                     !(nav.rights[0] & CAP_WRITE);
+
+        if (!final && !bin) {
+            object *made = obj_create(TYPE_LIST, 0, 4);
+            if (made) {
+                obj_set_name(made, "bin");
+                u64 n = obj_slots(home), at2 = n;
+                for (u64 i = 0; i < n; i++)
+                    if (!obj_get_slot(home, i)) { at2 = i; break; }
+                if (at2 < n || obj_grow_slots(home, n + 1)) {
+                    obj_set_slot(home, at2, made, CAP_READ | CAP_WRITE);
+                    obj_set_slot_name(home, at2, "bin");
+                    bin = made;
+                }
+                obj_release(made);
+            }
+        }
+
+        if (!final && bin) {
+            u64 n = obj_slots(bin), at2 = n;
+            for (u64 i = 0; i < n; i++)
+                if (!obj_get_slot(bin, i)) { at2 = i; break; }
+            if (at2 < n || obj_grow_slots(bin, n + 1)) {
+                obj_set_slot(bin, at2, target,
+                             obj_slot_rights(focus(), r->index));
+                obj_set_slot_name(bin, at2,
+                                  obj_slot_name(focus(), r->index));
+            }
+        }
+
         /* Letting go of a reference. If it was the last one the object
          * is gone, and if it was not, the object is still perfectly
          * reachable by whoever else points at it. Nothing here has to
@@ -3804,6 +3878,20 @@ static void act_on(const hot_region *r)
         nav.redraw = true;
         break;
     }
+
+    case HOT_OFF:
+        system_off();
+        nav.redraw = true;
+        break;
+
+    case HOT_END:
+        if ((focus_rights() & CAP_GRANT) && nav.at_generation == 0 &&
+            proc_end(focus())) {
+            journal_says("system", "a program was ended by hand");
+            nav.changes++;
+        }
+        nav.redraw = true;
+        break;
 
     case HOT_ADD:
         edit.kind = (edit.kind == EDIT_PICK) ? EDIT_NONE : EDIT_PICK;

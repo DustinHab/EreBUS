@@ -561,6 +561,27 @@ static void activity_thread(void *arg)
     }
 }
 
+/* The deliberate end: the graph goes to disk, the journal notes the
+ * leaving, and the machine is asked to sleep at the ports the common
+ * machines listen on. A machine that ignores them is told so instead
+ * of left looking frozen. */
+void system_off(void)
+{
+    journal_says("system", "going to rest");
+
+    object *roots[2] = { persistent_root, shell_session() };
+    if (persistent_root && blk_present())
+        snap_save(roots, roots[1] ? 2 : 1);
+    kprintf("system: off; generation %llu is on the disk\n",
+            snap_generation());
+
+    outw(0x604, 0x2000);              /* qemu q35 */
+    outw(0xB004, 0x2000);             /* bochs, older qemu */
+    outw(0x4004, 0x3400);             /* virtualbox */
+
+    journal_says("system", "the machine would not sleep");
+}
+
 /* Writes the graph out once changes have stopped arriving.
  *
  * There is no save command, so something has to decide when. Waiting

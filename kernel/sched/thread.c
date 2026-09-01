@@ -52,6 +52,7 @@ struct thread {
     const char  *name;
     domain      *dom;
     thread_state state;
+    bool         condemned;    /* marked to end at its next kernel step */
     u32          slot;         /* which stack slot is ours */
     virt_addr    stack_low;    /* first mapped byte */
     thread_entry entry;
@@ -316,6 +317,23 @@ void sched_wake(thread *t)
     t->state = THREAD_READY;
     queue_add(t);
     irq_restore(flags);
+}
+
+/* Marks a thread to end. It finishes itself at its next step into
+ * the kernel -- the check at the syscall door -- so the ending always
+ * runs in the thread's own context, on its own stack, through the
+ * same exit and reaping a voluntary end takes. A blocked thread is
+ * woken so that step comes; the wait it was in answers false. */
+void thread_condemn(thread *t)
+{
+    if (!t || t->magic != THREAD_MAGIC) return;
+    t->condemned = true;
+    sched_wake(t);
+}
+
+bool thread_condemned(const thread *t)
+{
+    return t && t->magic == THREAD_MAGIC && t->condemned;
 }
 
 void sched_tick(void)

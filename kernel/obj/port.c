@@ -267,6 +267,22 @@ bool port_receive_labelled(domain *to, cap_handle h, message *out,
          * in between: a sender that arrives now sees us on the list. */
         s->waiters[s->nwaiters++] = sched_current();
         sched_block();
+
+        /* Woken to end, not to receive: step off the wait list --
+         * a sender's wake removes its waiter, a condemning one does
+         * not -- and answer false, so the way out leads through the
+         * syscall door where the ending is waiting. */
+        if (thread_condemned(sched_current())) {
+            for (u32 i = 0; i < s->nwaiters; i++) {
+                if (s->waiters[i] != sched_current()) continue;
+                for (u32 k = i + 1; k < s->nwaiters; k++)
+                    s->waiters[k - 1] = s->waiters[k];
+                s->nwaiters--;
+                break;
+            }
+            irq_restore(flags);
+            return false;
+        }
         irq_restore(flags);
     }
 }

@@ -163,6 +163,16 @@ void time_wall(u32 *h, u32 *m, u32 *s)
     if (s) *s = (u32)(now % 60);
 }
 
+/* Sets the wall clock to a known time of day -- the net's, when a
+ * time server answered. The base is adjusted so the running counter
+ * lands on the given moment now. */
+void time_set_wall(u32 h, u32 m, u32 s)
+{
+    u64 up = time_ns() / 1000000000ULL;
+    u64 want = (u64)h * 3600 + (u64)m * 60 + s;
+    boot_wall = (want + 86400ULL * 4 - up % 86400) % 86400;
+}
+
 u64 time_boot_stamp(void)
 {
     /* Something that tells this boot apart from the last one. Date and

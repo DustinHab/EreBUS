@@ -17,6 +17,9 @@ u64 time_tsc_hz(void);
 void time_read_rtc(void);
 void time_wall(u32 *h, u32 *m, u32 *s);
 
+/* Sets the wall clock -- how a time server's answer lands. */
+void time_set_wall(u32 h, u32 m, u32 s);
+
 /* Tells this boot apart from any other, to the second. */
 u64  time_boot_stamp(void);  /* 0 if the measurement failed */
 

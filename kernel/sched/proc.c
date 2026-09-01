@@ -382,6 +382,22 @@ bool proc_grant(object *program, object *what, u32 rights)
     return proc_grant_word(program, what, rights, 0);
 }
 
+/* Ends a running program from outside. The thread is condemned and
+ * finishes itself at its next step into the kernel; everything it
+ * held is let go through the same reaping a voluntary end takes. */
+bool proc_end(object *program)
+{
+    if (!program || obj_type(program) != TYPE_PROGRAM) return false;
+    if (!proc_is_running(program)) return false;
+    process *p = ((program_ref *)obj_data(program))->p;
+    if (!p->first) return false;
+
+    kprintf("proc: %llu (%s) is being ended by hand\n",
+            p->id, p->name);
+    thread_condemn(p->first);
+    return true;
+}
+
 /* A bare number into a program's letter box -- no capability, just a
  * word under a tag. How a visiting script learns the far end of its
  * range. */

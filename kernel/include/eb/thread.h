@@ -59,6 +59,12 @@ u64  sched_idle_ns(void);
 void sched_set_slice_ticks(u32 t);
 void sched_wake(thread *t);
 
+/* Marks a thread to end at its next step into the kernel; a blocked
+ * one is woken so that step comes. The ending runs in the thread's
+ * own context, through the ordinary exit and reaping. */
+void thread_condemn(thread *t);
+bool thread_condemned(const thread *t);
+
 /* Called from the timer interrupt. Marks the slice as spent; the switch
  * itself happens on the way out of the handler. */
 void sched_tick(void);

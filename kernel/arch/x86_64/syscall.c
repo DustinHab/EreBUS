@@ -190,6 +190,13 @@ u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4);
 
 u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4)
 {
+    /* A condemned thread ends here, at the door, in its own context
+     * and on its own kernel stack -- the same exit a voluntary end
+     * takes. Every program in this system asks the kernel for
+     * something sooner rather than later, which is what makes the
+     * door the place to wait. */
+    if (thread_condemned(sched_current())) thread_exit();
+
     domain *d = thread_domain(sched_current());
     if (!d) return SYS_DENIED;
 
