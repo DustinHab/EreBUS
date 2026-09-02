@@ -297,15 +297,43 @@ static u32 host_blob(u8 out[64])
     return 51;
 }
 
-void ssh_fingerprint(char out[64])
+/* The fingerprint of any ed25519 key, in the form ssh-keygen prints:
+ * the hash of the standard blob around it, so a key shown here and a
+ * key shown there can be compared by eye. */
+void ssh_fingerprint_of(const u8 pub[32], char out[64])
 {
     u8 blob[64], h[32];
-    u32 n = host_blob(blob);
-    sha256(blob, n, h);
+    put32(blob, 11);
+    memcpy(blob + 4, "ssh-ed25519", 11);
+    put32(blob + 15, 32);
+    memcpy(blob + 19, pub, 32);
+    sha256(blob, 51, h);
     const char *pre = "SHA256:";
     u32 at = 0;
     while (pre[at]) { out[at] = pre[at]; at++; }
-    base64_encode(h, 32, out + at, false);
+    at += base64_encode(h, 32, out + at, false);
+    out[at] = 0;
+}
+
+void ssh_fingerprint(char out[64])
+{
+    ssh_fingerprint_of(host_pub, out);
+}
+
+/* The door's key is the machine's identity, for the pipe as for the
+ * door: one key, one fingerprint, shown at boot. */
+bool ssh_identity(u8 pub[32])
+{
+    if (!host_ready) return false;
+    memcpy(pub, host_pub, 32);
+    return true;
+}
+
+bool ssh_sign(const void *msg, u32 len, u8 sig[64])
+{
+    if (!host_ready) return false;
+    ed25519_sign(sig, host_seed, host_pub, msg, len);
+    return true;
 }
 
 /* ------------------------------------------------------------------ */

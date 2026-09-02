@@ -48,11 +48,18 @@ typedef struct {
      * from its own "door |" line. Nobody's, until one is written. */
     u8   door[4][32];
     u32  doors;
+    /* Machines met through the pipe: the address pointed at, and the
+     * key it proved itself with the first time. From a "known |" line
+     * each, written by the pipe itself; removing the line forgets. */
+    u8   known_ip[8][4];
+    u8   known_key[8][32];
+    u32  knowns;
 } values;
 
 static values current = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                           false, { 0, 0, 0, 0 }, 0,
-                          false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0 };
+                          false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0,
+                          { { 0 } }, { { 0 } }, 0 };
 
 object *settings_object(void) { return settings; }
 
@@ -83,6 +90,53 @@ bool settings_address(u8 ip[4])
 {
     if (!current.addr_set) return false;
     if (ip) for (u32 i = 0; i < 4; i++) ip[i] = current.addr_ip[i];
+    return true;
+}
+
+bool settings_known(const u8 ip[4], u8 out[32])
+{
+    for (u32 i = 0; i < current.knowns; i++) {
+        if (memcmp(current.known_ip[i], ip, 4) != 0) continue;
+        if (out) for (u32 k = 0; k < 32; k++) out[k] = current.known_key[i][k];
+        return true;
+    }
+    return false;
+}
+
+/* Writes a "known |" line into the settings: the address, and the key
+ * as the letters ssh writes keys in. The page is the record; there is
+ * no second place a person would have to know about to forget a
+ * machine again. */
+bool settings_remember(const u8 ip[4], const u8 key[32])
+{
+    if (!settings) return false;
+    u8 *d = (u8 *)obj_data(settings);
+    u64 size = obj_size(settings);
+    u64 len = 0;
+    while (len < size && d[len]) len++;
+
+    char line[96];
+    u32 at = 0;
+    const char *k = "known    | ";
+    while (k[at]) { line[at] = k[at]; at++; }
+    for (u32 i = 0; i < 4; i++) {
+        u32 v = ip[i];
+        char dg[4];
+        u32 nd = 0;
+        if (v == 0) dg[nd++] = '0';
+        while (v) { dg[nd++] = (char)('0' + v % 10); v /= 10; }
+        while (nd) line[at++] = dg[--nd];
+        line[at++] = i < 3 ? '.' : ' ';
+    }
+    at += base64_encode(key, 32, line + at, true);
+
+    if (len + at + 2 >= size) return false;
+    if (len && d[len - 1] != '\n') d[len++] = '\n';
+    for (u32 i = 0; i < at; i++) d[len++] = (u8)line[i];
+    d[len++] = '\n';
+    d[len] = 0;
+    obj_touch(settings);
+    settings_apply();
     return true;
 }
 
@@ -312,6 +366,36 @@ static void read_line(values *v, const char *line, u64 len)
                 v->doors++;
             }
         }
+    } else if (matter_is(line, a, b, "known")) {
+        /* A machine met before: four numbers of address, then the key
+         * it proved itself with, in ssh's letters. A later line for
+         * the same address replaces the earlier. */
+        u64 nums[4];
+        u32 got = 0;
+        u64 i = 0;
+        while (i < vlen && got < 4) {
+            if (val[i] < '0' || val[i] > '9') { i++; continue; }
+            u64 g = 0;
+            while (i < vlen && val[i] >= '0' && val[i] <= '9')
+                g = g * 10 + (u64)(val[i++] - '0');
+            nums[got++] = g;
+        }
+        while (i < vlen && val[i] == ' ') i++;
+        u64 from = i;
+        while (i < vlen && val[i] != ' ' && val[i] != '\r') i++;
+        u8 key[48];
+        i32 kl = got == 4 ? base64_decode(val + from, (u32)(i - from), key, sizeof(key)) : 0;
+        if (kl == 32 && nums[0] < 256 && nums[1] < 256 && nums[2] < 256 && nums[3] < 256) {
+            u8 ip[4] = { (u8)nums[0], (u8)nums[1], (u8)nums[2], (u8)nums[3] };
+            u32 slot = v->knowns;
+            for (u32 s = 0; s < v->knowns; s++)
+                if (memcmp(v->known_ip[s], ip, 4) == 0) slot = s;
+            if (slot < 8) {
+                for (u32 k = 0; k < 4; k++) v->known_ip[slot][k] = ip[k];
+                for (u32 k = 0; k < 32; k++) v->known_key[slot][k] = key[k];
+                if (slot == v->knowns) v->knowns++;
+            }
+        }
     } else if (matter_is(line, a, b, "name")) {
         /* What this machine calls itself when another asks: shown to
          * the other side as a claim, like every self-given name. */
@@ -438,7 +522,8 @@ void settings_apply(void)
 
     values next = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                     false, { 0, 0, 0, 0 }, 0,
-                    false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0 };
+                    false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0,
+                    { { 0 } }, { { 0 } }, 0 };
 
     u64 start = 0;
     for (u64 i = 0; i <= size; i++) {

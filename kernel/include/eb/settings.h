@@ -56,4 +56,10 @@ bool settings_keys_german(void);
 u32  settings_door_count(void);
 bool settings_door_key(u32 i, u8 out[32]);
 
+/* Machines met through the pipe, by the address pointed at: the key
+ * one proved itself with the first time, and the writing down of a
+ * new one as a "known |" line. Removing the line forgets. */
+bool settings_known(const u8 ip[4], u8 out[32]);
+bool settings_remember(const u8 ip[4], const u8 key[32]);
+
 #endif /* EB_SETTINGS_H */

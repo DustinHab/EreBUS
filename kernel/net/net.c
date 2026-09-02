@@ -1685,8 +1685,8 @@ bool net_start(void)
     else
         kprintf("tls:  self test FAILED -- https disabled\n");
     if (crypto_good)
-        kprintf("pipe: transfers travel sealed; the knock is private, "
-                "not yet proven\n");
+        kprintf("pipe: transfers travel sealed; a knock is signed with the door's key, "
+                "and a machine met once must answer with the same key\n");
 
     thread_create("net", net_thread, NULL, kdom);
     running = true;

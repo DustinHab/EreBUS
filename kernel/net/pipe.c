@@ -42,6 +42,7 @@
 #include <eb/pmm.h>
 #include <eb/fmt.h>
 #include <eb/io.h>
+#include <eb/ssh.h>
 
 #define MAGIC     0x58504245u        /* "EBPX", little-endian */
 #define K_OFFER   1
@@ -363,6 +364,9 @@ typedef struct {
     u64  ctr_out;                    /* starts at one; zero never sent */
     u64  ctr_in_seen;
     u64  last_ns;
+    bool proven;                     /* the other side signed with a key we hold it to */
+    u8   answer[140];                /* our WELCOME, to answer a repeated knock alike */
+    u32  answer_len;
 } sealrec;
 
 static sealrec seal[SEAL_MAX];
@@ -484,14 +488,98 @@ static void knock_begin(const u8 *ip, u16 port)
     knock.last_ns = 0;
 }
 
-static void knock_send(void)
+/* What a signature under a knock covers: the session and the fresh
+ * key, under a fixed word, so a signature cannot be lifted from one
+ * exchange into another. The answer covers both fresh keys. */
+static void hello_message(u8 *m, u32 sid, const u8 *eph)
 {
-    u8 pkt[44];
+    memcpy(m, "EBPX hello", 10);
+    wr32(m + 10, sid);
+    memcpy(m + 14, eph, 32);
+}
+
+static void welcome_message(u8 *m, u32 sid, const u8 *their_eph, const u8 *my_eph)
+{
+    memcpy(m, "EBPX welcome", 12);
+    wr32(m + 12, sid);
+    memcpy(m + 16, their_eph, 32);
+    memcpy(m + 48, my_eph, 32);
+}
+
+/* A knock or its answer: the fresh key and, when the machine has an
+ * identity, that identity's key and a signature over the exchange.
+ * 44 bytes without, 140 with; an older machine reads the first 44
+ * and ignores the rest. */
+static u32 build_hello(u8 *pkt)
+{
     wr32(pkt, MAGIC);
     pkt[4] = K_HELLO; pkt[5] = pkt[6] = pkt[7] = 0;
     wr32(pkt + 8, knock.sid);
     memcpy(pkt + 12, knock.pub, 32);
-    net_udp_send(knock.ip, PIPE_PORT, knock.port, pkt, 44);
+    if (!ssh_identity(pkt + 44)) return 44;
+    u8 msg[46];
+    hello_message(msg, knock.sid, knock.pub);
+    if (!ssh_sign(msg, sizeof(msg), pkt + 76)) return 44;
+    return 140;
+}
+
+static u32 build_welcome(u8 *pkt, u32 sid, const u8 *their_eph, const u8 *my_eph)
+{
+    wr32(pkt, MAGIC);
+    pkt[4] = K_WELCOME; pkt[5] = pkt[6] = pkt[7] = 0;
+    wr32(pkt + 8, sid);
+    memcpy(pkt + 12, my_eph, 32);
+    if (!ssh_identity(pkt + 44)) return 44;
+    u8 msg[80];
+    welcome_message(msg, sid, their_eph, my_eph);
+    if (!ssh_sign(msg, sizeof(msg), pkt + 76)) return 44;
+    return 140;
+}
+
+static void knock_send(void)
+{
+    u8 pkt[140];
+    u32 n = build_hello(pkt);
+    net_udp_send(knock.ip, PIPE_PORT, knock.port, pkt, n);
+}
+
+/* Holds the key a machine came with against what the settings
+ * remember for its address. The first meeting is believed and written
+ * down; from then on the machine at that address must be the one that
+ * proved itself then. -1: not that machine, or no key shown where one
+ * is remembered -- turned away. 0: the machine remembered, or nothing
+ * remembered and nothing shown. 1: met for the first time, remembered
+ * now. */
+static i32 identity_verdict(const u8 *ip, const u8 *idkey)
+{
+    u8 known[32];
+    bool have = settings_known(ip, known);
+    if (!idkey) {
+        if (!have) return 0;
+        kprintf("pipe: %u.%u.%u.%u comes without its key, though one is remembered for it; turned away\n",
+                ip[0], ip[1], ip[2], ip[3]);
+        journal_says("pipe", "a machine came without the key remembered for it; turned away");
+        return -1;
+    }
+    char fp[64];
+    ssh_fingerprint_of(idkey, fp);
+    if (have) {
+        if (memcmp(known, idkey, 32) == 0) return 0;
+        kprintf("pipe: %u.%u.%u.%u comes with a key that is not the one remembered for it (%s); turned away\n",
+                ip[0], ip[1], ip[2], ip[3], fp);
+        journal_says("pipe", "a machine came with a key that is not the one remembered for it; turned away");
+        return -1;
+    }
+    if (settings_remember(ip, idkey)) {
+        kprintf("pipe: %u.%u.%u.%u is met for the first time; its key %s is remembered now\n",
+                ip[0], ip[1], ip[2], ip[3], fp);
+        journal_says("pipe", "a machine was met for the first time; its key is remembered");
+    } else {
+        kprintf("pipe: no room in the settings to remember %u.%u.%u.%u\n",
+                ip[0], ip[1], ip[2], ip[3]);
+        journal_says("pipe", "the settings have no room left to remember a machine");
+    }
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1430,14 +1518,26 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
 
         sealrec *s = seal_find(src, sid);
         if (s && !s->we_knocked) {
-            u8 pkt[44];
-            wr32(pkt, MAGIC);
-            pkt[4] = K_WELCOME; pkt[5] = pkt[6] = pkt[7] = 0;
-            wr32(pkt + 8, sid);
-            memcpy(pkt + 12, s->my_pub, 32);
-            net_udp_send(src, PIPE_PORT, sport, pkt, 44);
+            /* the same knock again gets the same answer, so a lost
+             * WELCOME costs a retry, not an argument about keys */
+            net_udp_send(src, PIPE_PORT, sport, s->answer, s->answer_len);
             return;
         }
+
+        /* Who knocks. A signed knock proves the key it carries, and
+         * the key is held against what the settings remember. */
+        const u8 *idkey = NULL;
+        if (len >= 140) {
+            u8 msg[46];
+            hello_message(msg, sid, p + 12);
+            if (!ed25519_verify(p + 44, msg, sizeof(msg), p + 76)) {
+                kprintf("pipe: a knock from %u.%u.%u.%u carried a signature that does not check; ignored\n",
+                        src[0], src[1], src[2], src[3]);
+                return;
+            }
+            idkey = p + 44;
+        }
+        if (identity_verdict(src, idkey) < 0) return;
 
         u8 priv[32], pub[32], shared[32];
         rand_bytes(priv, 32);
@@ -1448,25 +1548,23 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         for (u32 i = 0; i < 4; i++) s->ip[i] = src[i];
         s->port = sport ? sport : PIPE_PORT;
         s->sid = sid;
+        s->proven = idkey != NULL;
         memcpy(s->my_pub, pub, 32);
         seal_derive(s, false, p + 12, pub, shared);
         memset(priv, 0, 32);
         memset(shared, 0, 32);
 
-        u8 pkt[44];
-        wr32(pkt, MAGIC);
-        pkt[4] = K_WELCOME; pkt[5] = pkt[6] = pkt[7] = 0;
-        wr32(pkt + 8, sid);
-        memcpy(pkt + 12, pub, 32);
-        net_udp_send(src, PIPE_PORT, sport, pkt, 44);
+        s->answer_len = build_welcome(s->answer, sid, p + 12, pub);
+        net_udp_send(src, PIPE_PORT, sport, s->answer, s->answer_len);
 
         /* The session's own copy, not src: src points into the card's
          * receive ring, and sending above may already have let that
          * slot be filled again. It printed another packet's bytes as
          * an address once -- the seal itself was never wrong, only
          * the report of it. */
-        kprintf("pipe: sealed with %u.%u.%u.%u\n",
-                s->ip[0], s->ip[1], s->ip[2], s->ip[3]);
+        kprintf("pipe: sealed with %u.%u.%u.%u, %s\n",
+                s->ip[0], s->ip[1], s->ip[2], s->ip[3],
+                s->proven ? "proven" : "unproven");
         return;
     }
 
@@ -1476,6 +1574,33 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         if (rd32(p + 8) != knock.sid) return;
         if (!ip4_same(src, knock.ip)) return;
 
+        /* Who answered. */
+        const u8 *idkey = NULL;
+        if (len >= 140) {
+            u8 msg[80];
+            welcome_message(msg, knock.sid, knock.pub, p + 12);
+            if (!ed25519_verify(p + 44, msg, sizeof(msg), p + 76)) {
+                kprintf("pipe: the answer from %u.%u.%u.%u carried a signature that does not check; ignored\n",
+                        src[0], src[1], src[2], src[3]);
+                return;
+            }
+            idkey = p + 44;
+        }
+        i32 verdict = identity_verdict(src, idkey);
+        if (verdict < 0) {
+            /* Not the machine we knew. The knock is over, and what
+             * waited on it does not go. */
+            knock.active = false;
+            memset(knock.priv, 0, 32);
+            if (out.busy) {
+                out.busy = false;
+                journal_says("pipe", "nothing was sent");
+            }
+            kprintf("pipe: nothing was sent to %u.%u.%u.%u\n",
+                    knock.ip[0], knock.ip[1], knock.ip[2], knock.ip[3]);
+            return;
+        }
+
         u8 shared[32];
         x25519(shared, knock.priv, p + 12);
 
@@ -1483,15 +1608,19 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         for (u32 i = 0; i < 4; i++) s->ip[i] = src[i];
         s->port = knock.port;
         s->sid = knock.sid;
+        s->proven = idkey != NULL;
         memcpy(s->my_pub, knock.pub, 32);
         seal_derive(s, true, knock.pub, p + 12, shared);
         memset(shared, 0, 32);
         memset(knock.priv, 0, 32);
         knock.active = false;
 
-        kprintf("pipe: sealed with %u.%u.%u.%u\n",
-                s->ip[0], s->ip[1], s->ip[2], s->ip[3]);
-        journal_says("pipe", "the way is sealed");
+        kprintf("pipe: sealed with %u.%u.%u.%u, %s\n",
+                s->ip[0], s->ip[1], s->ip[2], s->ip[3],
+                s->proven ? "proven" : "unproven");
+        journal_says("pipe", !s->proven ? "the way is sealed, but the machine could not prove itself"
+                             : verdict == 1 ? "the way is sealed; the machine is met for the first time and remembered"
+                                            : "the way is sealed with the machine remembered");
         return;
     }
 

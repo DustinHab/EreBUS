@@ -27,6 +27,13 @@ void ssh_init(const u8 key[64]);
  * person can check the client's first-visit warning against it. */
 void ssh_fingerprint(char out[64]);
 
+/* The same fingerprint for any key, and the door's key used as the
+ * machine's identity: what it is, and a signature with it. Both answer
+ * false before the key stands. */
+void ssh_fingerprint_of(const u8 pub[32], char out[64]);
+bool ssh_identity(u8 pub[32]);
+bool ssh_sign(const void *msg, u32 len, u8 sig[64]);
+
 /* The protocol, run from the net thread's loop. */
 void ssh_service(void);
 

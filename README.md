@@ -817,18 +817,28 @@ built binary.
   lending each other their processors -- is the honest and
   sufficient answer. In an open network it would not be: there, ask
   a machine you have reason to trust, or ask the same job of two
-  and compare, by hand, knowing the pipe does neither for you. The
-  same caveat wears the seal's clothes: the knock encrypts the road
-  but does not prove who answered it, so until identity lands under
-  the knock, "the peer" means "whoever answers at that address".
+  and compare, by hand, knowing the pipe does neither for you.
   Writing this down is the feature; a distributed system that
   implies its results are verified when they are not would be lying
   in its architecture.
+* **Identity under the knock — done.** The door's key is the
+  machine's identity for the pipe as well: a knock and its answer
+  carry the machine's public key and a signature over the exchange
+  -- session, both fresh keys, a fixed word -- so a signature cannot
+  be lifted from one exchange into another. The first machine to
+  answer at an address is believed and written into the settings as
+  a "known |" line, address and key in ssh's letters; from then on
+  whoever answers there must prove it holds that key, or the knock
+  is turned away, the send does not go, and the journal says so. A
+  machine that comes without a key where one is remembered is turned
+  away too. The honest limits: the first meeting is trust on first
+  use, as ssh has it, and a key that has legitimately changed is
+  forgotten by removing its line, by hand. tools/pipe-identity.sh
+  lets two machines meet, then gives the answering one a fresh
+  identity at the same address and shows the second send refused.
 * M10 — booting real hardware from a USB stick
 * Certificate verification — turning the seal from privacy into
   identity: RSA/ECDSA signatures and a root store
-* Identity under the pipe's knock — remembering who a machine was
-  the last time, so an impostor answering the knock is caught
 * Work at scale, further — several desk jobs advancing at once, a
   worker lending more than one part at a time, the asking machine
   lending its own processor too, and repeated answers compared by
