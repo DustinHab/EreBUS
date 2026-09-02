@@ -184,6 +184,7 @@ f_say:
     mov rax, r8
     jmp .L4
 .L6:
+.L9:
     lea rax, [rbp - 32]
     push rax
     mov rax, 2
@@ -237,6 +238,36 @@ f_say:
     pop r10
     pop r8
     syscall
+    push rax
+    mov rax, 0
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    setne al
+    movzx rax, al
+    test rax, rax
+    je .L10
+    mov rax, 0
+    push rax
+    mov rax, 0
+    push rax
+    mov rax, 0
+    push rax
+    mov rax, 0
+    push rax
+    mov rax, 0
+    push rax
+    mov rax, 1
+    push rax
+    pop rax
+    pop rdi
+    pop rsi
+    pop rdx
+    pop r10
+    pop r8
+    syscall
+    jmp .L9
+.L10:
 .Lret4:
     mov rsp, rbp
     pop rbp
@@ -377,7 +408,7 @@ f_check:
     lea rax, [rbp - 9]
     movzx rax, byte [rax]
     test rax, rax
-    je .L9
+    je .L11
     lea rax, [rbp - 33]
     push rax
     mov rax, 9
@@ -411,8 +442,8 @@ f_check:
     pop rdi
     movsx rax, al
     mov byte [rdi], al
-    jmp .L10
-.L9:
+    jmp .L12
+.L11:
     lea rax, [rbp - 33]
     push rax
     mov rax, 9
@@ -466,7 +497,7 @@ f_check:
     pop rdi
     mov [rdi], rax
     mov rax, r8
-.L10:
+.L12:
     lea rax, [rbp - 33]
     push rax
     pop rdi
@@ -479,25 +510,19 @@ f_check:
 f_sum_var:
     push rbp
     mov rbp, rsp
-    sub rsp, 64
-    mov [rbp - 48], rdi
-    mov [rbp - 40], rsi
-    mov [rbp - 32], rdx
-    mov [rbp - 24], rcx
-    mov [rbp - 16], r8
-    mov [rbp - 8], r9
-    lea rax, [rbp - 64]
+    sub rsp, 16
+    lea rax, [rbp - 16]
     push rax
     mov rax, 0
     pop rdi
     mov [rdi], rax
-    lea rax, [rbp - 56]
-    lea rcx, [rbp - 40]
+    lea rax, [rbp - 8]
+    lea rcx, [rbp + 24]
     mov [rax], rcx
-.L11:
+.L13:
     mov rax, 0
     push rax
-    lea rax, [rbp - 48]
+    lea rax, [rbp + 16]
     mov rdi, rax
     mov rax, [rax]
     mov r8, rax
@@ -512,10 +537,10 @@ f_sum_var:
     setl al
     movzx rax, al
     test rax, rax
-    je .L12
-    lea rax, [rbp - 64]
+    je .L14
+    lea rax, [rbp - 16]
     push rax
-    lea rax, [rbp - 56]
+    lea rax, [rbp - 8]
     mov rdi, rax
     mov rax, [rdi]
     add qword [rdi], 8
@@ -527,10 +552,10 @@ f_sum_var:
     add rax, rdi
     mov rdi, r8
     mov [rdi], rax
-    jmp .L11
-.L12:
+    jmp .L13
+.L14:
     mov rax, 0
-    lea rax, [rbp - 64]
+    lea rax, [rbp - 16]
     mov rax, [rax]
     jmp .Lret6
 .Lret6:
@@ -593,10 +618,52 @@ f_counted:
     pop rbp
     ret
 
+f_make_pair:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    mov [rbp - 8], rdi
+    mov [rbp - 16], rsi
+    mov [rbp - 24], rdx
+    lea rax, [rbp - 48]
+    push rax
+    lea rax, [rbp - 16]
+    mov rax, [rax]
+    pop rdi
+    mov [rdi], rax
+    lea rax, [rbp - 48]
+    add rax, 8
+    push rax
+    lea rax, [rbp - 24]
+    mov rax, [rax]
+    pop rdi
+    mov [rdi], rax
+    lea rax, [rbp - 48]
+    add rax, 16
+    push rax
+    mov rax, 9
+    pop rdi
+    movzx rax, al
+    mov byte [rdi], al
+    lea rax, [rbp - 48]
+    mov rdi, [rbp - 8]
+    mov rcx, [rax + 0]
+    mov [rdi + 0], rcx
+    mov rcx, [rax + 8]
+    mov [rdi + 8], rcx
+    mov rcx, [rax + 16]
+    mov [rdi + 16], rcx
+    mov rax, rdi
+    jmp .Lret9
+.Lret9:
+    mov rsp, rbp
+    pop rbp
+    ret
+
 f_main:
     push rbp
     mov rbp, rsp
-    sub rsp, 144
+    sub rsp, 448
     mov [rbp - 8], rdi
     mov [rbp - 16], rsi
     lea rax, [v_console_handle]
@@ -624,7 +691,7 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L19
+    je .L21
     mov rax, 9
     push rax
     mov rax, 3
@@ -634,12 +701,12 @@ f_main:
     setl al
     movzx rax, al
     test rax, rax
-    je .L21
+    je .L23
     mov rax, 3
-    jmp .L22
-.L21:
+    jmp .L24
+.L23:
     mov rax, 9
-.L22:
+.L24:
     push rax
     mov rax, 9
     mov rdi, rax
@@ -648,22 +715,22 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
+    je .L21
+    mov rax, 1
+    jmp .L22
+.L21:
+    mov rax, 0
+.L22:
+    test rax, rax
+    je .L19
+    mov rax, 1
+    test rax, rax
     je .L19
     mov rax, 1
     jmp .L20
 .L19:
     mov rax, 0
 .L20:
-    test rax, rax
-    je .L17
-    mov rax, 1
-    test rax, rax
-    je .L17
-    mov rax, 1
-    jmp .L18
-.L17:
-    mov rax, 0
-.L18:
     push rax
     mov rax, 1
     push rax
@@ -685,7 +752,7 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L23
+    je .L25
     mov rax, 12
     push rax
     mov rax, 12
@@ -695,12 +762,12 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L23
+    je .L25
     mov rax, 1
-    jmp .L24
-.L23:
+    jmp .L26
+.L25:
     mov rax, 0
-.L24:
+.L26:
     push rax
     mov rax, 2
     push rax
@@ -748,7 +815,7 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L29
+    je .L31
     lea rax, [rbp - 32]
     mov rax, [rax]
     push rax
@@ -765,14 +832,14 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L29
+    je .L31
     mov rax, 1
-    jmp .L30
-.L29:
+    jmp .L32
+.L31:
     mov rax, 0
-.L30:
+.L32:
     test rax, rax
-    je .L27
+    je .L29
     lea rax, [rbp - 32]
     mov rax, [rax]
     push rax
@@ -789,14 +856,14 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L27
+    je .L29
     mov rax, 1
-    jmp .L28
-.L27:
+    jmp .L30
+.L29:
     mov rax, 0
-.L28:
+.L30:
     test rax, rax
-    je .L25
+    je .L27
     mov rax, 7
     push rax
     mov rax, 7
@@ -806,12 +873,12 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L25
+    je .L27
     mov rax, 1
-    jmp .L26
-.L25:
+    jmp .L28
+.L27:
     mov rax, 0
-.L26:
+.L28:
     push rax
     mov rax, 3
     push rax
@@ -828,12 +895,31 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L35
+    je .L37
     lea rax, [v_seed]
     add rax, 4
     mov eax, dword [rax]
     push rax
     mov rax, 70000
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    sete al
+    movzx rax, al
+    test rax, rax
+    je .L37
+    mov rax, 1
+    jmp .L38
+.L37:
+    mov rax, 0
+.L38:
+    test rax, rax
+    je .L35
+    lea rax, [v_seed]
+    add rax, 8
+    movzx rax, word [rax]
+    push rax
+    mov rax, 300
     mov rdi, rax
     pop rax
     cmp rax, rdi
@@ -848,11 +934,9 @@ f_main:
 .L36:
     test rax, rax
     je .L33
-    lea rax, [v_seed]
-    add rax, 8
-    movzx rax, word [rax]
+    mov rax, 12
     push rax
-    mov rax, 300
+    mov rax, 12
     mov rdi, rax
     pop rax
     cmp rax, rdi
@@ -865,23 +949,6 @@ f_main:
 .L33:
     mov rax, 0
 .L34:
-    test rax, rax
-    je .L31
-    mov rax, 12
-    push rax
-    mov rax, 12
-    mov rdi, rax
-    pop rax
-    cmp rax, rdi
-    sete al
-    movzx rax, al
-    test rax, rax
-    je .L31
-    mov rax, 1
-    jmp .L32
-.L31:
-    mov rax, 0
-.L32:
     push rax
     mov rax, 4
     push rax
@@ -909,7 +976,7 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L39
+    je .L41
     lea rax, [rbp - 36]
     push rax
     mov rax, 3
@@ -925,14 +992,14 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L39
+    je .L41
     mov rax, 1
-    jmp .L40
-.L39:
+    jmp .L42
+.L41:
     mov rax, 0
-.L40:
+.L42:
     test rax, rax
-    je .L37
+    je .L39
     mov rax, 4
     push rax
     mov rax, 4
@@ -942,12 +1009,12 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L37
+    je .L39
     mov rax, 1
-    jmp .L38
-.L37:
+    jmp .L40
+.L39:
     mov rax, 0
-.L38:
+.L40:
     push rax
     mov rax, 5
     push rax
@@ -1026,13 +1093,33 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L45
+    je .L47
     lea rax, [rbp - 40]
     mov eax, dword [rax]
     shl rax, 60
     shr rax, 63
     push rax
     mov rax, 1
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    sete al
+    movzx rax, al
+    test rax, rax
+    je .L47
+    mov rax, 1
+    jmp .L48
+.L47:
+    mov rax, 0
+.L48:
+    test rax, rax
+    je .L45
+    lea rax, [rbp - 40]
+    mov eax, dword [rax]
+    shl rax, 56
+    shr rax, 60
+    push rax
+    mov rax, 9
     mov rdi, rax
     pop rax
     cmp rax, rdi
@@ -1047,12 +1134,9 @@ f_main:
 .L46:
     test rax, rax
     je .L43
-    lea rax, [rbp - 40]
-    mov eax, dword [rax]
-    shl rax, 56
-    shr rax, 60
+    mov rax, 4
     push rax
-    mov rax, 9
+    mov rax, 4
     mov rdi, rax
     pop rax
     cmp rax, rdi
@@ -1065,23 +1149,6 @@ f_main:
 .L43:
     mov rax, 0
 .L44:
-    test rax, rax
-    je .L41
-    mov rax, 4
-    push rax
-    mov rax, 4
-    mov rdi, rax
-    pop rax
-    cmp rax, rdi
-    sete al
-    movzx rax, al
-    test rax, rax
-    je .L41
-    mov rax, 1
-    jmp .L42
-.L41:
-    mov rax, 0
-.L42:
     push rax
     mov rax, 6
     push rax
@@ -1151,13 +1218,33 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L51
+    je .L53
     lea rax, [rbp - 40]
     mov eax, dword [rax]
     shl rax, 61
     shr rax, 61
     push rax
     mov rax, 7
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    sete al
+    movzx rax, al
+    test rax, rax
+    je .L53
+    mov rax, 1
+    jmp .L54
+.L53:
+    mov rax, 0
+.L54:
+    test rax, rax
+    je .L51
+    lea rax, [rbp - 40]
+    mov eax, dword [rax]
+    shl rax, 60
+    shr rax, 63
+    push rax
+    mov rax, 0
     mov rdi, rax
     pop rax
     cmp rax, rdi
@@ -1174,10 +1261,11 @@ f_main:
     je .L49
     lea rax, [rbp - 40]
     mov eax, dword [rax]
-    shl rax, 60
-    shr rax, 63
+    shl rax, 51
+    sar rax, 59
     push rax
-    mov rax, 0
+    mov rax, 3
+    neg rax
     mov rdi, rax
     pop rax
     cmp rax, rdi
@@ -1190,27 +1278,6 @@ f_main:
 .L49:
     mov rax, 0
 .L50:
-    test rax, rax
-    je .L47
-    lea rax, [rbp - 40]
-    mov eax, dword [rax]
-    shl rax, 51
-    sar rax, 59
-    push rax
-    mov rax, 3
-    neg rax
-    mov rdi, rax
-    pop rax
-    cmp rax, rdi
-    sete al
-    movzx rax, al
-    test rax, rax
-    je .L47
-    mov rax, 1
-    jmp .L48
-.L47:
-    mov rax, 0
-.L48:
     push rax
     mov rax, 7
     push rax
@@ -1237,7 +1304,7 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L57
+    je .L59
     lea rax, [v_table]
     push rax
     mov rax, 3
@@ -1258,14 +1325,14 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L57
+    je .L59
     mov rax, 1
-    jmp .L58
-.L57:
+    jmp .L60
+.L59:
     mov rax, 0
-.L58:
+.L60:
     test rax, rax
-    je .L55
+    je .L57
     lea rax, [v_names]
     push rax
     mov rax, 2
@@ -1292,14 +1359,14 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L55
+    je .L57
     mov rax, 1
-    jmp .L56
-.L55:
+    jmp .L58
+.L57:
     mov rax, 0
-.L56:
+.L58:
     test rax, rax
-    je .L53
+    je .L55
     lea rax, [v_ops]
     push rax
     mov rax, 1
@@ -1330,12 +1397,12 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L53
+    je .L55
     mov rax, 1
-    jmp .L54
-.L53:
+    jmp .L56
+.L55:
     mov rax, 0
-.L54:
+.L56:
     push rax
     mov rax, 8
     push rax
@@ -1346,24 +1413,24 @@ f_main:
     mov rdi, rax
     lea rsi, [.Li0]
     mov rcx, 24
-.L59:
+.L61:
     mov al, byte [rsi]
     mov byte [rdi], al
     inc rsi
     inc rdi
     dec rcx
-    jne .L59
+    jne .L61
     lea rax, [rbp - 76]
     mov rdi, rax
     lea rsi, [.Li1]
     mov rcx, 12
-.L60:
+.L62:
     mov al, byte [rsi]
     mov byte [rdi], al
     inc rsi
     inc rdi
     dec rcx
-    jne .L60
+    jne .L62
     lea rax, [rbp - 64]
     push rax
     mov rax, 0
@@ -1416,11 +1483,30 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L63
+    je .L65
     lea rax, [rbp - 76]
     movzx rax, byte [rax]
     push rax
     mov rax, 0
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    sete al
+    movzx rax, al
+    test rax, rax
+    je .L65
+    mov rax, 1
+    jmp .L66
+.L65:
+    mov rax, 0
+.L66:
+    test rax, rax
+    je .L63
+    lea rax, [rbp - 76]
+    add rax, 8
+    movzx rax, word [rax]
+    push rax
+    mov rax, 5
     mov rdi, rax
     pop rax
     cmp rax, rdi
@@ -1433,25 +1519,6 @@ f_main:
 .L63:
     mov rax, 0
 .L64:
-    test rax, rax
-    je .L61
-    lea rax, [rbp - 76]
-    add rax, 8
-    movzx rax, word [rax]
-    push rax
-    mov rax, 5
-    mov rdi, rax
-    pop rax
-    cmp rax, rdi
-    sete al
-    movzx rax, al
-    test rax, rax
-    je .L61
-    mov rax, 1
-    jmp .L62
-.L61:
-    mov rax, 0
-.L62:
     push rax
     mov rax, 9
     push rax
@@ -1468,12 +1535,8 @@ f_main:
     push rax
     mov rax, 4
     push rax
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop r8
     call f_sum_var
+    add rsp, 40
     push rax
     mov rax, 100
     mov rdi, rax
@@ -1482,11 +1545,11 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L65
+    je .L67
     mov rax, 0
     push rax
-    pop rdi
     call f_sum_var
+    add rsp, 8
     push rax
     mov rax, 0
     mov rdi, rax
@@ -1495,12 +1558,12 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L65
+    je .L67
     mov rax, 1
-    jmp .L66
-.L65:
+    jmp .L68
+.L67:
     mov rax, 0
-.L66:
+.L68:
     push rax
     mov rax, 10
     push rax
@@ -1543,7 +1606,7 @@ f_main:
     seta al
     movzx rax, al
     test rax, rax
-    je .L67
+    je .L69
     lea rax, [rbp - 88]
     movsd xmm0, [rax]
     sub rsp, 8
@@ -1557,12 +1620,12 @@ f_main:
     seta al
     movzx rax, al
     test rax, rax
-    je .L67
+    je .L69
     mov rax, 1
-    jmp .L68
-.L67:
+    jmp .L70
+.L69:
     mov rax, 0
-.L68:
+.L70:
     push rax
     mov rax, 11
     push rax
@@ -1617,7 +1680,7 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L71
+    je .L73
     mov rax, 4609434218613702656
     movq xmm0, rax
     mov rax, -9223372036854775808
@@ -1633,14 +1696,14 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L71
+    je .L73
     mov rax, 1
-    jmp .L72
-.L71:
+    jmp .L74
+.L73:
     mov rax, 0
-.L72:
+.L74:
     test rax, rax
-    je .L69
+    je .L71
     mov rax, 10
     cvtsi2sd xmm0, rax
     sub rsp, 8
@@ -1662,12 +1725,12 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L69
+    je .L71
     mov rax, 1
-    jmp .L70
-.L69:
+    jmp .L72
+.L71:
     mov rax, 0
-.L70:
+.L72:
     push rax
     mov rax, 12
     push rax
@@ -1679,7 +1742,7 @@ f_main:
     mov rax, 0
     pop rdi
     mov [rdi], rax
-.Lg9_again:
+.Lg10_again:
     lea rax, [rbp - 120]
     mov rdi, rax
     mov rax, [rax]
@@ -1699,11 +1762,11 @@ f_main:
     setl al
     movzx rax, al
     test rax, rax
-    je .L73
-    jmp .Lg9_again
-    jmp .L74
-.L73:
-.L74:
+    je .L75
+    jmp .Lg10_again
+    jmp .L76
+.L75:
+.L76:
     lea rax, [rbp - 120]
     mov rax, [rax]
     push rax
@@ -1743,7 +1806,7 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L79
+    je .L81
     lea rax, [rbp - 122]
     movsx rax, word [rax]
     push rax
@@ -1760,14 +1823,14 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L79
+    je .L81
     mov rax, 1
-    jmp .L80
-.L79:
+    jmp .L82
+.L81:
     mov rax, 0
-.L80:
+.L82:
     test rax, rax
-    je .L77
+    je .L79
     lea rax, [rbp - 124]
     movzx rax, word [rax]
     push rax
@@ -1783,14 +1846,14 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L77
+    je .L79
     mov rax, 1
-    jmp .L78
-.L77:
+    jmp .L80
+.L79:
     mov rax, 0
-.L78:
+.L80:
     test rax, rax
-    je .L75
+    je .L77
     mov rax, 300
     movzx rax, al
     push rax
@@ -1801,12 +1864,12 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L75
+    je .L77
     mov rax, 1
-    jmp .L76
-.L75:
+    jmp .L78
+.L77:
     mov rax, 0
-.L76:
+.L78:
     push rax
     mov rax, 14
     push rax
@@ -1823,7 +1886,7 @@ f_main:
     mov rax, 0
     pop rdi
     mov [rdi], rax
-.L81:
+.L83:
     lea rax, [rbp - 144]
     mov rax, [rax]
     push rax
@@ -1834,7 +1897,7 @@ f_main:
     setl al
     movzx rax, al
     test rax, rax
-    je .L83
+    je .L85
     lea rax, [rbp - 144]
     mov rax, [rax]
     push rax
@@ -1845,24 +1908,24 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L84
-    jmp .L82
-    jmp .L85
-.L84:
-.L85:
+    je .L86
+    jmp .L84
+    jmp .L87
+.L86:
+.L87:
     lea rax, [rbp - 144]
     mov rax, [rax]
     mov rcx, 3
     cmp rax, rcx
-    je .L15
+    je .L17
     mov rcx, 2
     cmp rax, rcx
-    je .L14
+    je .L16
     mov rcx, 0
     cmp rax, rcx
-    je .L13
-    jmp .L16
-.L13:
+    je .L15
+    jmp .L18
+.L15:
     lea rax, [rbp - 136]
     push rax
     mov rax, 1
@@ -1873,7 +1936,7 @@ f_main:
     add rax, rdi
     mov rdi, r8
     mov [rdi], rax
-.L14:
+.L16:
     lea rax, [rbp - 136]
     push rax
     mov rax, 10
@@ -1884,8 +1947,8 @@ f_main:
     add rax, rdi
     mov rdi, r8
     mov [rdi], rax
-    jmp .L86
-.L15:
+    jmp .L88
+.L17:
     lea rax, [rbp - 136]
     push rax
     mov rax, 100
@@ -1896,8 +1959,8 @@ f_main:
     add rax, rdi
     mov rdi, r8
     mov [rdi], rax
-    jmp .L86
-.L16:
+    jmp .L88
+.L18:
     lea rax, [rbp - 136]
     push rax
     mov rax, 1000
@@ -1908,7 +1971,7 @@ f_main:
     add rax, rdi
     mov rdi, r8
     mov [rdi], rax
-.L86:
+.L88:
     lea rax, [rbp - 144]
     mov rax, [rax]
     push rax
@@ -1919,12 +1982,12 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L87
-    jmp .L83
-    jmp .L88
-.L87:
-.L88:
-.L82:
+    je .L89
+    jmp .L85
+    jmp .L90
+.L89:
+.L90:
+.L84:
     lea rax, [rbp - 144]
     mov rdi, rax
     mov rax, [rax]
@@ -1934,8 +1997,8 @@ f_main:
     pop rdi
     mov [rdi], rax
     mov rax, r8
-    jmp .L81
-.L83:
+    jmp .L83
+.L85:
     lea rax, [rbp - 136]
     mov rax, [rax]
     push rax
@@ -1968,6 +2031,563 @@ f_main:
     pop rdi
     pop rsi
     call f_check
+    lea rax, [rbp - 176]
+    push rax
+    lea rax, [rbp - 168]
+    pop rdi
+    mov [rdi], rax
+    lea rax, [rbp - 184]
+    push rax
+    lea rax, [.Ls6]
+    pop rdi
+    mov [rdi], rax
+    lea rax, [rbp - 144]
+    push rax
+    mov rax, 0
+    pop rdi
+    mov [rdi], rax
+.L91:
+    lea rax, [rbp - 144]
+    mov rax, [rax]
+    push rax
+    mov rax, 24
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    setl al
+    movzx rax, al
+    test rax, rax
+    je .L93
+    lea rax, [rbp - 176]
+    mov rax, [rax]
+    push rax
+    lea rax, [rbp - 144]
+    mov rax, [rax]
+    mov rdi, rax
+    pop rax
+    add rax, rdi
+    push rax
+    lea rax, [rbp - 184]
+    mov rax, [rax]
+    push rax
+    lea rax, [rbp - 144]
+    mov rax, [rax]
+    mov rdi, rax
+    pop rax
+    add rax, rdi
+    movsx rax, byte [rax]
+    pop rdi
+    movsx rax, al
+    mov byte [rdi], al
+.L92:
+    lea rax, [rbp - 144]
+    mov rdi, rax
+    mov rax, [rax]
+    mov r8, rax
+    add rax, 1
+    push rdi
+    pop rdi
+    mov [rdi], rax
+    mov rax, r8
+    jmp .L91
+.L93:
+    lea rax, [rbp - 192]
+    push rax
+    mov rax, 2
+    pop rdi
+    mov [rdi], rax
+    lea rax, [rbp - 200]
+    push rax
+    lea rax, [rbp - 8]
+    mov rax, [rax]
+    pop rdi
+    mov [rdi], rax
+    lea rax, [rbp - 208]
+    push rax
+    mov rax, 1415071060
+    pop rdi
+    mov [rdi], rax
+    lea rax, [rbp - 216]
+    push rax
+    lea rax, [rbp - 168]
+    push rax
+    mov rax, 0
+    push rax
+    mov rax, 8
+    mov rdi, rax
+    pop rax
+    imul rax, rdi
+    mov rdi, rax
+    pop rax
+    add rax, rdi
+    mov rax, [rax]
+    pop rdi
+    mov [rdi], rax
+    lea rax, [rbp - 224]
+    push rax
+    lea rax, [rbp - 168]
+    push rax
+    mov rax, 1
+    push rax
+    mov rax, 8
+    mov rdi, rax
+    pop rax
+    imul rax, rdi
+    mov rdi, rax
+    pop rax
+    add rax, rdi
+    mov rax, [rax]
+    pop rdi
+    mov [rdi], rax
+    lea rax, [rbp - 232]
+    push rax
+    lea rax, [rbp - 168]
+    push rax
+    mov rax, 2
+    push rax
+    mov rax, 8
+    mov rdi, rax
+    pop rax
+    imul rax, rdi
+    mov rdi, rax
+    pop rax
+    add rax, rdi
+    mov rax, [rax]
+    pop rdi
+    mov [rdi], rax
+    lea rax, [rbp - 192]
+    mov rax, [rax]
+    push rax
+    lea rax, [rbp - 200]
+    mov rax, [rax]
+    push rax
+    lea rax, [rbp - 208]
+    mov rax, [rax]
+    push rax
+    lea rax, [rbp - 216]
+    mov rax, [rax]
+    push rax
+    lea rax, [rbp - 224]
+    mov rax, [rax]
+    push rax
+    lea rax, [rbp - 232]
+    mov rax, [rax]
+    push rax
+    pop r8
+    pop r10
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rax
+    syscall
+    push rax
+    push rdi
+    push rsi
+    push rdx
+    push r10
+    push r8
+    lea rax, [rbp - 232]
+    mov rdi, rax
+    pop rax
+    mov [rdi], rax
+    lea rax, [rbp - 224]
+    mov rdi, rax
+    pop rax
+    mov [rdi], rax
+    lea rax, [rbp - 216]
+    mov rdi, rax
+    pop rax
+    mov [rdi], rax
+    lea rax, [rbp - 208]
+    mov rdi, rax
+    pop rax
+    mov [rdi], rax
+    lea rax, [rbp - 200]
+    mov rdi, rax
+    pop rax
+    mov [rdi], rax
+    lea rax, [rbp - 192]
+    mov rdi, rax
+    pop rax
+    mov [rdi], rax
+    lea rax, [rbp - 192]
+    mov rax, [rax]
+    push rax
+    mov rax, 0
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    sete al
+    movzx rax, al
+    push rax
+    mov rax, 17
+    push rax
+    pop rdi
+    pop rsi
+    call f_check
+    rdtsc
+    push rax
+    push rdx
+    lea rax, [rbp - 240]
+    mov rdi, rax
+    pop rax
+    mov dword [rdi], eax
+    lea rax, [rbp - 236]
+    mov rdi, rax
+    pop rax
+    mov dword [rdi], eax
+    lea rax, [rbp - 144]
+    push rax
+    mov rax, 0
+    pop rdi
+    mov [rdi], rax
+.L94:
+    lea rax, [rbp - 144]
+    mov rax, [rax]
+    push rax
+    mov rax, 1000
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    setl al
+    movzx rax, al
+    test rax, rax
+    je .L96
+    lea rax, [rbp - 136]
+    push rax
+    lea rax, [rbp - 144]
+    mov rax, [rax]
+    mov rdi, rax
+    pop rax
+    mov r8, rax
+    mov rax, [rax]
+    add rax, rdi
+    mov rdi, r8
+    mov [rdi], rax
+.L95:
+    lea rax, [rbp - 144]
+    mov rdi, rax
+    mov rax, [rax]
+    mov r8, rax
+    add rax, 1
+    push rdi
+    pop rdi
+    mov [rdi], rax
+    mov rax, r8
+    jmp .L94
+.L96:
+    rdtsc
+    push rax
+    push rdx
+    lea rax, [rbp - 248]
+    mov rdi, rax
+    pop rax
+    mov dword [rdi], eax
+    lea rax, [rbp - 244]
+    mov rdi, rax
+    pop rax
+    mov dword [rdi], eax
+    lea rax, [rbp - 256]
+    push rax
+    lea rax, [rbp - 240]
+    mov eax, dword [rax]
+    push rax
+    mov rax, 32
+    mov rdi, rax
+    pop rax
+    mov rcx, rdi
+    shl rax, cl
+    push rax
+    lea rax, [rbp - 236]
+    mov eax, dword [rax]
+    mov rdi, rax
+    pop rax
+    or rax, rdi
+    pop rdi
+    mov [rdi], rax
+    lea rax, [rbp - 264]
+    push rax
+    lea rax, [rbp - 248]
+    mov eax, dword [rax]
+    push rax
+    mov rax, 32
+    mov rdi, rax
+    pop rax
+    mov rcx, rdi
+    shl rax, cl
+    push rax
+    lea rax, [rbp - 244]
+    mov eax, dword [rax]
+    mov rdi, rax
+    pop rax
+    or rax, rdi
+    pop rdi
+    mov [rdi], rax
+    lea rax, [rbp - 256]
+    mov rax, [rax]
+    push rax
+    lea rax, [rbp - 264]
+    mov rax, [rax]
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    setb al
+    movzx rax, al
+    push rax
+    mov rax, 18
+    push rax
+    pop rdi
+    pop rsi
+    call f_check
+    lea rax, [rbp - 288]
+    push rax
+    mov rax, 4
+    push rax
+    mov rax, 3
+    push rax
+    lea rax, [rbp - 440]
+    push rax
+    pop rdi
+    pop rsi
+    pop rdx
+    call f_make_pair
+    pop rdi
+    mov rcx, [rax + 0]
+    mov [rdi + 0], rcx
+    mov rcx, [rax + 8]
+    mov [rdi + 8], rcx
+    mov rcx, [rax + 16]
+    mov [rdi + 16], rcx
+    lea rax, [rbp - 288]
+    mov rax, [rax]
+    push rax
+    lea rax, [rbp - 288]
+    add rax, 8
+    mov rax, [rax]
+    mov rdi, rax
+    pop rax
+    add rax, rdi
+    push rax
+    mov rax, 7
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    sete al
+    movzx rax, al
+    test rax, rax
+    je .L99
+    mov rax, 6
+    push rax
+    mov rax, 5
+    push rax
+    lea rax, [rbp - 312]
+    push rax
+    pop rdi
+    pop rsi
+    pop rdx
+    call f_make_pair
+    add rax, 8
+    mov rax, [rax]
+    push rax
+    mov rax, 6
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    sete al
+    movzx rax, al
+    test rax, rax
+    je .L99
+    mov rax, 1
+    jmp .L100
+.L99:
+    mov rax, 0
+.L100:
+    test rax, rax
+    je .L97
+    mov rax, 2
+    push rax
+    mov rax, 1
+    push rax
+    lea rax, [rbp - 336]
+    push rax
+    pop rdi
+    pop rsi
+    pop rdx
+    call f_make_pair
+    add rax, 16
+    movzx rax, byte [rax]
+    push rax
+    mov rax, 9
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    sete al
+    movzx rax, al
+    test rax, rax
+    je .L97
+    mov rax, 1
+    jmp .L98
+.L97:
+    mov rax, 0
+.L98:
+    push rax
+    mov rax, 19
+    push rax
+    pop rdi
+    pop rsi
+    call f_check
+    lea rax, [rbp - 344]
+    push rax
+    lea rax, [rbp - 368]
+    mov rdi, rax
+    lea rsi, [.Li2]
+    mov rcx, 24
+.L101:
+    mov al, byte [rsi]
+    mov byte [rdi], al
+    inc rsi
+    inc rdi
+    dec rcx
+    jne .L101
+    lea rax, [rbp - 368]
+    pop rdi
+    mov [rdi], rax
+    lea rax, [rbp - 392]
+    push rax
+    lea rax, [rbp - 416]
+    mov rdi, rax
+    lea rsi, [.Li3]
+    mov rcx, 24
+.L102:
+    mov al, byte [rsi]
+    mov byte [rdi], al
+    inc rsi
+    inc rdi
+    dec rcx
+    jne .L102
+    lea rax, [rbp - 416]
+    pop rdi
+    mov rcx, [rax + 0]
+    mov [rdi + 0], rcx
+    mov rcx, [rax + 8]
+    mov [rdi + 8], rcx
+    mov rcx, [rax + 16]
+    mov [rdi + 16], rcx
+    lea rax, [rbp - 344]
+    mov rax, [rax]
+    push rax
+    mov rax, 2
+    push rax
+    mov rax, 8
+    mov rdi, rax
+    pop rax
+    imul rax, rdi
+    mov rdi, rax
+    pop rax
+    add rax, rdi
+    mov rax, [rax]
+    push rax
+    mov rax, 6
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    sete al
+    movzx rax, al
+    test rax, rax
+    je .L107
+    lea rax, [rbp - 392]
+    mov rax, [rax]
+    push rax
+    mov rax, 7
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    sete al
+    movzx rax, al
+    test rax, rax
+    je .L107
+    mov rax, 1
+    jmp .L108
+.L107:
+    mov rax, 0
+.L108:
+    test rax, rax
+    je .L105
+    lea rax, [rbp - 392]
+    add rax, 8
+    mov rax, [rax]
+    push rax
+    mov rax, 8
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    sete al
+    movzx rax, al
+    test rax, rax
+    je .L105
+    mov rax, 1
+    jmp .L106
+.L105:
+    mov rax, 0
+.L106:
+    test rax, rax
+    je .L103
+    lea rax, [rbp - 392]
+    add rax, 16
+    movzx rax, byte [rax]
+    push rax
+    mov rax, 0
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    sete al
+    movzx rax, al
+    test rax, rax
+    je .L103
+    mov rax, 1
+    jmp .L104
+.L103:
+    mov rax, 0
+.L104:
+    push rax
+    mov rax, 20
+    push rax
+    pop rdi
+    pop rsi
+    call f_check
+    mov rax, 8
+    push rax
+    mov rax, 7
+    push rax
+    mov rax, 6
+    push rax
+    mov rax, 5
+    push rax
+    mov rax, 4
+    push rax
+    mov rax, 3
+    push rax
+    mov rax, 2
+    push rax
+    mov rax, 1
+    push rax
+    mov rax, 8
+    push rax
+    call f_sum_var
+    add rsp, 72
+    push rax
+    mov rax, 36
+    mov rdi, rax
+    pop rax
+    cmp rax, rdi
+    sete al
+    movzx rax, al
+    push rax
+    mov rax, 21
+    push rax
+    pop rdi
+    pop rsi
+    call f_check
     lea rax, [v_bad_count]
     mov rax, [rax]
     push rax
@@ -1978,22 +2598,22 @@ f_main:
     sete al
     movzx rax, al
     test rax, rax
-    je .L89
-    lea rax, [.Ls6]
+    je .L109
+    lea rax, [.Ls25]
     push rax
     pop rdi
     call f_say
-    jmp .L90
-.L89:
-    lea rax, [.Ls7]
+    jmp .L110
+.L109:
+    lea rax, [.Ls26]
     push rax
     pop rdi
     call f_say
-.L90:
+.L110:
     lea rax, [v_bad_count]
     mov rax, [rax]
-    jmp .Lret9
-.Lret9:
+    jmp .Lret10
+.Lret10:
     mov rsp, rbp
     pop rbp
     ret
@@ -2016,12 +2636,6 @@ v_ops:
     dq f_add
     dq f_mul
     align 8
-v_console_handle:
-    res 8
-    align 8
-v_bad_count:
-    res 8
-    align 8
 v_calls.1:
     db 0, 0, 0, 0, 0, 0, 0, 0
     align 8
@@ -2031,11 +2645,44 @@ v_calls.1:
     align 8
 .Li1:
     db 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0
+    align 8
+.Li2:
+    db 4, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0
+    db 6, 0, 0, 0, 0, 0, 0, 0
+    align 8
+.Li3:
+    db 7, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0
+    db 0, 0, 0, 0, 0, 0, 0, 0
 .Ls0: db 112, 97, 99, 107, 101, 100, 32, 115, 116, 114, 117, 99, 116, 0
 .Ls1: db 112, 97, 100, 100, 101, 100, 32, 115, 116, 114, 117, 99, 116, 0
 .Ls2: db 122, 101, 114, 111, 0
 .Ls3: db 111, 110, 101, 0
 .Ls4: db 116, 119, 111, 0
 .Ls5: db 104, 101, 108, 108, 111, 0
-.Ls6: db 97, 108, 108, 32, 99, 104, 101, 99, 107, 115, 32, 111, 107, 0
-.Ls7: db 115, 111, 109, 101, 32, 99, 104, 101, 99, 107, 115, 32, 98, 97, 100, 0
+.Ls6: db 97, 115, 109, 32, 115, 97, 105, 100, 32, 116, 104, 105, 115, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 0
+.Ls7: db 114, 49, 48, 0
+.Ls8: db 114, 56, 0
+.Ls9: db 115, 121, 115, 99, 97, 108, 108, 0
+.Ls10: db 43, 97, 0
+.Ls11: db 43, 68, 0
+.Ls12: db 43, 83, 0
+.Ls13: db 43, 100, 0
+.Ls14: db 43, 114, 0
+.Ls15: db 43, 114, 0
+.Ls16: db 114, 99, 120, 0
+.Ls17: db 114, 49, 49, 0
+.Ls18: db 109, 101, 109, 111, 114, 121, 0
+.Ls19: db 114, 100, 116, 115, 99, 0
+.Ls20: db 61, 97, 0
+.Ls21: db 61, 100, 0
+.Ls22: db 114, 100, 116, 115, 99, 0
+.Ls23: db 61, 97, 0
+.Ls24: db 61, 100, 0
+.Ls25: db 97, 108, 108, 32, 99, 104, 101, 99, 107, 115, 32, 111, 107, 0
+.Ls26: db 115, 111, 109, 101, 32, 99, 104, 101, 99, 107, 115, 32, 98, 97, 100, 0
+    align 8
+v_console_handle:
+    res 8
+    align 8
+v_bad_count:
+    res 8

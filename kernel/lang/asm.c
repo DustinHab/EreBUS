@@ -22,12 +22,14 @@
  * right about the second.
  */
 #include <eb/asm.h>
+#include <eb/lang.h>
 #include <eb/string.h>
 
-#define LABELS_MAX 4096               /* a compiled program names a great many places */
+#define LABELS_MAX 16384              /* a compiled program names a great many places */
 #define NAME_MAX   32
-#define CODE_MAX   (256 * 1024)
-#define DATA_MAX   (256 * 1024)
+#define CODE_MAX   (1024 * 1024)
+#define DATA_MAX   (1024 * 1024)          /* bytes that are laid down */
+#define ZERO_MAX   (64 * 1024 * 1024)     /* with the reserved room after them */
 
 typedef struct {
     char name[NAME_MAX];
@@ -52,7 +54,7 @@ typedef struct {
     u8  *data; u32 data_len;
     bool in_data;
 
-    label labels[LABELS_MAX];
+    label *labels;                    /* LABELS_MAX of them, kept outside the image */
     u32   nlabels;
 
     u32   pass;
@@ -110,6 +112,23 @@ static void emit8(as *a, u8 b)
         if (a->code_len >= CODE_MAX) { fail(a, "the code is too large", NULL); return; }
         a->code[a->code_len++] = b;
     }
+}
+
+/* Zeroed room. In the data it may run past the buffer: what lies
+ * beyond DATA_MAX is never laid down, only counted, and the loader
+ * gives it fresh pages -- so a program's large buffers cost it
+ * nothing in the image, as long as nothing else is laid after them. */
+static void reserve(as *a, u64 n)
+{
+    if (!a->in_data) {
+        for (u64 k = 0; k < n && !a->bad; k++) emit8(a, 0);
+        return;
+    }
+    if (a->data_len + n > ZERO_MAX) { fail(a, "the data is too large", NULL); return; }
+    u64 lo = a->data_len < DATA_MAX ? a->data_len : DATA_MAX;
+    u64 hi = a->data_len + n < DATA_MAX ? a->data_len + n : DATA_MAX;
+    if (hi > lo) memset(a->data + lo, 0, hi - lo);
+    a->data_len += n;
 }
 
 static void emit32(as *a, u32 v)
@@ -238,8 +257,16 @@ static const char *const regsx[16] = {
     "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15" };
 
 /* Size 128 marks a vector register; it takes no part in the width
- * of an integer operation. */
+ * of an integer operation. The kernel's registers come after: the
+ * control registers and the segment registers, each a kind of its
+ * own that only mov knows. */
 #define XMM 128
+#define CREG 129
+#define SREG 130
+
+static const char *const regscr[16] = {
+    "cr0", "", "cr2", "cr3", "cr4", "", "", "", "cr8", "", "", "", "", "", "", "" };
+static const char *const regsseg[8] = { "es", "cs", "ss", "ds", "fs", "gs", "", "" };
 
 static bool reg_named(const char *s, u32 n, u8 *num, u8 *size)
 {
@@ -249,7 +276,10 @@ static bool reg_named(const char *s, u32 n, u8 *num, u8 *size)
         if (strlen(regs16[i]) == n && memcmp(regs16[i], s, n) == 0) { *num = (u8)i; *size = 16; return true; }
         if (strlen(regs8[i])  == n && memcmp(regs8[i],  s, n) == 0) { *num = (u8)i; *size = 8;  return true; }
         if (strlen(regsx[i])  == n && memcmp(regsx[i],  s, n) == 0) { *num = (u8)i; *size = XMM; return true; }
+        if (regscr[i][0] && strlen(regscr[i]) == n && memcmp(regscr[i], s, n) == 0) { *num = (u8)i; *size = CREG; return true; }
     }
+    for (u32 i = 0; i < 6; i++)
+        if (strlen(regsseg[i]) == n && memcmp(regsseg[i], s, n) == 0) { *num = (u8)i; *size = SREG; return true; }
     return false;
 }
 
@@ -601,6 +631,38 @@ static void do_mov(as *a, operand *d, operand *s)
         return;
     }
     if (s->kind == OP_REG && s->size == XMM) { fail(a, "use movsd or movq for an xmm register", NULL); return; }
+
+    /* The kernel's moves: a control register to or from a 64-bit
+     * register, a segment register to or from a 16-bit one. */
+    if (d->kind == OP_REG && d->size == 64 && s->kind == OP_REG && s->size == CREG) {
+        rex(a, false, s->reg, 0, d->reg, false);
+        emit8(a, 0x0F); emit8(a, 0x20);
+        modrm_rr(a, s->reg, d->reg);
+        return;
+    }
+    if (d->kind == OP_REG && d->size == CREG && s->kind == OP_REG && s->size == 64) {
+        rex(a, false, d->reg, 0, s->reg, false);
+        emit8(a, 0x0F); emit8(a, 0x22);
+        modrm_rr(a, d->reg, s->reg);
+        return;
+    }
+    if (d->kind == OP_REG && d->size == SREG && s->kind == OP_REG && (s->size == 16 || s->size == 32 || s->size == 64)) {
+        rex(a, false, 0, 0, s->reg, false);
+        emit8(a, 0x8E);
+        modrm_rr(a, d->reg, s->reg);
+        return;
+    }
+    if (d->kind == OP_REG && (d->size == 16 || d->size == 32 || d->size == 64) && s->kind == OP_REG && s->size == SREG) {
+        rex(a, false, 0, 0, d->reg, false);
+        emit8(a, 0x8C);
+        modrm_rr(a, s->reg, d->reg);
+        return;
+    }
+    if ((d->kind == OP_REG && (d->size == CREG || d->size == SREG)) ||
+        (s->kind == OP_REG && (s->size == CREG || s->size == SREG))) {
+        fail(a, "a control or segment register moves to or from a general register only", NULL);
+        return;
+    }
     if (s->kind == OP_REG && (d->kind == OP_REG || d->kind == OP_MEM)) {
         u8 size = s->size;
         if (d->kind == OP_REG && d->size != size) { fail(a, "the registers differ in width", NULL); return; }
@@ -645,6 +707,76 @@ static void do_movsxd(as *a, operand *d, operand *s)
     emit8(a, 0x63);
     if (s->kind == OP_MEM) mem_tail(a, d->reg, s, 0);
     else modrm_rr(a, d->reg, s->reg);
+}
+
+/* in and out: the accumulator and a port in dx or a small number. */
+static void do_inout(as *a, bool in, operand *d, operand *s)
+{
+    operand *acc = in ? d : s;
+    operand *port = in ? s : d;
+    if (acc->kind != OP_REG || acc->reg != 0 || !(acc->size == 8 || acc->size == 16 || acc->size == 32)) {
+        fail(a, in ? "in wants al, ax or eax first" : "out wants al, ax or eax last", NULL);
+        return;
+    }
+    bool dx = port->kind == OP_REG && port->size == 16 && port->reg == 2;
+    bool imm = port->kind == OP_IMM && port->disp >= 0 && port->disp <= 255;
+    if (!dx && !imm) { fail(a, "the port is dx or a number up to 255", NULL); return; }
+    if (acc->size == 16) emit8(a, 0x66);
+    u8 op = in ? (dx ? 0xEC : 0xE4) : (dx ? 0xEE : 0xE6);
+    if (acc->size != 8) op += 1;
+    emit8(a, op);
+    if (imm) emit8(a, (u8)port->disp);
+}
+
+/* The kernel's own instructions, most of them without operands. */
+static bool do_system(as *a, const char *mn, u32 ml, operand *d, u32 nops)
+{
+    struct { const char *nm; u8 b[3]; u8 n; } plain[] = {
+        { "hlt", { 0xF4 }, 1 }, { "cli", { 0xFA }, 1 }, { "sti", { 0xFB }, 1 },
+        { "pause", { 0xF3, 0x90 }, 2 }, { "pushf", { 0x9C }, 1 }, { "popf", { 0x9D }, 1 },
+        { "pushfq", { 0x9C }, 1 }, { "popfq", { 0x9D }, 1 },
+        { "rdmsr", { 0x0F, 0x32 }, 2 }, { "wrmsr", { 0x0F, 0x30 }, 2 },
+        { "cpuid", { 0x0F, 0xA2 }, 2 }, { "rdtsc", { 0x0F, 0x31 }, 2 },
+        { "stac", { 0x0F, 0x01, 0xCB }, 3 }, { "clac", { 0x0F, 0x01, 0xCA }, 3 },
+        { "swapgs", { 0x0F, 0x01, 0xF8 }, 3 }, { "retf", { 0xCB }, 1 },
+        { "iretq", { 0x48, 0xCF }, 2 }, { "sysretq", { 0x48, 0x0F, 0x07 }, 3 },
+        { "wbinvd", { 0x0F, 0x09 }, 2 }, { "lfence", { 0x0F, 0xAE, 0xE8 }, 3 },
+        { "mfence", { 0x0F, 0xAE, 0xF0 }, 3 } };
+    for (u32 k = 0; k < sizeof(plain) / sizeof(plain[0]); k++) {
+        if (!word_is(mn, ml, plain[k].nm)) continue;
+        if (nops) { fail(a, "that takes no operands", NULL); return true; }
+        for (u32 i = 0; i < plain[k].n; i++) emit8(a, plain[k].b[i]);
+        return true;
+    }
+    /* one memory operand, a digit in the reg field */
+    struct { const char *nm; u8 op; u8 digit; } mem1[] = {
+        { "lgdt", 0x01, 2 }, { "lidt", 0x01, 3 }, { "invlpg", 0x01, 7 },
+        { "fxsave", 0xAE, 0 }, { "fxrstor", 0xAE, 1 }, { "sgdt", 0x01, 0 }, { "sidt", 0x01, 1 } };
+    for (u32 k = 0; k < sizeof(mem1) / sizeof(mem1[0]); k++) {
+        if (!word_is(mn, ml, mem1[k].nm)) continue;
+        if (nops != 1 || d->kind != OP_MEM) { fail(a, "that wants one memory operand", NULL); return true; }
+        u8 base = d->base < 0 ? 0 : (u8)d->base;
+        rex(a, false, 0, 0, base, false);
+        emit8(a, 0x0F); emit8(a, mem1[k].op);
+        mem_tail(a, mem1[k].digit, d, 0);
+        return true;
+    }
+    if (word_is(mn, ml, "ltr")) {
+        if (nops != 1 || d->kind != OP_REG || !(d->size == 16 || d->size == 32 || d->size == 64)) { fail(a, "ltr wants a register", NULL); return true; }
+        rex(a, false, 0, 0, d->reg, false);
+        emit8(a, 0x0F); emit8(a, 0x00);
+        modrm_rr(a, 3, d->reg);
+        return true;
+    }
+    if (word_is(mn, ml, "rdrand")) {
+        if (nops != 1 || d->kind != OP_REG || !(d->size == 16 || d->size == 32 || d->size == 64)) { fail(a, "rdrand wants a register", NULL); return true; }
+        if (d->size == 16) emit8(a, 0x66);
+        rex(a, d->size == 64, 0, 0, d->reg, false);
+        emit8(a, 0x0F); emit8(a, 0xC7);
+        modrm_rr(a, 6, d->reg);
+        return true;
+    }
+    return false;
 }
 
 /* setcc: a byte register becomes 1 or 0 after a compare. */
@@ -833,14 +965,15 @@ static void assemble_line(as *a, const char *s, u32 n)
     if (word_is(mn, ml, "dq")) { lay_data(a, 8, ops, on); return; }
     if (word_is(mn, ml, "res")) {
         i64 v;
-        if (!number(ops, on, &v) || v < 0 || v > DATA_MAX) { fail(a, "res wants a count", NULL); return; }
-        for (i64 k = 0; k < v && !a->bad; k++) emit8(a, 0);
+        if (!number(ops, on, &v) || v < 0 || v > ZERO_MAX) { fail(a, "res wants a count", NULL); return; }
+        reserve(a, (u64)v);
         return;
     }
     if (word_is(mn, ml, "align")) {
         i64 v;
         if (!number(ops, on, &v) || v <= 0 || v > 4096) { fail(a, "align wants a count", NULL); return; }
-        while ((here(a) % (u64)v) != 0 && !a->bad) emit8(a, a->in_data ? 0 : 0x90);
+        if (a->in_data) { reserve(a, ((u64)v - here(a) % (u64)v) % (u64)v); return; }
+        while ((here(a) % (u64)v) != 0 && !a->bad) emit8(a, 0x90);
         return;
     }
 
@@ -854,6 +987,9 @@ static void assemble_line(as *a, const char *s, u32 n)
     u32 nops = (d.kind != OP_NONE) + (sr.kind != OP_NONE);
 
     if (word_is(mn, ml, "syscall")) { if (nops) goto count; emit8(a, 0x0F); emit8(a, 0x05); return; }
+    if (do_system(a, mn, ml, &d, nops)) return;
+    if (nops == 2 && word_is(mn, ml, "in"))  { do_inout(a, true, &d, &sr); return; }
+    if (nops == 2 && word_is(mn, ml, "out")) { do_inout(a, false, &d, &sr); return; }
     if (word_is(mn, ml, "ret"))     { if (nops) goto count; emit8(a, 0xC3); return; }
     if (word_is(mn, ml, "nop"))     { if (nops) goto count; emit8(a, 0x90); return; }
     if (word_is(mn, ml, "cqo"))     { if (nops) goto count; emit8(a, 0x48); emit8(a, 0x99); return; }
@@ -943,19 +1079,28 @@ count:
 
 /* ------------------------------------------------------------------ */
 
-static u8 code_buf[CODE_MAX];
-static u8 data_buf[DATA_MAX];
+/* The buffers and the label table are asked for once, on first use:
+ * together they are larger than the kernel image has room to carry. */
+static u8    *code_buf;
+static u8    *data_buf;
+static label *label_buf;
 
 i64 asm_assemble(const u8 *src, u64 len, u8 *out, u64 max,
                  char *err, u32 errmax)
 {
     static as a;
     memset(&a, 0, sizeof(a));
-    a.code = code_buf;
-    a.data = data_buf;
     a.err = err;
     a.errmax = errmax;
     if (errmax) err[0] = 0;
+    if (!code_buf)  code_buf  = (u8 *)lang_big_alloc(CODE_MAX);
+    if (!data_buf)  data_buf  = (u8 *)lang_big_alloc(DATA_MAX);
+    if (!label_buf) label_buf = (label *)lang_big_alloc(sizeof(label) * LABELS_MAX);
+    if (!code_buf || !data_buf || !label_buf) { fail(&a, "there is no room for the assembler's tables", NULL); return -1; }
+    memset(label_buf, 0, sizeof(label) * LABELS_MAX);
+    a.code = code_buf;
+    a.data = data_buf;
+    a.labels = label_buf;
 
     for (u32 pass = 1; pass <= 2 && !a.bad; pass++) {
         a.pass = pass;
@@ -976,13 +1121,19 @@ i64 asm_assemble(const u8 *src, u64 len, u8 *out, u64 max,
     if (a.bad) return -1;
     if (a.code_len == 0) { fail(&a, "there is no code in it", NULL); return -1; }
 
+    /* Zeros at the end of the data do not travel: the head says how
+     * many there were, and the loader lays them down fresh. A large
+     * res is a large buffer, not a large image. */
+    u32 zero_len = 0;
+    while (a.data_len > 0 && (a.data_len > DATA_MAX || a.data[a.data_len - 1] == 0)) { a.data_len--; zero_len++; }
+
     u64 total = 16 + a.code_len + a.data_len;
     if (total > max) { fail(&a, "the image is larger than the room for it", NULL); return -1; }
 
     out[0] = 'E'; out[1] = 'B'; out[2] = 'X'; out[3] = '1';
     for (u32 i = 0; i < 4; i++) out[4 + i] = (u8)(a.code_len >> (i * 8));
     for (u32 i = 0; i < 4; i++) out[8 + i] = (u8)(a.data_len >> (i * 8));
-    for (u32 i = 0; i < 4; i++) out[12 + i] = 0;
+    for (u32 i = 0; i < 4; i++) out[12 + i] = (u8)(zero_len >> (i * 8));
     memcpy(out + 16, a.code, a.code_len);
     memcpy(out + 16 + a.code_len, a.data, a.data_len);
     return (i64)total;
@@ -997,7 +1148,7 @@ bool code_image_ok(const u8 *d, u64 n, u32 *code_len, u32 *data_len,
     for (u32 i = 0; i < 4; i++) cl |= (u32)d[4 + i] << (i * 8);
     for (u32 i = 0; i < 4; i++) dl |= (u32)d[8 + i] << (i * 8);
     for (u32 i = 0; i < 4; i++) zl |= (u32)d[12 + i] << (i * 8);
-    if (cl == 0 || cl > CODE_MAX || dl > DATA_MAX || zl > DATA_MAX) return false;
+    if (cl == 0 || cl > CODE_MAX || dl > DATA_MAX || zl > ZERO_MAX || (u64)dl + zl > ZERO_MAX) return false;
     if (16 + (u64)cl + dl > n) return false;
     if (code_len) *code_len = cl;
     if (data_len) *data_len = dl;

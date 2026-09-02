@@ -658,17 +658,25 @@ built binary.
   it by the scheduler, and never used by the kernel itself, which is
   built without it -- the compiler holds a double's bits and makes
   them with whole-number arithmetic. The page "the compiler" is the
-  contract and a program at once. Proven twice over: a program of
-  sixteen checks, one per feature, compiled and run on the machine
-  with every check answering ok; and the same compiler, built for the
-  host from the same two files (make cchost), compiling the kernel's
-  own base64.c, string.c, sha256.c and x25519.c into images. Honest
-  edges, on the page as well: a struct is passed and returned by
-  pointer, never by value; a variadic call takes six arguments at
-  most; and inline assembly with operands is not here -- the kernel's
-  port i/o and register moves are exactly that, in the other
-  assembler's dialect, so the kernel is still built outside. The
-  distance is one item now.
+  contract and a program at once. Inline assembly is here in the form
+  the kernel writes it -- asm volatile with outputs, inputs and
+  clobbers, the a b c d S D r m i constraints, register variables tied
+  to a name -- translated from the gnu dialect into the machine's
+  own; structs come back by value, compound literals work, and a
+  variadic call takes any number of arguments (a variadic callee gets
+  them all on the stack, one row, which is this system's convention
+  and no one else's). Proven twice over: a program of twenty-one
+  checks, one per feature, compiled and run on the machine with every
+  check answering ok; and the same compiler, built for the host from
+  the same two files (make cchost), reading the kernel's own sources:
+  tools/cctrial.sh pushes all fifty kernel files through it, and every
+  one compiles -- eleven stand alone as running images, the rest wait
+  only for other files' names. The compiler reads its own text,
+  and the assembler's. Honest edges, on the page as well: a struct is
+  handed to a function by pointer, never by value; there is no 128-bit
+  type; and there is no linker -- one text at a time, with what it
+  #includes -- so the kernel as a whole is still built outside. The
+  distance is the linker.
 * **The door.** The terminal reached over the network, by real ssh,
   so the client anyone already has can knock: version 2,
   curve25519-sha256 for the exchange, ssh-ed25519 for the host's

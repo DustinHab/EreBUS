@@ -25,12 +25,13 @@
  * than six arguments to a call.
  */
 #include <eb/cc.h>
+#include <eb/lang.h>
 #include <eb/string.h>
 
 #define NAME_MAX    40
-#define STR_POOL    65536
-#define NSTR        512
-#define NTYPES      1024
+#define STR_POOL    131072
+#define NSTR        2048
+#define NTYPES      4096
 #define NMEMBERS    2048
 #define NSYMS       4096
 #define NNODES      16384
@@ -70,6 +71,7 @@ struct type {
     bool  variadic;
     bool  defined;                    /* struct: the body has been seen */
     bool  packed;
+    type *ptr;                        /* the pointer to this, once made */
 };
 
 typedef struct {
@@ -93,6 +95,7 @@ typedef struct {
     i64   val;                        /* local: its offset below rbp; enum: its value */
     bool  defined;                    /* func: a body was seen */
     bool  hidden;                     /* its scope has closed; the slot stays */
+    char  reg[8];                     /* register variable: the register asm binds it to */
 } sym;
 
 /* ------------------------------------------------------------------ */
@@ -173,11 +176,43 @@ typedef struct { u32 off; char label[NAME_MAX]; i64 addend; } fixup;
 typedef struct { u32 off; type *ty; u32 expr; } dyn_init;
 
 /* ------------------------------------------------------------------ */
+/* Inline assembly                                                     */
+/* ------------------------------------------------------------------ */
+
+/* asm ("template" : outputs : inputs : clobbers), the way gcc has it
+ * and the kernel writes it: AT&T order and spelling in the template,
+ * operands by number or [name], constraints naming a register or
+ * letting the compiler choose one. It is translated into the
+ * assembler's own words, the operands bound to registers before and
+ * read back after. */
+#define NASM    128
+#define ASM_OPS 12
+
+typedef struct {
+    char cons[8];                     /* the constraint's letters, = and + taken off */
+    char name[NAME_MAX];              /* [name], or empty */
+    u32  expr;
+    bool out, in;
+    bool mem;                         /* "m": the address is bound, not the value */
+    bool imm;                         /* "i": a number, written in directly */
+    char reg[8];                      /* the register it was given */
+    u8   width;                       /* 1, 2, 4 or 8, from its type */
+    i64  value;                       /* imm: the number */
+} asm_op;
+
+typedef struct { u32 tmpl; asm_op ops[ASM_OPS]; u32 nops; } asm_block;
+static asm_block asms[NASM];
+static u32 nasm;
+
+/* register T name __asm__("r10"): the name the declarator carried. */
+static char last_asm_name[8];
+
+/* ------------------------------------------------------------------ */
 /* The compiler's whole state, static: the kernel has no malloc to    */
 /* spend on a compile, and one compile runs at a time.                 */
 /* ------------------------------------------------------------------ */
 
-static struct {
+typedef struct {
     /* reading */
     source src[NSRC];
     u32    nsrc;
@@ -222,6 +257,7 @@ static struct {
     type  *fn_ty;
     u32    fn_no;
     i64    va_area;                   /* offset of the saved registers, variadic */
+    i64    ret_slot;                  /* where the caller's result pointer is kept, struct return */
     u32    brk[32], cont[32];
     u32    nbrk, ncont;
     u32    sw_case[32];
@@ -245,7 +281,12 @@ static struct {
     char  *err;
     u32    errmax;
     bool   bad;
-} C;
+} cstate;
+
+/* The whole state is a few megabytes; it is asked for once, outside
+ * the kernel image, and reached as C everywhere below. */
+static cstate *Cp;
+#define C (*Cp)
 
 /* A name into a name-sized place, cut to fit. */
 static void cpy(char *d, const char *s)
@@ -291,22 +332,31 @@ static void sf_norm(u64 *m, i32 *e)
     while (*m && !(*m >> 63)) { *m <<= 1; (*e)--; }
 }
 
+/* Both keep to 64-bit arithmetic in halves, so that this compiler can
+ * read its own text: there is no 128-bit type here. */
 static void sf_mul10(u64 *m, i32 *e)
 {
-    unsigned __int128 p = (unsigned __int128)*m * 10;
+    u64 b = *m & 0xffffffffULL, a = *m >> 32;
+    u64 blo = b * 10, mid = a * 10 + (blo >> 32);
+    u64 lo = (mid << 32) | (blo & 0xffffffffULL);
+    u64 hi = mid >> 32;
     i32 shift = 0;
-    while (p >> 64) { p >>= 1; shift++; }
-    *m = (u64)p;
+    while (hi) { lo = (lo >> 1) | (hi << 63); hi >>= 1; shift++; }
+    *m = lo;
     *e += shift;
     sf_norm(m, e);
 }
 
 static void sf_div10(u64 *m, i32 *e)
 {
-    unsigned __int128 q = ((unsigned __int128)*m << 64) / 10;
+    /* (m << 64) / 10: the whole part, then the remainder's share in
+     * two 32-bit steps */
+    u64 hi = *m / 10, r = *m % 10;
+    u64 x1 = (r << 32) / 10, r1 = (r << 32) % 10;
+    u64 lo = (x1 << 32) | ((r1 << 32) / 10);
     i32 shift = -64;
-    while (q >> 64) { q >>= 1; shift++; }
-    *m = (u64)q;
+    while (hi) { lo = (lo >> 1) | (hi << 63); hi >>= 1; shift++; }
+    *m = lo;
     *e += shift;
     sf_norm(m, e);
 }
@@ -1072,8 +1122,8 @@ static bool expand_func(macro *m)
         fail("wrong number of arguments to the macro", m->name);
         return false;
     }
-    char *buf = exp_alloc(4096);
-    if (!buf) return false;
+    static char scratch[4096];
+    char *buf = scratch;
     u32 o = 0;
     const char *t = m->text;
     u32 i = 0;
@@ -1100,7 +1150,12 @@ static bool expand_func(macro *m)
         buf[o++] = t[i++];
     }
     buf[o] = 0;
-    return push_source((const u8 *)buf, o, m->name, true);
+    /* Only as much of the pool as the words need: nested expansions
+     * add up, and a kernel file has many. */
+    char *kept = exp_alloc(o + 1);
+    if (!kept) return false;
+    memcpy(kept, buf, o + 1);
+    return push_source((const u8 *)kept, o, m->name, true);
 }
 
 static void lex_ident_or_macro(token *t, i32 first)
@@ -1336,8 +1391,10 @@ static type *new_type(u8 kind, u32 size, u32 align)
 
 static type *ptr_to(type *b)
 {
+    if (b->ptr) return b->ptr;
     type *t = new_type(T_PTR, 8, 8);
     t->base = b;
+    b->ptr = t;
     return t;
 }
 
@@ -1516,7 +1573,7 @@ static void add_type(u32 i)
      * be a deep stack, and a kernel thread's stack is small. */
     if (n->kind != ND_STR && n->kind != ND_MEMBER && n->kind != ND_CASE &&
         n->kind != ND_DEFAULT && n->kind != ND_GOTO && n->kind != ND_LABEL &&
-        n->kind != ND_ASM && n->kind != ND_MEMCPY)
+        n->kind != ND_MEMCPY)
         for (u32 a = n->aux; a; a = N(a)->next) add_type(a);
 
     node *l = n->lhs ? N(n->lhs) : NULL;
@@ -1667,6 +1724,24 @@ static void add_type(u32 i)
                 a = rep;
             }
         }
+        /* A struct comes back in a nameless local of the caller's,
+         * whose address goes ahead of the arguments; the callee hands
+         * that address back in rax, so the call's value is the record
+         * like any other. */
+        if (is_rec(ft->base) && !n->post) {
+            if (!C.fn_ty) { fail_at(n->line, NULL, "a call returning a struct outside a function is not here", NULL); break; }
+            sym *tmp = sym_add("", ft->base, S_LOCAL);
+            tmp->val = local_slot(ft->base);
+            u32 v = mk(ND_VAR);
+            N(v)->sym = (u32)(tmp - C.syms);
+            N(v)->ty = ft->base;
+            u32 ad = mk_un(ND_ADDR, v);
+            N(ad)->ty = ptr_to(ft->base);
+            N(ad)->next = n->aux;
+            n->aux = ad;
+            n->val++;
+            n->post = true;
+        }
         break;
     }
 
@@ -1741,15 +1816,25 @@ static bool skip_one_attribute(void)
 
 static void skip_attributes(void)
 {
+    last_asm_name[0] = 0;
     while (is_kw("__attribute__")) skip_one_attribute();
-    /* __asm__("name") after a declarator names the symbol elsewhere;
-     * here every name is its own. */
+    /* __asm__("name") after a declarator: for a register variable it
+     * names the register, which the inline assembly then binds to;
+     * for anything else it names the symbol elsewhere, and here every
+     * name is its own. */
     if (is_kw("__asm__") || is_kw("asm")) {
         advance();
         expect("(");
-        if (C.cur.kind == TK_STR) advance();
+        if (C.cur.kind == TK_STR) {
+            const u8 *s = C.spool + C.strs[C.cur.str].at;
+            u32 k = 0;
+            while (s[k] && k < 7) { last_asm_name[k] = (char)s[k]; k++; }
+            last_asm_name[k] = 0;
+            advance();
+        }
         expect(")");
     }
+    while (is_kw("__attribute__")) skip_one_attribute();
 }
 
 static type *record_decl(bool is_union)
@@ -1757,8 +1842,10 @@ static type *record_decl(bool is_union)
     bool packed = false;
     while (is_kw("__attribute__")) packed |= skip_one_attribute();
 
+    /* Tags have a namespace of their own: struct object is a fine
+     * thing to say when object is also a typedef, and usually is. */
     char tag[NAME_MAX] = { 0 };
-    if (C.cur.kind == TK_IDENT && !is_typename_word(C.cur.text)) {
+    if (C.cur.kind == TK_IDENT && !same(C.cur.text, "__attribute__")) {
         cpy(tag, C.cur.text);
         advance();
     }
@@ -1951,11 +2038,12 @@ static type *declarator(type *base, char *name)
     }
 
     /* ( * name [n] ) ( params ): a pointer to a function, or an array
-     * of them. */
+     * of them; ( * name ) [n]: a pointer to an array. */
     if (is("(") && nxt_is("*")) {
         advance();
         advance();
-        if (C.cur.kind == TK_IDENT && !is_typename()) { cpy(name, C.cur.text); advance(); }
+        while (is_kw("const") || is_kw("volatile") || is_kw("restrict")) advance();
+        if (C.cur.kind == TK_IDENT) { cpy(name, C.cur.text); advance(); }
         u64 dims[4];
         u32 nd = 0;
         while (eat("[")) {
@@ -1964,14 +2052,27 @@ static type *declarator(type *base, char *name)
             expect("]");
         }
         expect(")");
-        expect("(");
-        type *f = func_suffix(base, NULL);
-        type *t = ptr_to(f);
+        type *pointee = base;
+        if (eat("(")) {
+            pointee = func_suffix(base, NULL);
+        } else {
+            u64 od[8];
+            u32 on = 0;
+            while (eat("[")) {
+                if (on >= 8) { fail("too many dimensions", NULL); return base; }
+                od[on++] = is("]") ? 0 : (u64)const_eval(assign());
+                expect("]");
+            }
+            while (on) pointee = array_of(pointee, od[--on]);
+        }
+        type *t = ptr_to(pointee);
         while (nd) t = array_of(t, dims[--nd]);
         return t;
     }
 
-    if (C.cur.kind == TK_IDENT && !is_typename()) {
+    /* A type's name may still name a member or a variable once the
+     * type before it has been read: members and locals shadow. */
+    if (C.cur.kind == TK_IDENT) {
         cpy(name, C.cur.text);
         advance();
     }
@@ -2207,13 +2308,54 @@ static u32 unary(void)
     return postfix();
 }
 
+static void initializer(type *t, u32 off, bool allow_dyn);
+static u32 init_const_emit_later(u32 size);
+
+/* (type){ ... }: a nameless local of that type, filled in place; its
+ * value is the object, which for an array means its address. */
+static u32 compound_literal(type *t)
+{
+    if (!C.fn_ty) { fail("a compound literal outside a function is not here", NULL); return mk_num(0); }
+    sym *s = sym_add("", t, S_LOCAL);
+    u32 si = (u32)(s - C.syms);
+    memset(C.ibuf, 0, t->size > INIT_MAX ? INIT_MAX : t->size + 8);
+    C.nfix = 0;
+    C.ndyn = 0;
+    initializer(t, 0, true);
+    if (C.bad) return mk_num(0);
+    s->val = local_slot(t);
+
+    bool any = false;
+    for (u32 k = 0; k < t->size && !any; k++) if (C.ibuf[k]) any = true;
+    u32 v = mk(ND_VAR); N(v)->sym = si;
+    u32 chain;
+    if (any || C.nfix) {
+        u32 ic = init_const_emit_later(t->size);
+        chain = mk_un(ND_MEMCPY, v);
+        N(chain)->aux = ic;
+        N(chain)->val = t->size;
+    } else {
+        chain = mk_un(ND_ZERO, v);
+        N(chain)->val = t->size;
+    }
+    for (u32 k = 0; k < C.ndyn; k++) {
+        u32 v2 = mk(ND_VAR); N(v2)->sym = si;
+        u32 pc = mk_cast(mk_un(ND_ADDR, v2), ptr_to(C.t_char));
+        u32 at = mk_bin(ND_ADD, pc, mk_num(C.dyns[k].off));
+        u32 el = mk_un(ND_DEREF, mk_cast(at, ptr_to(C.dyns[k].ty)));
+        chain = mk_bin(ND_COMMA, chain, mk_bin(ND_ASSIGN, el, C.dyns[k].expr));
+    }
+    u32 v3 = mk(ND_VAR); N(v3)->sym = si;
+    return mk_bin(ND_COMMA, chain, v3);
+}
+
 static u32 cast_expr(void)
 {
     if (is("(") && C.nxt.kind == TK_IDENT && is_typename_word(C.nxt.text)) {
         advance();
         type *t = abstract_type();
         expect(")");
-        if (is("{")) fail("a compound literal is not here yet", NULL);
+        if (is("{")) return compound_literal(t);
         return mk_cast(cast_expr(), t);
     }
     return unary();
@@ -2463,11 +2605,29 @@ static void initializer(type *t, u32 off, bool allow_dyn);
 
 /* { a, b, .name = c, [3] = d, ... } for an array or a record; a bare
  * string for a char array. */
+/* Neighbouring strings join into one, wherever a string may stand. */
+static u32 joined_string(void)
+{
+    u32 s = C.cur.str;
+    advance();
+    while (C.cur.kind == TK_STR && !C.bad) {
+        u32 a = C.strs[s].at, al = C.strs[s].len - 1;
+        u32 bb = C.strs[C.cur.str].at, bl = C.strs[C.cur.str].len;
+        if (C.spool_len + al + bl >= STR_POOL || C.nstrs >= NSTR) { fail("the strings are too long together", NULL); return s; }
+        u32 at = C.spool_len;
+        memcpy(C.spool + C.spool_len, C.spool + a, al); C.spool_len += al;
+        memcpy(C.spool + C.spool_len, C.spool + bb, bl); C.spool_len += bl;
+        C.strs[C.nstrs].at = at; C.strs[C.nstrs].len = al + bl;
+        s = C.nstrs++;
+        advance();
+    }
+    return s;
+}
+
 static void initializer(type *t, u32 off, bool allow_dyn)
 {
     if (t->kind == T_ARR && C.cur.kind == TK_STR && t->base->kind == T_CHAR) {
-        u32 s = C.cur.str;
-        advance();
+        u32 s = joined_string();
         if (t->len == 0) { t->len = C.strs[s].len; t->size = (u32)t->len; }
         for (u32 k = 0; k < C.strs[s].len && k < t->len && off + k < INIT_MAX; k++)
             C.ibuf[off + k] = C.spool[C.strs[s].at + k];
@@ -2485,7 +2645,11 @@ static void initializer(type *t, u32 off, bool allow_dyn)
             fail("an array or struct starts with braces", NULL);
             return;
         }
+        /* A constant's nodes are spent once it is evaluated, so a long
+         * table (a font, say) does not fill the tree. */
+        u32 mark = C.nnodes;
         init_scalar(t, off, assign(), allow_dyn);
+        if (!allow_dyn && !C.bad) C.nnodes = mark;
         return;
     }
     advance();                                     /* { */
@@ -2630,6 +2794,7 @@ static u32 local_decl(void)
             if (t->kind == T_VOID) { fail("a variable cannot be void", nm); return b; }
             if (t->kind == T_FUNC) { sym_add(nm, t, S_FUNC); if (!eat(",")) break; continue; }
             sym *s = sym_add(nm, t, S_LOCAL);
+            for (u32 k = 0; k < 8; k++) s->reg[k] = last_asm_name[k];
             if (eat("=")) {
                 if (is("{") || (t->kind == T_ARR && C.cur.kind == TK_STR)) {
                     memset(C.ibuf, 0, t->size > INIT_MAX ? INIT_MAX : t->size + 8);
@@ -2803,13 +2968,68 @@ static u32 stmt(void)
     }
     if (is_kw("asm") || is_kw("__asm__")) {
         advance();
-        if (is_kw("volatile") || is_kw("__volatile__")) advance();
+        while (is_kw("volatile") || is_kw("__volatile__") || is_kw("inline") || is_kw("goto")) advance();
         expect("(");
         if (C.cur.kind != TK_STR) { fail("asm wants its text in quotes", C.cur.text); return 0; }
-        u32 n = mk(ND_ASM);
-        N(n)->aux = C.cur.str;
+        if (nasm >= NASM) { fail("too many pieces of inline assembly", NULL); return 0; }
+
+        /* The template: neighbouring strings join. */
+        u32 tmpl = C.cur.str;
         advance();
-        if (is(":")) { fail("inline assembly with operands is not here; write the function in the assembler instead", NULL); return 0; }
+        while (C.cur.kind == TK_STR) {
+            u32 a = C.strs[tmpl].at, al = C.strs[tmpl].len - 1;
+            u32 bb = C.strs[C.cur.str].at, bl = C.strs[C.cur.str].len;
+            if (C.spool_len + al + bl >= STR_POOL || C.nstrs >= NSTR) { fail("the strings are too long together", NULL); return 0; }
+            u32 at = C.spool_len;
+            memcpy(C.spool + C.spool_len, C.spool + a, al); C.spool_len += al;
+            memcpy(C.spool + C.spool_len, C.spool + bb, bl); C.spool_len += bl;
+            C.strs[C.nstrs].at = at; C.strs[C.nstrs].len = al + bl;
+            tmpl = C.nstrs++;
+            advance();
+        }
+
+        asm_block *b = &asms[nasm];
+        memset(b, 0, sizeof(*b));
+        b->tmpl = tmpl;
+        u32 n = mk(ND_ASM);
+        N(n)->sym = nasm++;
+        u32 tail = 0;
+
+        for (u32 side = 0; side < 3 && eat(":"); side++) {
+            while (!is(":") && !is(")") && C.cur.kind != TK_EOF && !C.bad) {
+                if (side == 2) {                    /* clobbers: heard, not needed */
+                    if (C.cur.kind != TK_STR) { fail("a clobber is a name in quotes", C.cur.text); return 0; }
+                    advance();
+                    if (!eat(",")) break;
+                    continue;
+                }
+                if (b->nops >= ASM_OPS) { fail("too many operands to inline assembly", NULL); return 0; }
+                asm_op *op = &b->ops[b->nops];
+                if (eat("[")) {
+                    if (C.cur.kind == TK_IDENT) { cpy(op->name, C.cur.text); advance(); }
+                    expect("]");
+                }
+                if (C.cur.kind != TK_STR) { fail("a constraint in quotes was expected", C.cur.text); return 0; }
+                const u8 *cs = C.spool + C.strs[C.cur.str].at;
+                bool plus = false;
+                u32 k = 0, ci = 0;
+                while (cs[k] == '=' || cs[k] == '+' || cs[k] == '&') { if (cs[k] == '+') plus = true; k++; }
+                while (cs[k] && ci < 7) op->cons[ci++] = (char)cs[k++];
+                op->cons[ci] = 0;
+                advance();
+                expect("(");
+                op->expr = assign();
+                expect(")");
+                op->out = side == 0;
+                op->in = side == 1 || plus;
+                op->mem = same(op->cons, "m") || same(op->cons, "o");
+                op->imm = same(op->cons, "i") || same(op->cons, "n") || same(op->cons, "I");
+                if (tail) N(tail)->next = op->expr; else N(n)->aux = op->expr;
+                tail = op->expr;
+                b->nops++;
+                if (!eat(",")) break;
+            }
+        }
         expect(")");
         expect(";");
         return n;
@@ -2919,6 +3139,10 @@ static void gen_addr(u32 i)
         return;
     case ND_CAST:
         gen_addr(n->lhs);
+        return;
+    case ND_CALL:
+        if (is_rec(n->ty)) { gen_expr(i); return; }   /* the record's address comes back in rax */
+        fail_at(n->line, NULL, "that is not something with an address", NULL);
         return;
     default:
         fail_at(n->line, NULL, "that is not something with an address", NULL);
@@ -3098,6 +3322,11 @@ static u32 gen_args(u32 first, u32 count, const char *const *regs, bool variadic
         kinds[k - 1] = f;
         push_val(f ? C.t_double : C.t_long);
     }
+    /* A variadic callee takes everything on the stack, in order, so
+     * that its va_arg walks one row of arguments however many there
+     * are. Everyone else takes the first six in registers. */
+    if (variadic) return n * 8;
+
     u32 gi = 0, xi = 0;
     u32 reg_n = n < REGARGS ? n : REGARGS;
     for (u32 k = 0; k < reg_n; k++) {
@@ -3159,6 +3388,9 @@ static void gen_expr(u32 i)
     case ND_COMMA:
         gen_expr(n->lhs);
         gen_expr(n->rhs);
+        return;
+    case ND_MEMCPY: case ND_ZERO:
+        gen_stmt(i);                  /* a compound literal's filling */
         return;
     case ND_LAND: {
         u32 l = C.label;
@@ -3251,26 +3483,26 @@ static void gen_expr(u32 i)
         type *ft = n->sym ? C.syms[n->sym].ty
                           : (N(n->lhs)->ty->kind == T_PTR ? N(n->lhs)->ty->base : N(n->lhs)->ty);
         if (n->lhs) { gen_expr(n->lhs); o("    push rax\n"); }
-        if (ft->variadic && n->val > REGARGS) { fail_at(n->line, NULL, "six arguments is the most a variadic call takes here", NULL); return; }
         u32 extra = gen_args(n->aux, (u32)n->val, arg64, ft->variadic);
         if (n->lhs) o("    mov rax, [rsp + %d]\n    call rax\n", (i64)extra);
         else o("    call f_%s\n", C.syms[n->sym].label);
         if (extra) o("    add rsp, %d\n", (i64)extra);
         if (n->lhs) o("    add rsp, 8\n");
-        if (!is_flt(n->ty)) cast_to(n->ty, n->ty);
+        if (!is_flt(n->ty) && !is_rec(n->ty)) cast_to(n->ty, n->ty);
         return;
     }
     case ND_SYSCALL: {
         static const char *const sregs[6] = { "rax", "rdi", "rsi", "rdx", "r10", "r8" };
-        gen_args(n->aux, (u32)n->val, sregs, true);
+        gen_args(n->aux, (u32)n->val, sregs, false);
         o("    syscall\n");
         return;
     }
     case ND_VASTART: {
-        /* ap = the saved register after the last named one */
+        /* ap = the argument after the last named one, in the row the
+         * caller left above the frame */
         gen_addr(n->lhs);
-        o("    lea rcx, [rbp - %d]\n    mov [rax], rcx\n",
-          -(C.va_area + (i64)C.fn_ty->nparams * 8));
+        o("    lea rcx, [rbp + %d]\n    mov [rax], rcx\n",
+          16 + (i64)C.fn_ty->nparams * 8);
         return;
     }
     case ND_VAARG: {
@@ -3301,6 +3533,347 @@ static void gen_expr(u32 i)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Inline assembly, translated                                         */
+/* ------------------------------------------------------------------ */
+
+static const char *const gp64[16] = { "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+                                      "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" };
+static const char *const gp32[16] = { "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi",
+                                      "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d" };
+static const char *const gp16[16] = { "ax", "cx", "dx", "bx", "sp", "bp", "si", "di",
+                                      "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w" };
+static const char *const gp8[16]  = { "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil",
+                                      "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b" };
+
+static i32 gp_index(const char *nm)
+{
+    for (u32 i = 0; i < 16; i++)
+        if (same(gp64[i], nm) || same(gp32[i], nm) || same(gp16[i], nm) || same(gp8[i], nm)) return (i32)i;
+    return -1;
+}
+
+static const char *gp_at(i32 idx, u8 width)
+{
+    if (idx < 0) return "?";
+    if (width == 1) return gp8[idx];
+    if (width == 2) return gp16[idx];
+    if (width == 4) return gp32[idx];
+    return gp64[idx];
+}
+
+static asm_op *asm_find_op(asm_block *b, const char *ref, u32 len)
+{
+    if (len && ref[0] >= '0' && ref[0] <= '9') {
+        u32 v = 0;
+        for (u32 i = 0; i < len; i++) v = v * 10 + (u32)(ref[i] - '0');
+        return v < b->nops ? &b->ops[v] : NULL;
+    }
+    for (u32 i = 0; i < b->nops; i++) {
+        u32 k = 0;
+        while (k < len && b->ops[i].name[k] == ref[k]) k++;
+        if (k == len && !b->ops[i].name[k]) return &b->ops[i];
+    }
+    return NULL;
+}
+
+/* One AT&T operand into one Intel operand. Answers what kind it
+ * became: 'r' register, 'm' memory, 'i' immediate, 'l' label or
+ * other text. */
+static char att_operand(asm_block *b, u32 bi, const char *s, u32 len, char *out, u32 max)
+{
+    u32 o = 0;
+    #define PUT(str) do { const char *p_ = (str); while (*p_ && o < max - 1) out[o++] = *p_++; } while (0)
+    #define PUTN(str, n_) do { for (u32 q_ = 0; q_ < (n_) && o < max - 1; q_++) out[o++] = (str)[q_]; } while (0)
+
+    while (len && s[0] == ' ') { s++; len--; }
+    while (len && s[len - 1] == ' ') len--;
+    out[0] = 0;
+    if (!len) return 0;
+
+    /* $number or $%N: an immediate */
+    if (s[0] == '$') {
+        s++; len--;
+        if (len && s[0] == '%') {
+            asm_op *op = asm_find_op(b, s + 1, len - 1);
+            if (op && op->imm) { o = 0; if (op->value < 0) { out[o++] = '-'; }
+                char d[24]; u32 nd = 0; u64 v = op->value < 0 ? (u64)(-op->value) : (u64)op->value;
+                if (v == 0) d[nd++] = '0'; while (v) { d[nd++] = (char)('0' + v % 10); v /= 10; }
+                while (nd) out[o++] = d[--nd]; out[o] = 0; return 'i'; }
+        }
+        PUTN(s, len); out[o] = 0; return 'i';
+    }
+
+    /* something(%%reg) or something(%N): memory */
+    i32 paren = -1;
+    for (u32 i = 0; i < len; i++) if (s[i] == '(') { paren = (i32)i; break; }
+    if (paren >= 0 && s[len - 1] == ')') {
+        char inner[32];
+        u32 il = 0;
+        for (u32 i = (u32)paren + 1; i + 1 < len && il < 31; i++) inner[il++] = s[i];
+        inner[il] = 0;
+        char base[16] = "";
+        if (inner[0] == '%' && inner[1] == '%') { u32 k = 0; while (inner[2 + k] && k < 15) { base[k] = inner[2 + k]; k++; } base[k] = 0; }
+        else if (inner[0] == '%') {
+            asm_op *op = asm_find_op(b, inner + 1, il - 1);
+            if (op && op->reg[0]) cpy(base, op->reg);
+        }
+        if (same(base, "rip")) {
+            /* label(%rip): the label itself, rip-relative in the assembler's own way */
+            PUT("[");
+            if (paren >= 1 && s[0] >= '0' && s[0] <= '9' && (s[paren - 1] == 'f' || s[paren - 1] == 'b')) {
+                char lab[32]; u32 ll = 0; const char *pre = ".La"; while (pre[ll]) { lab[ll] = pre[ll]; ll++; }
+                u32 v = bi; char d[12]; u32 nd = 0; if (v == 0) d[nd++] = '0'; while (v) { d[nd++] = (char)('0' + v % 10); v /= 10; }
+                while (nd) lab[ll++] = d[--nd]; lab[ll++] = '_';
+                for (i32 q = 0; q < paren - 1 && ll < 31; q++) lab[ll++] = s[q];
+                lab[ll] = 0; PUT(lab);
+            } else PUTN(s, (u32)paren);
+            PUT("]"); out[o] = 0; return 'm';
+        }
+        PUT("[");
+        PUT(base[0] ? base : "?");
+        if (paren > 0) {
+            if (s[0] == '-') { PUT(" - "); PUTN(s + 1, (u32)paren - 1); }
+            else { PUT(" + "); PUTN(s, (u32)paren); }
+        }
+        PUT("]"); out[o] = 0; return 'm';
+    }
+
+    /* %%reg */
+    if (len > 2 && s[0] == '%' && s[1] == '%') { PUTN(s + 2, len - 2); out[o] = 0; return 'r'; }
+
+    /* %N, %[name], with an optional width letter: %b0 %w0 %k0 %q0 */
+    if (s[0] == '%') {
+        u8 force = 0;
+        const char *r = s + 1;
+        u32 rl = len - 1;
+        if (rl > 1 && (r[0] == 'b' || r[0] == 'w' || r[0] == 'k' || r[0] == 'q' || r[0] == 'h') &&
+            (r[1] == '[' || (r[1] >= '0' && r[1] <= '9'))) {
+            force = r[0] == 'b' ? 1 : r[0] == 'w' ? 2 : r[0] == 'k' ? 4 : 8;
+            r++; rl--;
+        }
+        if (r[0] == '[') { r++; rl--; if (rl && r[rl - 1] == ']') rl--; }
+        asm_op *op = asm_find_op(b, r, rl);
+        if (!op) { PUT("?"); out[o] = 0; return 0; }
+        if (op->imm) {
+            char d[24]; u32 nd = 0; u64 v = op->value < 0 ? (u64)(-op->value) : (u64)op->value;
+            if (op->value < 0) out[o++] = '-';
+            if (v == 0) d[nd++] = '0'; while (v) { d[nd++] = (char)('0' + v % 10); v /= 10; }
+            while (nd) out[o++] = d[--nd]; out[o] = 0; return 'i';
+        }
+        if (op->mem) { PUT("["); PUT(op->reg); PUT("]"); out[o] = 0; return 'm'; }
+        PUT(gp_at(gp_index(op->reg), force ? force : op->width));
+        out[o] = 0;
+        return 'r';
+    }
+
+    /* 1f, 1b: a local label of this block */
+    if (len >= 2 && s[0] >= '0' && s[0] <= '9' && (s[len - 1] == 'f' || s[len - 1] == 'b')) {
+        PUT(".La");
+        char d[12]; u32 nd = 0; u32 v = bi; if (v == 0) d[nd++] = '0'; while (v) { d[nd++] = (char)('0' + v % 10); v /= 10; }
+        while (nd) out[o++] = d[--nd];
+        PUT("_");
+        PUTN(s, len - 1);
+        out[o] = 0;
+        return 'l';
+    }
+
+    PUTN(s, len);
+    out[o] = 0;
+    return 'l';
+    #undef PUT
+    #undef PUTN
+}
+
+/* One AT&T statement into one Intel line. */
+static void att_statement(asm_block *b, u32 bi, const char *s, u32 len)
+{
+    while (len && (s[0] == ' ' || s[0] == '\t')) { s++; len--; }
+    while (len && (s[len - 1] == ' ' || s[len - 1] == '\t' || s[len - 1] == '\r')) len--;
+    if (!len) return;
+
+    /* a local label: N: */
+    if (s[len - 1] == ':' && s[0] >= '0' && s[0] <= '9') {
+        o(".La%d_", (i64)bi);
+        for (u32 i = 0; i + 1 < len; i++) o_char(s[i]);
+        o(":\n");
+        return;
+    }
+
+    u32 ml = 0;
+    while (ml < len && s[ml] != ' ' && s[ml] != '\t') ml++;
+    char mn[24];
+    u32 k = 0;
+    while (k < ml && k < 23) { mn[k] = s[k]; k++; }
+    mn[k] = 0;
+
+    /* the operands, split at commas outside parentheses */
+    const char *ops[4];
+    u32 ol[4], nops = 0;
+    u32 i = ml;
+    while (i < len && (s[i] == ' ' || s[i] == '\t')) i++;
+    while (i < len && nops < 4) {
+        u32 start = i;
+        i32 depth = 0;
+        while (i < len && !(s[i] == ',' && depth == 0)) { if (s[i] == '(') depth++; if (s[i] == ')') depth--; i++; }
+        ops[nops] = s + start;
+        ol[nops] = i - start;
+        nops++;
+        if (i < len) i++;
+    }
+
+    /* the mnemonic: AT&T's suffix off, the few renamed */
+    char suffix = 0;
+    static const char *const stripped[] = { "mov", "push", "pop", "lea", "add", "sub", "and", "or",
+        "xor", "cmp", "test", "inc", "dec", "shl", "shr", "sar", "neg", "not", "imul", "mul",
+        "div", "idiv", "xchg", "ret", "call", "jmp", NULL };
+    u32 mlen = (u32)strlen(mn);
+    if (same(mn, "lretq") || same(mn, "lret")) cpy(mn, "retf");
+    else if (same(mn, "pushfq") || same(mn, "popfq") || same(mn, "iretq") || same(mn, "syscall") ||
+             same(mn, "sysretq")) { /* as they are */ }
+    else if (mn[0] == 'i' && mn[1] == 'n' && mlen == 3 && (mn[2] == 'b' || mn[2] == 'w' || mn[2] == 'l')) { suffix = mn[2]; cpy(mn, "in"); }
+    else if (mn[0] == 'o' && mn[1] == 'u' && mn[2] == 't' && mlen == 4 && (mn[3] == 'b' || mn[3] == 'w' || mn[3] == 'l')) { suffix = mn[3]; cpy(mn, "out"); }
+    else if (mlen > 4 && mn[0] == 'm' && mn[1] == 'o' && mn[2] == 'v' && (mn[3] == 'z' || mn[3] == 's')) {
+        /* movzbl, movzwq, movsbq ...: widen without or with sign */
+        suffix = mn[4];
+        cpy(mn, mn[3] == 'z' ? "movzx" : "movsx");
+    } else {
+        for (u32 q = 0; stripped[q]; q++) {
+            u32 sl = (u32)strlen(stripped[q]);
+            if (mlen == sl + 1 && memcmp(mn, stripped[q], sl) == 0 &&
+                (mn[sl] == 'b' || mn[sl] == 'w' || mn[sl] == 'l' || mn[sl] == 'q')) {
+                suffix = mn[sl];
+                mn[sl] = 0;
+                break;
+            }
+        }
+    }
+
+    char conv[4][96];
+    char kinds[4];
+    for (u32 q = 0; q < nops; q++) kinds[q] = att_operand(b, bi, ops[q], ol[q], conv[q], sizeof(conv[q]));
+
+    /* A memory operand beside an immediate, or alone, needs its width
+     * said; the suffix says it. */
+    const char *width = suffix == 'b' ? "byte " : suffix == 'w' ? "word " : suffix == 'l' ? "dword " : suffix == 'q' ? "qword " : "";
+    bool has_reg = false;
+    for (u32 q = 0; q < nops; q++) if (kinds[q] == 'r') has_reg = true;
+    bool movz = same(mn, "movzx") || same(mn, "movsx");
+
+    o("    %s", mn);
+    for (u32 q = 0; q < nops; q++) {
+        u32 idx = nops - 1 - q;                    /* AT&T source first; Intel destination first */
+        o(q ? ", " : " ");
+        if (kinds[idx] == 'm' && (!has_reg || movz) && width[0] && !same(mn, "lea"))
+            o("%s", width);
+        if (kinds[idx] == 'r' && movz && idx == 0 && suffix) {
+            /* the narrow source register, at the suffix's width */
+            i32 gi = gp_index(conv[idx]);
+            o("%s", gp_at(gi, suffix == 'b' ? 1 : suffix == 'w' ? 2 : 4));
+        } else o("%s", conv[idx]);
+    }
+    o("\n");
+}
+
+static void gen_asm(u32 bi)
+{
+    asm_block *b = &asms[bi];
+
+    /* Widths from the types, numbers for the constants. */
+    for (u32 k = 0; k < b->nops; k++) {
+        asm_op *op = &b->ops[k];
+        type *t = N(op->expr)->ty;
+        op->width = (is_ptr(t) || t->kind == T_FUNC || is_rec(t)) ? 8 : (u8)(t->size > 8 ? 8 : t->size);
+        if (op->imm) {
+            cval c;
+            if (!const_val(op->expr, &c) || c.addr) { fail_at(N(op->expr)->line, NULL, "an \"i\" operand has to be a number the compiler can work out", NULL); return; }
+            op->value = c.v;
+        }
+        if (is_flt(t)) { fail_at(N(op->expr)->line, NULL, "floating point does not pass through inline assembly here", NULL); return; }
+    }
+
+    /* Registers: the bound ones and the named ones first, then the
+     * compiler's choices from what is left. */
+    bool used[16] = { false };
+    for (u32 k = 0; k < b->nops; k++) {
+        asm_op *op = &b->ops[k];
+        if (op->imm) continue;
+        node *e = N(op->expr);
+        if (e->kind == ND_VAR && C.syms[e->sym].reg[0] && !op->mem) {
+            cpy(op->reg, C.syms[e->sym].reg);
+            i32 gi = gp_index(op->reg);
+            if (gi >= 0) used[gi] = true;
+            continue;
+        }
+        i32 fixed = -1;
+        for (u32 c = 0; op->cons[c]; c++) {
+            switch (op->cons[c]) {
+            case 'a': fixed = 0; break;
+            case 'c': fixed = 1; break;
+            case 'd': fixed = 2; break;
+            case 'b': fixed = 3; break;
+            case 'S': fixed = 6; break;
+            case 'D': fixed = 7; break;
+            default: break;
+            }
+        }
+        if (fixed >= 0 && !op->mem) { cpy(op->reg, gp64[fixed]); used[fixed] = true; }
+    }
+    static const i32 pool[] = { 8, 9, 10, 11, 6, 7, 1, 2, 3, 0 };
+    for (u32 k = 0; k < b->nops; k++) {
+        asm_op *op = &b->ops[k];
+        if (op->imm || op->reg[0]) continue;
+        i32 pick = -1;
+        for (u32 p = 0; p < sizeof(pool) / sizeof(pool[0]); p++) if (!used[pool[p]]) { pick = pool[p]; break; }
+        if (pick < 0) { fail_at(N(op->expr)->line, NULL, "inline assembly wants more registers than there are", NULL); return; }
+        used[pick] = true;
+        cpy(op->reg, gp64[pick]);
+    }
+
+    /* Inputs computed first, all of them, then handed to their
+     * registers -- computing one must not disturb another. */
+    for (u32 k = 0; k < b->nops; k++) {
+        asm_op *op = &b->ops[k];
+        if (op->imm) continue;
+        if (op->mem) { gen_addr(op->expr); o("    push rax\n"); continue; }
+        if (!op->in) continue;
+        gen_expr(op->expr);
+        o("    push rax\n");
+    }
+    for (u32 k = b->nops; k > 0; k--) {
+        asm_op *op = &b->ops[k - 1];
+        if (op->imm) continue;
+        if (!op->mem && !op->in) continue;
+        o("    pop %s\n", op->reg);
+    }
+
+    /* The template, statement by statement. */
+    const u8 *t = C.spool + C.strs[b->tmpl].at;
+    u32 start = 0;
+    for (u32 i = 0; ; i++) {
+        if (t[i] == '\n' || t[i] == ';' || t[i] == 0) {
+            att_statement(b, bi, (const char *)t + start, i - start);
+            if (t[i] == 0) break;
+            start = i + 1;
+        }
+    }
+
+    /* Outputs: every register kept on the stack before any address is
+     * worked out, then stored last to first. */
+    for (u32 k = 0; k < b->nops; k++) {
+        asm_op *op = &b->ops[k];
+        if (!op->out || op->mem || op->imm) continue;
+        o("    push %s\n", op->reg);
+    }
+    for (u32 k = b->nops; k > 0; k--) {
+        asm_op *op = &b->ops[k - 1];
+        if (!op->out || op->mem || op->imm) continue;
+        gen_addr(op->expr);
+        o("    mov rdi, rax\n    pop rax\n");
+        store(N(op->expr)->ty);
+    }
+}
+
 static void gen_stmt(u32 i)
 {
     if (!i || C.bad) return;
@@ -3315,7 +3888,13 @@ static void gen_stmt(u32 i)
     case ND_RETURN:
         if (n->lhs) {
             gen_expr(n->lhs);
-            if (is_rec(C.ret_ty)) fail_at(n->line, NULL, "a struct is returned by pointer here, not by value", NULL);
+            if (is_rec(C.ret_ty)) {
+                /* the record, copied to where the caller asked, and
+                 * that address is the value */
+                o("    mov rdi, [rbp - %d]\n", -C.ret_slot);
+                store(C.ret_ty);
+                o("    mov rax, rdi\n");
+            }
             else cast_to(N(n->lhs)->ty, C.ret_ty);
         }
         o("    jmp .Lret%d\n", (i64)C.fn_no);
@@ -3390,16 +3969,9 @@ static void gen_stmt(u32 i)
         o(".Lg%d_%s:\n", (i64)C.fn_no, C.gotos[n->aux]);
         gen_stmt(n->rhs);
         return;
-    case ND_ASM: {
-        const u8 *s = C.spool + C.strs[n->aux].at;
-        o("    ");
-        for (u32 k = 0; s[k]; k++) {
-            if (s[k] == '\n') o("\n    ");
-            else o_char((char)s[k]);
-        }
-        o("\n");
+    case ND_ASM:
+        gen_asm(n->sym);
         return;
-    }
     case ND_SWITCH: {
         u32 end = C.label++;
         C.brk[C.nbrk++] = end;
@@ -3460,6 +4032,27 @@ static u32 nglobals;
 static u8 gpool[262144];
 static u32 gpool_used;
 
+static global *global_find(const char *label)
+{
+    for (u32 i = 0; i < nglobals; i++)
+        if (same(globals[i].label, label)) return &globals[i];
+    return NULL;
+}
+
+/* The values just read into ibuf become the global's own. */
+static void global_fill(global *g, type *t)
+{
+    if (gpool_used + t->size > sizeof(gpool)) { fail("the globals are too large together", NULL); return; }
+    g->ty = t;
+    g->has_init = true;
+    g->is_extern = false;
+    g->bytes = gpool + gpool_used;
+    memcpy(g->bytes, C.ibuf, t->size);
+    gpool_used += t->size;
+    g->nfix = C.nfix > 16 ? 16 : C.nfix;
+    memcpy(g->fixes, C.fixes, sizeof(fixup) * g->nfix);
+}
+
 void global_add(const char *label, type *t, bool has_init, bool is_extern);
 
 void global_add(const char *label, type *t, bool has_init, bool is_extern)
@@ -3471,14 +4064,7 @@ void global_add(const char *label, type *t, bool has_init, bool is_extern)
     g->ty = t;
     g->has_init = has_init;
     g->is_extern = is_extern;
-    if (has_init) {
-        if (gpool_used + t->size > sizeof(gpool)) { fail("the globals are too large together", NULL); return; }
-        g->bytes = gpool + gpool_used;
-        memcpy(g->bytes, C.ibuf, t->size);
-        gpool_used += t->size;
-        g->nfix = C.nfix > 16 ? 16 : C.nfix;
-        memcpy(g->fixes, C.fixes, sizeof(fixup) * g->nfix);
-    }
+    if (has_init) global_fill(g, t);
     nglobals++;
 }
 
@@ -3502,15 +4088,24 @@ static void function(type *ft, const char *name, char pnames[NPARAMS][NAME_MAX])
 
     scope_in();
     sym *params[NPARAMS];
-    if (ft->variadic) {
-        /* Room for all six registers, in order, so va_arg can walk. */
-        C.frame = 48;
-        C.va_area = -48;
+    /* A function returning a struct is handed the address for it as a
+     * first, unnamed argument. */
+    u32 hidden = 0;
+    C.ret_slot = 0;
+    if (is_rec(ft->base)) {
+        if (ft->variadic) { fail("a variadic function returning a struct is not here", name); return; }
+        type *pt = ptr_to(ft->base);
+        C.ret_slot = local_slot(pt);
+        hidden = 1;
     }
     for (u32 p = 0; p < ft->nparams; p++) {
         params[p] = sym_add(pnames[p][0] ? pnames[p] : "?", ft->params[p], S_LOCAL);
-        if (p >= REGARGS) params[p]->val = 16 + (i64)(p - REGARGS) * 8;   /* left by the caller */
-        else params[p]->val = ft->variadic ? (C.va_area + (i64)p * 8) : local_slot(ft->params[p]);
+        /* A variadic function's arguments all lie above the frame, in
+         * one row; anyone else's first six arrive in registers and
+         * are given a home below it. */
+        if (ft->variadic) params[p]->val = 16 + (i64)p * 8;
+        else if (p + hidden >= REGARGS) params[p]->val = 16 + (i64)(p + hidden - REGARGS) * 8;
+        else params[p]->val = local_slot(ft->params[p]);
     }
     expect("{");
     u32 body = block();
@@ -3522,12 +4117,10 @@ static void function(type *ft, const char *name, char pnames[NPARAMS][NAME_MAX])
     u32 frame = (u32)((C.frame + 15) / 16 * 16);
     o("\nf_%s:\n    push rbp\n    mov rbp, rsp\n", name);
     if (frame) o("    sub rsp, %d\n", (i64)frame);
-    if (ft->variadic) {
-        for (u32 p = 0; p < REGARGS; p++)
-            o("    mov [rbp - %d], %s\n", -(C.va_area + (i64)p * 8), arg64[p]);
-    } else {
+    if (!ft->variadic) {
         u32 gi = 0, xi = 0;
-        for (u32 p = 0; p < ft->nparams && p < REGARGS; p++) {
+        if (hidden) o("    mov [rbp - %d], %s\n", -C.ret_slot, arg64[gi++]);
+        for (u32 p = 0; p < ft->nparams && p + hidden < REGARGS; p++) {
             type *pt = ft->params[p];
             i64 off = -params[p]->val;
             if (pt->kind == T_DOUBLE) o("    movsd [rbp - %d], %s\n", off, argx[xi++]);
@@ -3541,10 +4134,12 @@ static void function(type *ft, const char *name, char pnames[NPARAMS][NAME_MAX])
     gen_stmt(body);
     o(".Lret%d:\n    mov rsp, rbp\n    pop rbp\n    ret\n", (i64)C.fn_no);
     C.nsyms = fn_mark;                /* the function's names, given back at once */
+    C.fn_ty = NULL;
 }
 
 static void toplevel(void)
 {
+    C.nnodes = 1;                     /* nothing outside a function keeps its nodes */
     if (is_kw("_Static_assert")) { stmt(); return; }
     if (eat(";")) return;
     bool td, ex, st;
@@ -3584,8 +4179,21 @@ static void toplevel(void)
         } else if (nm[0]) {
             sym *old = sym_find(nm);
             if (old && old->kind == S_GLOBAL) {
-                /* declared again: fine, as long as nothing else starts it */
-                if (eat("=")) { fail("that global already exists", nm); return; }
+                /* declared again: fine; and with its values now, if
+                 * the first time was only a declaration */
+                if (eat("=")) {
+                    global *g = global_find(old->label);
+                    if (!g || g->has_init) { fail("that global already has its values", nm); return; }
+                    memset(C.ibuf, 0, t->size > INIT_MAX ? INIT_MAX : t->size + 8);
+                    C.nfix = 0;
+                    C.ndyn = 0;
+                    C.nnodes = 1;
+                    initializer(t, 0, false);
+                    if (C.bad) return;
+                    if (t->kind == T_ARR && t->len == 0) { fail("an array without a size needs values", nm); return; }
+                    old->ty = t;
+                    global_fill(g, t);
+                }
             } else {
                 sym *s = sym_add(nm, t, S_GLOBAL);
                 memset(C.ibuf, 0, t->size > INIT_MAX ? INIT_MAX : t->size + 8);
@@ -3642,10 +4250,17 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
                cc_find_fn find, void *ctx,
                char *out, u64 max, char *err, u32 errmax)
 {
+    if (!Cp) Cp = (cstate *)lang_big_alloc(sizeof(cstate));
+    if (!Cp) {
+        if (errmax) { const char *m = "there is no room for the compiler's tables"; u32 k = 0; while (m[k] && k + 1 < errmax) { err[k] = m[k]; k++; } err[k] = 0; }
+        return -1;
+    }
     memset(&C, 0, sizeof(C));
     nglobals = 0;
     gpool_used = 0;
     iconst_used = 0;
+    nasm = 0;
+    last_asm_name[0] = 0;
     C.find = find;
     C.ctx = ctx;
     C.out = out;
@@ -3688,16 +4303,18 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
     sym *m = sym_find("main");
     if (!m || m->kind != S_FUNC || !m->defined) { fail_at(0, src_name, "there is no main", NULL); return -1; }
 
+    /* The data: what has values first, then the strings and constants,
+     * and the merely reserved room last, so that all of it is the
+     * zeroed tail the image does not have to carry. */
     o("\nsection data\n");
     for (u32 i = 0; i < nglobals; i++) {
         global *g = &globals[i];
-        if (g->is_extern) continue;
+        if (g->is_extern || !g->has_init) continue;
         u32 al = g->ty->align ? g->ty->align : 1;
         if (al > 16) al = 16;
         o("    align %d\n", (i64)al);
         o("v_%s:\n", g->label);
-        if (g->has_init) emit_image(g->bytes, g->ty->size, g->fixes, g->nfix);
-        else o("    res %d\n", (i64)(g->ty->size ? g->ty->size : 1));
+        emit_image(g->bytes, g->ty->size, g->fixes, g->nfix);
     }
     for (u32 i = 0; i < C.ninit_consts; i++) {
         o("    align 8\n.Li%d:\n", (i64)iconsts[i].no);
@@ -3708,6 +4325,14 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
         for (u32 k = 0; k < C.strs[i].len; k++)
             o("%s %d", k ? "," : "", (i64)C.spool[C.strs[i].at + k]);
         o("\n");
+    }
+    for (u32 i = 0; i < nglobals; i++) {
+        global *g = &globals[i];
+        if (g->is_extern || g->has_init) continue;
+        u32 al = g->ty->align ? g->ty->align : 1;
+        if (al > 16) al = 16;
+        o("    align %d\n", (i64)al);
+        o("v_%s:\n    res %d\n", g->label, (i64)(g->ty->size ? g->ty->size : 1));
     }
     if (C.bad) return -1;
     return (i64)C.len;

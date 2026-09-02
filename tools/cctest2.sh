@@ -8,12 +8,13 @@
 
 cd "$(dirname "$0")/.."
 BUILD=build
+SRC=${1:-tools/cc/proof.c}            # another text rides in under the same name
 
 rm -f $BUILD/teststore.img $BUILD/serial.log $BUILD/ccdisk.img $BUILD/cctest2.ppm
 dd if=/dev/zero of=$BUILD/teststore.img bs=1M count=32 status=none
 dd if=/dev/zero of=$BUILD/ccdisk.img bs=1M count=16 status=none
 mkfs.vfat -F 32 $BUILD/ccdisk.img >/dev/null
-mcopy -i $BUILD/ccdisk.img tools/cc/proof.c ::proof.c
+mcopy -i $BUILD/ccdisk.img "$SRC" ::proof.c
 mcopy -i $BUILD/ccdisk.img tools/cc/words.h ::words.h
 cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/test-vars.fd
 
@@ -36,6 +37,8 @@ keys() {
     sleep 4
     echo "screendump $BUILD/cctest2.ppm"
     sleep 2
+    echo "info registers"
+    sleep 1
     echo quit
 } | qemu-system-x86_64 -machine q35 -m 512M -cpu max \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
@@ -48,10 +51,10 @@ keys() {
   -device ide-hd,drive=xchg,bus=ide.2 \
   -device e1000,netdev=n0 -netdev user,id=n0 \
   -display none -monitor stdio \
-  -serial file:$BUILD/serial.log >/dev/null 2>&1
+  -serial file:$BUILD/serial.log >$BUILD/cctest2.mon 2>&1
 
 python3 tools/ppm2png.py $BUILD/cctest2.ppm $BUILD/cctest2.png 2>/dev/null
 
 echo "--- the checks ---"
-grep -a 'user: check\|user: all\|user: some\|running an image' $BUILD/serial.log
+grep -a 'user: \|running an image\|proc: .*ended' $BUILD/serial.log
 grep -a 'panic\|exception 1[34]' $BUILD/serial.log | grep -v 0x40337e | head -3

@@ -670,10 +670,16 @@ static const char compiler_text[] =
     " * syscall(nr, a0, a1, a2, a3, a4) is the door to the kernel;\n"
     " * the machine page names the calls.\n"
     " *\n"
-    " * not here: a struct passed or returned by value, inline\n"
-    " * assembly with operands, more than six arguments to a\n"
-    " * variadic call. the kernel's port i/o is inline assembly with\n"
-    " * operands; that is the honest distance to go.\n"
+    " * inline assembly the way the kernel writes it: asm volatile\n"
+    " * (\"...\" : outputs : inputs : clobbers) with a b c d S D r m i,\n"
+    " * and register variables tied to a name. structs come back by\n"
+    " * value; (type){ ... } literals; a variadic call of any length.\n"
+    " *\n"
+    " * not here: a struct handed to a function by value (hand its\n"
+    " * address), a 128-bit type, and a linker: one text at a time,\n"
+    " * with what it #includes. the kernel's own files read on this\n"
+    " * compiler; the kernel as a whole waits for the linker, and\n"
+    " * that is the honest distance to go.\n"
     " */\n"
     "\n"
     "#define SEND 2\n"
@@ -713,7 +719,7 @@ static void ensure_language(object *root)
 {
     ensure_page(root, "the language", lang_text, sizeof(lang_text), 2048);
     ensure_page(root, "the machine", machine_text, sizeof(machine_text), 3000);
-    ensure_page(root, "the compiler", compiler_text, sizeof(compiler_text), 3000);
+    ensure_page(root, "the compiler", compiler_text, sizeof(compiler_text), 4000);
 }
 
 /* Rewrites the activity table once a second. Between rewrites it only
@@ -1305,7 +1311,10 @@ void kmain(eb_boot_info *bi)
     syscall_init();
     kprintf("cpu0: syscall entry armed, %u calls in the interface\n", SYS_MAX);
 
-    object *console = port_create(16);
+    /* Deep enough that a quick program's burst of lines survives the
+     * console being slower than the sender; what does not fit is
+     * refused, and a program that cares asks again. */
+    object *console = port_create(256);
     if (!console) panic("no memory for the console port");
     console_receive = cap_insert(kernel_domain, console,
                                  CAP_READ | CAP_CALL | CAP_GRANT);

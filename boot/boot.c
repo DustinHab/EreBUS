@@ -228,6 +228,25 @@ static UINT64 load_elf(VOID *img, UINTN img_size,
 
     EFI_PHYSICAL_ADDRESS at = base;
     EFI_STATUS st = BS->AllocatePages(AllocateAddress, EfiLoaderData, pages, &at);
+
+    /* The firmware chooses where a pool allocation lands, and the file
+     * we just read may be sitting in the very range the kernel is
+     * linked for. Move the file out of the way (the vacated buffers
+     * stay claimed so the next copy lands elsewhere) and try again. */
+    UINTN moves = 0;
+    while (EFI_ERROR(st) && moves < 8 &&
+           (UINT64)(UINTN)img < base + span &&
+           (UINT64)(UINTN)img + img_size > base) {
+        VOID *moved = NULL;
+        if (EFI_ERROR(BS->AllocatePool(EfiLoaderData, img_size, &moved))) break;
+        memcpy(moved, img, img_size);
+        img = moved;
+        eh = (Elf64_Ehdr *)img;
+        ph = (Elf64_Phdr *)((UINT8 *)img + eh->e_phoff);
+        moves++;
+        at = base;
+        st = BS->AllocatePages(AllocateAddress, EfiLoaderData, pages, &at);
+    }
     if (EFI_ERROR(st)) {
         print(u"erebus: target address "); print_hex(base);
         print(u" is occupied\r\n");

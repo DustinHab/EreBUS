@@ -16,8 +16,14 @@
 #include <string.h>
 #include <eb/cc.h>
 #include <eb/asm.h>
+#include <eb/lang.h>
 
-typedef struct { char name[64]; unsigned char *text; unsigned long len; } src_file;
+void *lang_big_alloc(u64 size) { return calloc(1, (size_t)size); }
+
+/* A text goes by three names: the path as given, the part after an
+ * include directory (so <eb/types.h> finds kernel/include/eb/types.h),
+ * and the bare file name. */
+typedef struct { char name[3][96]; unsigned char *text; unsigned long len; } src_file;
 static src_file files[128];
 static int nfiles;
 
@@ -36,22 +42,21 @@ static unsigned char *slurp(const char *path, unsigned long *len)
     return b;
 }
 
-/* The name a text goes by: its file name, or -- for a header under
- * an include directory -- the path from there, so <eb/types.h>
- * finds kernel/include/eb/types.h. */
-static const char *basename_of(const char *p)
+static void name_file(src_file *f, const char *p)
 {
+    strncpy(f->name[0], p, 95);
     const char *inc = strstr(p, "include/");
-    if (inc) return inc + 8;
+    strncpy(f->name[1], inc ? inc + 8 : p, 95);
     const char *s = strrchr(p, '/');
-    return s ? s + 1 : p;
+    strncpy(f->name[2], s ? s + 1 : p, 95);
 }
 
 static bool find(void *ctx, const char *name, const u8 **text, u64 *len)
 {
     (void)ctx;
     for (int i = 0; i < nfiles; i++)
-        if (strcmp(files[i].name, name) == 0) { *text = files[i].text; *len = files[i].len; return true; }
+        for (int k = 0; k < 3; k++)
+            if (strcmp(files[i].name[k], name) == 0) { *text = files[i].text; *len = files[i].len; return true; }
     return false;
 }
 
@@ -62,17 +67,17 @@ int main(int argc, char **argv)
         unsigned long len;
         unsigned char *t = slurp(argv[i], &len);
         if (!t) { fprintf(stderr, "cannot read %s\n", argv[i]); return 2; }
-        strncpy(files[nfiles].name, basename_of(argv[i]), 63);
+        name_file(&files[nfiles], argv[i]);
         files[nfiles].text = t;
         files[nfiles].len = len;
         nfiles++;
     }
 
     static char text[1 << 20];
-    static u8 image[1 << 18];
+    static u8 image[1 << 23];
     char err[160];
 
-    i64 got = cc_compile(files[0].text, files[0].len, files[0].name, find, NULL,
+    i64 got = cc_compile(files[0].text, files[0].len, files[0].name[2], find, NULL,
                          text, sizeof(text), err, sizeof(err));
     if (got < 0) { printf("compile: %s\n", err); return 1; }
 

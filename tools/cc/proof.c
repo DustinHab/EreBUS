@@ -73,7 +73,11 @@ static void say(char *s)
     long i;
     for (i = 0; i < 24; i++) b[i] = ' ';
     for (i = 0; i < 24 && s[i]; i++) b[i] = s[i];
-    syscall(2, console_handle, 0x54584554, w[0], w[1], w[2]);
+    /* The console's letter box holds only so many lines at once; a
+     * refused send is asked again after yielding, so that a quick
+     * program does not outrun the console and lose its words. */
+    while (syscall(2, console_handle, 0x54584554, w[0], w[1], w[2]) != 0)
+        syscall(1, 0, 0, 0, 0, 0);
 }
 
 static void check(long n, bool ok)
@@ -108,6 +112,15 @@ static long counted(void)
 {
     static long calls = 0;
     return ++calls;
+}
+
+typedef struct { long x, y; unsigned char tag; } pair_t;
+
+static pair_t make_pair(long a, long b)
+{
+    pair_t p;
+    p.x = a; p.y = b; p.tag = 9;
+    return p;
 }
 
 long main(long console, long inbox)
@@ -181,6 +194,43 @@ again:
 
     /* 16: words from the text beside this one */
     check(16, from_words(3) == 30);
+
+    /* 17, 18: inline assembly with operands, the way the kernel writes
+     * it: the system call by hand, and the time stamp counter */
+    {
+        long w[3];
+        char *b = (char *)w;
+        const char *msg = "asm said this           ";
+        for (i = 0; i < 24; i++) b[i] = msg[i];
+        long nr = 2, a0 = console, a1 = 0x54584554, a2 = w[0];
+        register long r10 __asm__("r10") = w[1];
+        register long r8 __asm__("r8") = w[2];
+        __asm__ volatile ("syscall"
+                          : "+a"(nr), "+D"(a0), "+S"(a1), "+d"(a2), "+r"(r10), "+r"(r8)
+                          :
+                          : "rcx", "r11", "memory");
+        check(17, nr == 0);
+
+        unsigned int lo1, hi1, lo2, hi2;
+        __asm__ volatile ("rdtsc" : "=a"(lo1), "=d"(hi1));
+        for (i = 0; i < 1000; i++) acc += i;
+        __asm__ volatile ("rdtsc" : "=a"(lo2), "=d"(hi2));
+        unsigned long t1 = ((unsigned long)hi1 << 32) | lo1;
+        unsigned long t2 = ((unsigned long)hi2 << 32) | lo2;
+        check(18, t2 > t1);
+    }
+
+    /* 19: a struct returned by value, kept whole and picked by member */
+    pair_t pr = make_pair(3, 4);
+    check(19, pr.x + pr.y == 7 && make_pair(5, 6).y == 6 && make_pair(1, 2).tag == 9);
+
+    /* 20: compound literals, array and struct */
+    long *cl = (long[3]){ 4, 5, 6 };
+    pair_t cp = (pair_t){ .y = 8, .x = 7 };
+    check(20, cl[2] == 6 && cp.x == 7 && cp.y == 8 && cp.tag == 0);
+
+    /* 21: eight arguments to a variadic function */
+    check(21, sum_var(8, 1, 2, 3, 4, 5, 6, 7, 8) == 36);
 
     if (bad_count == 0) say("all checks ok");
     else say("some checks bad");
