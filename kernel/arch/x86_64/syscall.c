@@ -66,9 +66,16 @@ void syscall_init(void)
     /* STAR holds two selector bases. The kernel one is used on entry.
      * The user one is what sysret adds to: code becomes base + 16 and
      * stack becomes base + 8, which is why the descriptor table has
-     * user data sitting immediately before user code. */
+     * user data sitting immediately before user code.
+     *
+     * The base carries the ring-3 bits itself. Intel's sysret forces
+     * them on; AMD's adds and leaves the selector as it comes, so a
+     * base of 0x10 puts a program in ring 3 with SS 0x18 -- which runs,
+     * until the first interrupt's iretq refuses to return to a stack
+     * selector whose ring does not match the code's. Found under KVM on
+     * a Ryzen; the emulator had never minded. */
     u64 star = ((u64)(SEL_KERNEL_CODE) << 32) |
-               ((u64)(SEL_USER_DATA - 8) << 48);
+               ((u64)((SEL_USER_DATA | 3) - 8) << 48);
     wrmsr(MSR_STAR, star);
     wrmsr(MSR_LSTAR, (u64)syscall_entry);
 

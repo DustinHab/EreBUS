@@ -241,6 +241,16 @@ static void report(trap_frame *f)
     kprintf("kern: cs 0x%04llx  ss 0x%04llx  rflags 0x%08llx  (ring %llu)\n",
             f->cs, f->ss, f->rflags, f->cs & 3);
 
+    /* A protection fault in ring 0 with a selector in its error code is
+     * most often an iretq refusing the frame it was handed. That frame
+     * lies at the stack pointer; showing it names the culprit. */
+    if (f->vector == 13 && (f->cs & 3) == 0 && f->error && readable(f->rsp) &&
+        readable(f->rsp + 32)) {
+        const u64 *w = (const u64 *)f->rsp;
+        kprintf("kern: the frame at rsp: rip %p  cs 0x%04llx  rflags 0x%08llx  rsp %p  ss 0x%04llx\n",
+                (void *)w[0], w[1], w[2], (void *)w[3], w[4]);
+    }
+
     backtrace(f->rbp);
 }
 

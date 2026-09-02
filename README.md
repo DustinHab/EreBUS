@@ -838,3 +838,16 @@ built binary.
 
 The loader is unsigned, so Secure Boot has to be off on real hardware.
 A signing chain of our own would be a separate project.
+
+## A note on real processors
+
+QEMU's emulator is forgiving in places a processor is not. The first
+run under KVM -- the same QEMU, the real processor doing the work --
+ended before the first program had run: sysret had put that program in
+ring 3 with a stack selector of ring 0, because the emulator forces the
+ring bits on and an AMD processor does not, and the first interrupt's
+iretq refused to return to it. The syscall setup now carries the ring
+bits in the base it hands the processor. `QEMU_EXTRA="-accel kvm" sh
+tools/selfbuild.sh` boots a kernel that way when the host allows it;
+everything the machine's own tests run still runs on the emulator, so
+a finding like this has to be gone looking for.
