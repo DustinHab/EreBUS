@@ -745,6 +745,9 @@ main:
 .L19:
     mov rax, 0
 .L20:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 1
     push rax
@@ -782,6 +785,9 @@ main:
 .L25:
     mov rax, 0
 .L26:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 2
     push rax
@@ -893,6 +899,9 @@ main:
 .L27:
     mov rax, 0
 .L28:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 3
     push rax
@@ -963,6 +972,9 @@ main:
 .L33:
     mov rax, 0
 .L34:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 4
     push rax
@@ -1029,6 +1041,9 @@ main:
 .L39:
     mov rax, 0
 .L40:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 5
     push rax
@@ -1163,6 +1178,9 @@ main:
 .L43:
     mov rax, 0
 .L44:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 6
     push rax
@@ -1292,6 +1310,9 @@ main:
 .L49:
     mov rax, 0
 .L50:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 7
     push rax
@@ -1417,6 +1438,9 @@ main:
 .L55:
     mov rax, 0
 .L56:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 8
     push rax
@@ -1533,6 +1557,9 @@ main:
 .L63:
     mov rax, 0
 .L64:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 9
     push rax
@@ -1578,6 +1605,9 @@ main:
 .L67:
     mov rax, 0
 .L68:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 10
     push rax
@@ -1640,6 +1670,9 @@ main:
 .L69:
     mov rax, 0
 .L70:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 11
     push rax
@@ -1745,6 +1778,9 @@ main:
 .L71:
     mov rax, 0
 .L72:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 12
     push rax
@@ -1789,6 +1825,9 @@ main:
     pop rax
     cmp rax, rdi
     sete al
+    movzx rax, al
+    test rax, rax
+    setne al
     movzx rax, al
     push rax
     mov rax, 13
@@ -1884,6 +1923,9 @@ main:
 .L77:
     mov rax, 0
 .L78:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 14
     push rax
@@ -2022,6 +2064,9 @@ main:
     cmp rax, rdi
     sete al
     movzx rax, al
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 15
     push rax
@@ -2038,6 +2083,9 @@ main:
     pop rax
     cmp rax, rdi
     sete al
+    movzx rax, al
+    test rax, rax
+    setne al
     movzx rax, al
     push rax
     mov rax, 16
@@ -2233,6 +2281,9 @@ main:
     cmp rax, rdi
     sete al
     movzx rax, al
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 17
     push rax
@@ -2347,6 +2398,9 @@ main:
     cmp rax, rdi
     setb al
     movzx rax, al
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 18
     push rax
@@ -2444,6 +2498,9 @@ main:
 .L97:
     mov rax, 0
 .L98:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 19
     push rax
@@ -2563,6 +2620,9 @@ main:
 .L103:
     mov rax, 0
 .L104:
+    test rax, rax
+    setne al
+    movzx rax, al
     push rax
     mov rax, 20
     push rax
@@ -2595,6 +2655,9 @@ main:
     pop rax
     cmp rax, rdi
     sete al
+    movzx rax, al
+    test rax, rax
+    setne al
     movzx rax, al
     push rax
     mov rax, 21

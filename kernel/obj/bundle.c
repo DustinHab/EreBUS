@@ -149,7 +149,10 @@ static bool list_place(object *l, object *o, const char *nm, u8 nl)
     if (at == n && !obj_grow_slots(l, n + 1)) return false;
     obj_set_slot(l, at, o, CAP_READ | CAP_WRITE);
     if (nl) {
+        /* A bundle may come from another machine: its name length is
+         * its own claim, and the room here is not. */
         char name[64];
+        if (nl > sizeof(name) - 1) nl = sizeof(name) - 1;
         for (u8 i = 0; i < nl; i++) name[i] = (char)nm[i];
         name[nl] = 0;
         obj_set_slot_name(l, at, name);

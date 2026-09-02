@@ -2,6 +2,7 @@
  * fmt.c -- the kernel's formatted output.
  */
 #include <eb/fmt.h>
+#include <eb/io.h>
 
 #define MAX_SINKS 4
 static kout_sink sinks[MAX_SINKS];
@@ -214,10 +215,15 @@ void kvprintf(const char *fmt, va_list ap)
     }
 }
 
+/* One call, one line: interrupts are held off while it goes out, so
+ * that two threads' lines do not interleave letter by letter. A line
+ * takes a few milliseconds on the serial port; the timer waits. */
 void kprintf(const char *fmt, ...)
 {
+    u64 flags = irq_save();
     va_list ap;
     va_start(ap, fmt);
     kvprintf(fmt, ap);
     va_end(ap);
+    irq_restore(flags);
 }

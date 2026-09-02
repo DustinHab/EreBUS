@@ -289,8 +289,13 @@ static u32 rebuild(const snap_header *h, object **roots, u32 max_roots)
     u64 at = root_table;
 
     for (u64 i = 0; i < h->object_count; i++) {
+        /* The checksum vouches for the bytes, not for their sense: a
+         * record that reaches past the data is refused rather than
+         * read past the buffer. */
+        if (at + sizeof(snap_record) > h->data_bytes) return 0;
         const snap_record *r = (const snap_record *)(buffer + at);
         at += sizeof(snap_record);
+        if (at + align8(r->size) + (u64)r->slot_count * sizeof(snap_ref) > h->data_bytes) return 0;
 
         object *o = obj_create(r->type, r->size, r->slot_count);
         if (!o) return 0;

@@ -911,7 +911,10 @@ static bool link_units(object *into, const char *listname, u32 n, term_say_fn sa
     object *made = obj_create(TYPE_BYTES, (u64)got, 0);
     if (!made) { say(ctx, "nothing came of it; memory is short."); return false; }
     memcpy(obj_data(made), out, (u64)got);
-    obj_set_transient(made, true);    /* built things live until the next boot; write out keeps them */
+    /* A kernel is far too large for the snapshot and lives until the
+     * next boot -- write out keeps it; a program's image is small and
+     * stays, like one compile makes. */
+    if (kernel) obj_set_transient(made, true);
     bool ok = lay_into(into, made, nm);
     obj_release(made);
     if (!ok) { say(ctx, "no room to lay it in the list."); return false; }

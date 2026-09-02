@@ -392,7 +392,10 @@ static void net_pump(void)
                 pipe_input(p + 12, sport, inner + 8, ilen - 8);
         } else if (proto == 1 && ilen >= 8 && inner[0] == 8) {
             /* An echo request: answer it. Being pingable costs one
-             * buffer and makes the whole path checkable from outside. */
+             * buffer and makes the whole path checkable from outside.
+             * The echo is the request's size; one that would not fit
+             * the frame with its headers is left unanswered. */
+            if (14 + 20 + ilen > sizeof(frame_out)) continue;
             u8 *f = frame_out;
             eth_head(f, frame_in + 6, ETH_IP);
             u8 *ip = f + 14;

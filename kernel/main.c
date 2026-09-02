@@ -291,20 +291,6 @@ object *work_launch(object *script, object *reply, u64 budget_seconds,
     return prog;
 }
 
-/* Prints the packed characters a message carries. Anything outside
- * printable ASCII is dropped rather than sent to the console, so a
- * program cannot drive the terminal with escape sequences. */
-static void print_message_text(const message *m)
-{
-    for (u32 i = 0; i < m->nwords; i++) {
-        u64 w = m->words[i];
-        for (u32 b = 0; b < 8; b++) {
-            char c = (char)((w >> (b * 8)) & 0xFF);
-            if (c >= 0x20 && c < 0x7F) kputc(c);
-        }
-    }
-}
-
 /* A kernel thread that serves the console port. Programs cannot print;
  * they can only ask this to, through a capability, and only if they
  * were given one. What they say also goes into the journal, attributed
@@ -321,16 +307,22 @@ static void console_server(void *arg)
             sched_yield();
             continue;
         }
-        kprintf("user: ");
-        print_message_text(&m);
-        kprintf("\n");
-
-        char said[3 * 8 + 1];
-        u32 n = 0;
+        /* The line goes out whole, in one call, so that two threads'
+         * words do not interleave letter by letter; anything outside
+         * printable ASCII is dropped rather than sent to the console,
+         * so a program cannot drive the terminal with escape
+         * sequences. */
+        char said[3 * 8 + 1], shown[3 * 8 + 1];
+        u32 n = 0, k = 0;
         for (u32 i = 0; i < m.nwords && i < 3; i++)
-            for (u32 b = 0; b < 8; b++)
-                said[n++] = (char)((m.words[i] >> (b * 8)) & 0xFF);
+            for (u32 b = 0; b < 8; b++) {
+                char c = (char)((m.words[i] >> (b * 8)) & 0xFF);
+                said[n++] = c;
+                if (c >= 0x20 && c < 0x7F) shown[k++] = c;
+            }
         said[n] = 0;
+        shown[k] = 0;
+        kprintf("user: %s\n", shown);
         journal_says(from ? from : "someone", said);
     }
 }

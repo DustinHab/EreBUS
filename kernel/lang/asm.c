@@ -276,12 +276,16 @@ static bool number(const char *s, u32 n, i64 *out)
         }
         v = (i64)u;
     } else {
+        u64 u = 0;
         for (u32 k = i; k < n; k++) {
             if (s[k] < '0' || s[k] > '9') return false;
-            v = v * 10 + (s[k] - '0');
+            u = u * 10 + (u64)(s[k] - '0');
         }
+        v = (i64)u;
     }
-    *out = neg ? -v : v;
+    /* negation in unsigned arithmetic: -9223372036854775808 has no
+     * positive twin among the signed */
+    *out = neg ? (i64)((u64)0 - (u64)v) : v;
     return true;
 }
 

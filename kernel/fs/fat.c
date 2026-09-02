@@ -35,6 +35,15 @@ static struct {
 
 static u8 sec[512];
 
+/* One sector of the fat, held between uses: a chain's entries lie
+ * side by side, and reading the same sector back for each of a
+ * thousand clusters -- and writing it out twice per cluster -- was
+ * most of what made a large file take minutes. Written back, to every
+ * mirror, when another sector is needed or the work is done. */
+static u8   fatsec[512];
+static u64  fatsec_lba;
+static bool fatsec_valid, fatsec_dirty;
+
 /* --- the volume ------------------------------------------------------ */
 
 static bool looks_fat32(const u8 *b)
@@ -73,6 +82,8 @@ static bool vol_open(u64 base)
 bool fat_mount(void)
 {
     vol.ready = false;
+    fatsec_valid = false;
+    fatsec_dirty = false;
     if (!blk_aux_present()) return false;
 
     /* The volume begins at sector zero, or behind an mbr's first
@@ -96,32 +107,47 @@ bool fat_present(void) { return vol.ready; }
 
 /* --- the fat itself -------------------------------------------------- */
 
+static bool fat_flush(void)
+{
+    if (!fatsec_valid || !fatsec_dirty) return true;
+    for (u32 f = 0; f < vol.nfats; f++)
+        if (!blk_aux_write(fatsec_lba + (u64)f * vol.fat_sectors, 1, fatsec))
+            return false;
+    fatsec_dirty = false;
+    return true;
+}
+
+static bool fat_load(u64 lba)
+{
+    if (fatsec_valid && fatsec_lba == lba) return true;
+    if (!fat_flush()) return false;
+    fatsec_valid = false;
+    if (!blk_aux_read(lba, 1, fatsec)) return false;
+    fatsec_lba = lba;
+    fatsec_valid = true;
+    return true;
+}
+
 static u32 fat_get(u32 cluster)
 {
     u32 off = cluster * 4;
-    if (!blk_aux_read(vol.fat_start + off / 512, 1, sec)) return 0x0FFFFFFF;
-    u32 v = (u32)sec[off % 512] | ((u32)sec[off % 512 + 1] << 8) |
-            ((u32)sec[off % 512 + 2] << 16) |
-            ((u32)sec[off % 512 + 3] << 24);
+    if (!fat_load(vol.fat_start + off / 512)) return 0x0FFFFFFF;
+    u32 v = (u32)fatsec[off % 512] | ((u32)fatsec[off % 512 + 1] << 8) |
+            ((u32)fatsec[off % 512 + 2] << 16) |
+            ((u32)fatsec[off % 512 + 3] << 24);
     return v & 0x0FFFFFFF;
 }
 
 static bool fat_set(u32 cluster, u32 value)
 {
     u32 off = cluster * 4;
-    u64 lba = vol.fat_start + off / 512;
-    if (!blk_aux_read(lba, 1, sec)) return false;
-    sec[off % 512]     = (u8)value;
-    sec[off % 512 + 1] = (u8)(value >> 8);
-    sec[off % 512 + 2] = (u8)(value >> 16);
-    sec[off % 512 + 3] = (u8)((value >> 24) & 0x0F) |
-                         (sec[off % 512 + 3] & 0xF0);
-    if (!blk_aux_write(lba, 1, sec)) return false;
-
-    /* The mirrored fats stay in step. */
-    for (u32 f = 1; f < vol.nfats; f++)
-        if (!blk_aux_write(lba + (u64)f * vol.fat_sectors, 1, sec))
-            return false;
+    if (!fat_load(vol.fat_start + off / 512)) return false;
+    fatsec[off % 512]     = (u8)value;
+    fatsec[off % 512 + 1] = (u8)(value >> 8);
+    fatsec[off % 512 + 2] = (u8)(value >> 16);
+    fatsec[off % 512 + 3] = (u8)((value >> 24) & 0x0F) |
+                            (fatsec[off % 512 + 3] & 0xF0);
+    fatsec_dirty = true;
     return true;
 }
 
@@ -406,6 +432,8 @@ static bool write_file(const u8 name83[11], const u8 *data, u32 size)
         }
         prev = c;
     }
+    /* The chain is on the disk before anything points at it. */
+    if (!fat_flush()) return false;
 
     /* Then the entry. */
     u32 cluster = vol.root_cluster;
@@ -483,6 +511,7 @@ u32 fat_write_out(object *from)
         }
     }
 
+    fat_flush();
     kprintf("fat:  wrote %u files out\n", wrote);
     return wrote;
 }

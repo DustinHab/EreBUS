@@ -71,6 +71,7 @@ struct type {
     bool  variadic;
     bool  defined;                    /* struct: the body has been seen */
     bool  packed;
+    bool  boolean;                    /* _Bool: a value stored into it becomes 0 or 1 */
     type *ptr;                        /* the pointer to this, once made */
 };
 
@@ -239,6 +240,7 @@ typedef struct {
     u32    ntypedefs;
     struct { char name[NAME_MAX]; type *ty; } tags[NTAGS];
     u32    ntags;
+    type  *t_bool;
     type  *t_void, *t_char, *t_uchar, *t_short, *t_ushort, *t_int, *t_uint,
           *t_long, *t_ulong, *t_float, *t_double, *t_charp;
 
@@ -427,6 +429,7 @@ static void fail_at(u32 line, const char *where, const char *why, const char *wh
 {
     if (C.bad) return;
     C.bad = true;
+    if (!why) why = "something is wrong";
     u32 at = 0;
     err_put(&at, "line ");
     err_dec(&at, line);
@@ -1294,13 +1297,13 @@ static void lex_raw(token *t)
                     else if (h >= 'A' && h <= 'F') d = h - 'A' + 10;
                     else break;
                     getc_();
-                    v = v * 16 + d;
+                    v = (i64)((u64)v * 16 + (u64)d);   /* the bits, wrapping like the constant does */
                 }
             } else {
                 if (c != '.') { v = c - '0'; sig = (u64)(c - '0'); digits = 1; }
                 while (peekc(0) >= '0' && peekc(0) <= '9') {
                     i32 d = getc_() - '0';
-                    v = v * 10 + d;
+                    v = (i64)((u64)v * 10 + (u64)d);
                     if (digits < 19) { sig = sig * 10 + (u64)d; digits++; } else dexp++;
                 }
                 if (c == '.' || peekc(0) == '.') {
@@ -1778,6 +1781,7 @@ static void add_type(u32 i)
             if (is_flt(want) && !is_flt(an->ty)) rep = mk_cast(a, C.t_double);
             else if (!is_flt(want) && is_num(want) && is_flt(an->ty)) rep = mk_cast(a, C.t_long);
             else if (want->kind == T_FLOAT && an->ty->kind == T_DOUBLE) rep = a;
+            else if (want->boolean && an->ty && !an->ty->boolean) rep = mk_cast(a, want);   /* 0 or 1 on arrival */
             if (rep && rep != a) {
                 N(rep)->next = an->next;
                 an->next = 0;
@@ -2027,7 +2031,7 @@ static type *declspec(bool *is_typedef, bool *is_extern, bool *is_static)
     *is_typedef = false;
     *is_extern = false;
     *is_static = false;
-    bool uns = false, sgn = false, saw_long = false, saw_short = false;
+    bool uns = false, sgn = false, saw_long = false, saw_short = false, boolean = false;
     i32 base = -1;
     type *named = NULL;
     for (;;) {
@@ -2044,7 +2048,7 @@ static type *declspec(bool *is_typedef, bool *is_extern, bool *is_static)
         if (same(w, "signed"))   { sgn = true; advance(); continue; }
         if (same(w, "void"))   { base = T_VOID; advance(); continue; }
         if (same(w, "char"))   { base = T_CHAR; advance(); continue; }
-        if (same(w, "_Bool") || same(w, "bool")) { base = T_CHAR; uns = true; advance(); continue; }
+        if (same(w, "_Bool") || same(w, "bool")) { base = T_CHAR; uns = true; boolean = true; advance(); continue; }
         if (same(w, "short"))  { saw_short = true; advance(); continue; }
         if (same(w, "int"))    { if (base < 0) base = T_INT; advance(); continue; }
         if (same(w, "long"))   { saw_long = true; advance(); continue; }
@@ -2067,7 +2071,7 @@ static type *declspec(bool *is_typedef, bool *is_extern, bool *is_static)
     }
     switch (base) {
     case T_VOID:   return C.t_void;
-    case T_CHAR:   return uns ? C.t_uchar : C.t_char;
+    case T_CHAR:   return boolean ? C.t_bool : uns ? C.t_uchar : C.t_char;
     case T_SHORT:  return uns ? C.t_ushort : C.t_short;
     case T_INT:    return uns ? C.t_uint : C.t_int;
     case T_FLOAT:  return C.t_float;
@@ -3159,10 +3163,12 @@ static void o_str(const char *s) { while (*s) o_char(*s++); }
 
 static void o_dec(i64 v)
 {
-    if (v < 0) { o_char('-'); v = -v; }
+    /* the magnitude in unsigned arithmetic: the most negative number
+     * has no positive twin among the signed */
+    u64 u = v < 0 ? (u64)0 - (u64)v : (u64)v;
+    if (v < 0) o_char('-');
     char d[24];
     u32 n = 0;
-    u64 u = (u64)v;
     if (u == 0) d[n++] = '0';
     while (u) { d[n++] = (char)('0' + u % 10); u /= 10; }
     while (n) o_char(d[--n]);
@@ -3326,6 +3332,11 @@ static void cast_to(type *from, type *to)
         return;
     } else if (ff && tf) {
         return;                       /* double and float both travel as double */
+    }
+    if (to->boolean) {
+        /* a _Bool holds 0 or 1, whatever was assigned */
+        if (!from->boolean) o("    test rax, rax\n    setne al\n    movzx rax, al\n");
+        return;
     }
     if (to->size == 1) o(to->uns ? "    movzx rax, al\n" : "    movsx rax, al\n");
     else if (to->size == 2) o(to->uns ? "    movzx rax, ax\n" : "    movsx rax, ax\n");
@@ -4384,6 +4395,7 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
     C.t_void   = new_type(T_VOID, 1, 1);
     C.t_char   = new_type(T_CHAR, 1, 1);
     C.t_uchar  = new_type(T_CHAR, 1, 1);  C.t_uchar->uns = true;
+    C.t_bool   = new_type(T_CHAR, 1, 1);  C.t_bool->uns = true; C.t_bool->boolean = true;
     C.t_short  = new_type(T_SHORT, 2, 2);
     C.t_ushort = new_type(T_SHORT, 2, 2); C.t_ushort->uns = true;
     C.t_int    = new_type(T_INT, 4, 4);
