@@ -113,6 +113,8 @@ static i64 compile_to_object(const char *src, const char *asm_out)
 
 int main(int argc, char **argv)
 {
+    if (getenv("CC_NOPEEP")) cc_peep_off = true;   /* for measuring the tidying's worth */
+    cc_peep_only = getenv("CC_PEEP_ONLY");
     text = (char *)malloc(4u << 20);
     obj = (u8 *)malloc(8u << 20);
     if (argc < 2) { fprintf(stderr, "cchost <file.c> [texts...] | cc|as|gnu <file> -o <out> [texts...] | ld <out> [kernel] <objects...>\n"); return 2; }

@@ -3431,6 +3431,289 @@ static void push_val(type *t)
     else o("    push rax\n");
 }
 
+/* ------------------------------------------------------------------ */
+/* Simple operands                                                     */
+/* ------------------------------------------------------------------ */
+
+#define OPT_SIMPLE 1                  /* plain operands without push and pop */
+#define OPT_PEEP   1                  /* the line-level tidying afterwards */
+#define OPT_P1     1                  /* lea + load through rax -> one load */
+#define OPT_P2     1                  /* push rax + pop R -> mov */
+#define OPT_P3     1                  /* a jump to the next line -> nothing */
+#define OPT_F4     1                  /* set, movzx, test, je -> one jump */
+
+bool cc_peep_off = false;             /* set from outside to measure the tidying's worth */
+const char *cc_peep_only = NULL;      /* or only in the functions named, comma-separated */
+
+static bool name_listed(const char *list, const char *name)
+{
+    while (*list) {
+        u32 i = 0;
+        while (list[i] && list[i] != ',') i++;
+        u32 k = 0;
+        while (k < i && name[k] && name[k] == list[k]) k++;
+        if (k == i && !name[k]) return true;
+        list += list[i] == ',' ? i + 1 : i;
+    }
+    return false;
+}
+
+/* A plain scalar variable -- a local with a home below the frame, or
+ * a global -- that can be read or written in one instruction, with no
+ * address to compute first. */
+static bool plain_var(node *n)
+{
+    if (!OPT_SIMPLE) return false;
+    if (n->kind != ND_VAR) return false;
+    sym *s = &C.syms[n->sym];
+    type *t = s->ty;
+    if (!t || is_flt(t) || is_rec(t) || t->kind == T_ARR || t->kind == T_FUNC) return false;
+    if (s->reg[0]) return false;
+    if (s->kind == S_LOCAL) return !s->indirect;
+    return s->kind == S_GLOBAL;
+}
+
+/* Where a plain variable lives, as an operand. */
+static void place_of(sym *s, char *out, u32 max)
+{
+    u32 n = 0;
+    #define PUTC(ch) do { if (n < max - 1) out[n++] = (ch); } while (0)
+    if (s->kind == S_LOCAL) {
+        const char *p = s->val < 0 ? "[rbp - " : "[rbp + ";
+        while (*p) PUTC(*p++);
+        u64 v = s->val < 0 ? (u64)0 - (u64)s->val : (u64)s->val;
+        char d[24]; u32 k = 0;
+        if (v == 0) d[k++] = '0';
+        while (v) { d[k++] = (char)('0' + v % 10); v /= 10; }
+        while (k) PUTC(d[--k]);
+    } else {
+        PUTC('[');
+        const char *p = symname(s->label);
+        while (*p) PUTC(*p++);
+    }
+    PUTC(']');
+    out[n] = 0;
+    #undef PUTC
+}
+
+/* A right operand that needs no push and pop around it: a number, a
+ * plain variable, or a plain variable under a widening cast. Once the
+ * left side stands in rax, it goes straight into rdi. */
+static bool simple_int(node *n)
+{
+    if (!OPT_SIMPLE) return false;
+    if (n->kind == ND_NUM || plain_var(n)) return true;
+    if (n->kind == ND_CAST && n->lhs) {
+        node *in = N(n->lhs);
+        type *to = n->ty, *from = in->ty;
+        if (!to || !from || is_flt(to) || is_flt(from) || to->boolean) return false;
+        if (is_rec(to) || is_rec(from) || to->size == 1) return false;
+        return in->kind == ND_NUM || plain_var(in);
+    }
+    return false;
+}
+
+static void load_into_rdi(node *n)
+{
+    node *v = n->kind == ND_CAST ? N(n->lhs) : n;
+    if (v->kind == ND_NUM) {
+        o("    mov rdi, %d\n", v->val);
+    } else {
+        sym *s = &C.syms[v->sym];
+        type *t = v->ty;
+        char place[NAME_MAX + 24];
+        place_of(s, place, sizeof(place));
+        if (t->size == 1) o(t->uns ? "    movzx rdi, byte %s\n" : "    movsx rdi, byte %s\n", place);
+        else if (t->size == 2) o(t->uns ? "    movzx rdi, word %s\n" : "    movsx rdi, word %s\n", place);
+        else if (t->size == 4) o(t->uns ? "    mov edi, dword %s\n" : "    movsxd rdi, dword %s\n", place);
+        else o("    mov rdi, %s\n", place);
+    }
+    if (n->kind == ND_CAST) {
+        type *to = n->ty;
+        if (to->size == 4) o(to->uns ? "    mov edi, edi\n" : "    movsxd rdi, edi\n");
+        else if (to->size == 2) o(to->uns ? "    movzx rdi, di\n" : "    movsx rdi, di\n");
+    }
+}
+
+/* rax into a plain variable, by its width. */
+static void store_plain(sym *s, type *t)
+{
+    char place[NAME_MAX + 24];
+    place_of(s, place, sizeof(place));
+    if (t->size == 1) o("    mov byte %s, al\n", place);
+    else if (t->size == 2) o("    mov word %s, ax\n", place);
+    else if (t->size == 4) o("    mov dword %s, eax\n", place);
+    else o("    mov %s, rax\n", place);
+}
+
+/* ------------------------------------------------------------------ */
+/* Peephole                                                            */
+/* ------------------------------------------------------------------ */
+
+/* Line-level tidying of one function's assembly, in place. The
+ * generator writes what is simplest to write; what is simplest to run
+ * differs in a few fixed ways, each a matter of two adjacent lines:
+ *
+ *   lea rax, [X] / <load> [rax]   ->  <load> [X]
+ *   push rax / pop R              ->  mov R, rax   (nothing, if R is rax)
+ *   jmp .LN / .LN:                ->  .LN:
+ *
+ * Two passes, because a line made by one fusion can take part in the
+ * next. Labels break adjacency, so a jump target is never fused over. */
+static bool starts(const char *p, u32 len, const char *s)
+{
+    u32 i = 0;
+    while (s[i]) { if (i >= len || p[i] != s[i]) return false; i++; }
+    return true;
+}
+
+static bool line_is(const char *p, u32 len, const char *s)
+{
+    u32 i = 0;
+    while (s[i]) { if (i >= len || p[i] != s[i]) return false; i++; }
+    return i == len;
+}
+
+/* Answers the fused line's length in out, -1 when both lines go, 0
+ * when nothing fuses. */
+static i32 fuse(const char *prev, u32 plen, const char *cur, u32 clen, char *out, u32 max)
+{
+    u32 n = 0;
+    if (OPT_P1 && starts(prev, plen, "    lea rax, [") && clen > 7 &&
+        starts(cur + clen - 7, 7, " [rax]\n") &&
+        (starts(cur, clen, "    mov ") || starts(cur, clen, "    movsx ") ||
+         starts(cur, clen, "    movzx ") || starts(cur, clen, "    movsxd ") ||
+         starts(cur, clen, "    movsd xmm0, ") || starts(cur, clen, "    movss xmm0, "))) {
+        u32 xs = 14, xe = plen - 2;                 /* X between '[' and "]\n" */
+        if (clen - 7 + 2 + (xe - xs) + 2 >= max) return 0;
+        for (u32 i = 0; i < clen - 7; i++) out[n++] = cur[i];
+        out[n++] = ' '; out[n++] = '[';
+        for (u32 i = xs; i < xe; i++) out[n++] = prev[i];
+        out[n++] = ']'; out[n++] = '\n';
+        return (i32)n;
+    }
+    if (OPT_P2 && line_is(prev, plen, "    push rax\n") && starts(cur, clen, "    pop ") && clen > 9) {
+        if (line_is(cur, clen, "    pop rax\n")) return -1;
+        if (clen + 6 >= max) return 0;
+        const char *m = "    mov ";
+        while (*m) out[n++] = *m++;
+        for (u32 i = 8; i < clen - 1; i++) out[n++] = cur[i];
+        const char *r = ", rax\n";
+        while (*r) out[n++] = *r++;
+        return (i32)n;
+    }
+    if (OPT_P3 && starts(prev, plen, "    jmp .L") && cur[0] == '.' && plen > 9 && clen == plen - 8 + 1) {
+        /* prev: "    jmp " LABEL "\n"; cur: LABEL ":\n" */
+        u32 ll = plen - 9;
+        bool same_label = true;
+        for (u32 i = 0; i < ll; i++) if (prev[8 + i] != cur[i]) { same_label = false; break; }
+        if (same_label && cur[ll] == ':' && cur[ll + 1] == '\n') {
+            for (u32 i = 0; i < clen; i++) out[n++] = cur[i];
+            return (i32)n;
+        }
+    }
+    return 0;
+}
+
+/* The jump that takes a condition's place: setX al / movzx rax, al /
+ * test rax, rax / je L asks whether X was false, which is one jump on
+ * the inverse of X; with jne it is X itself. */
+static const char *jump_for(const char *set, bool inverse)
+{
+    static const char *const cc[10][3] = {
+        { "sete",  "je",  "jne" }, { "setne", "jne", "je"  },
+        { "setl",  "jl",  "jge" }, { "setle", "jle", "jg"  },
+        { "setg",  "jg",  "jle" }, { "setge", "jge", "jl"  },
+        { "setb",  "jb",  "jae" }, { "setbe", "jbe", "ja"  },
+        { "seta",  "ja",  "jbe" }, { "setae", "jae", "jb"  },
+    };
+    for (u32 i = 0; i < 10; i++) if (same(cc[i][0], set)) return cc[i][inverse ? 2 : 1];
+    return NULL;
+}
+
+/* Four lines that are one jump. Answers the jump's length in out. */
+static i32 fuse4(const char *l0, u32 n0, const char *l1, u32 n1,
+                 const char *l2, u32 n2, const char *l3, u32 n3, char *out, u32 max)
+{
+    if (!OPT_F4) return 0;
+    if (!starts(l0, n0, "    set") || n0 < 10 || !starts(l0 + n0 - 4, 4, " al\n")) return 0;
+    if (!line_is(l1, n1, "    movzx rax, al\n") || !line_is(l2, n2, "    test rax, rax\n")) return 0;
+    bool je = starts(l3, n3, "    je .L"), jne = starts(l3, n3, "    jne .L");
+    if (!je && !jne) return 0;
+
+    char set[8];
+    u32 sl = n0 - 8;                              /* between the indent and " al\n" */
+    if (sl >= sizeof(set)) return 0;
+    for (u32 i = 0; i < sl; i++) set[i] = l0[4 + i];
+    set[sl] = 0;
+    const char *j = jump_for(set, je);
+    if (!j) return 0;
+
+    u32 label_at = je ? 7 : 8;                    /* after "    je " / "    jne " */
+    u32 n = 0;
+    if (4 + 8 + (n3 - label_at) + 1 >= max) return 0;
+    out[n++] = ' '; out[n++] = ' '; out[n++] = ' '; out[n++] = ' ';
+    while (*j) out[n++] = *j++;
+    out[n++] = ' ';
+    for (u32 i = label_at; i < n3; i++) out[n++] = l3[i];   /* the label and its newline */
+    return (i32)n;
+}
+
+static void peephole(u32 from)
+{
+    char *buf = C.out;
+    for (u32 pass = 0; pass < 2; pass++) {
+        u32 r = from, w = from, end = C.len;
+        u32 hs[3];                                /* starts of the last lines written, oldest first */
+        u32 hn = 0;
+        while (r < end) {
+            u32 ls = r;
+            while (r < end && buf[r] != '\n') r++;
+            if (r < end) r++;
+            u32 clen = r - ls;
+            char fused[256];
+            i32 fl;
+
+            if (hn == 3 && clen < 200 && w - hs[0] < 600) {
+                fl = fuse4(buf + hs[0], hs[1] - hs[0], buf + hs[1], hs[2] - hs[1],
+                           buf + hs[2], w - hs[2], buf + ls, clen, fused, sizeof(fused));
+                if (fl > 0) {
+                    for (i32 i = 0; i < fl; i++) buf[hs[0] + i] = fused[i];
+                    w = hs[0] + (u32)fl;
+                    hn = 1;                       /* the jump stands where the four stood */
+                    continue;
+                }
+            }
+            if (hn && clen < 200 && w - hs[hn - 1] < 200) {
+                u32 pw = hs[hn - 1];
+                fl = fuse(buf + pw, w - pw, buf + ls, clen, fused, sizeof(fused));
+                if (fl > 0) {
+                    for (i32 i = 0; i < fl; i++) buf[pw + i] = fused[i];
+                    w = pw + (u32)fl;             /* the fused line stands where prev stood */
+                    continue;
+                }
+                if (fl < 0) { w = pw; hn--; continue; }
+            }
+            if (w != ls) for (u32 i = 0; i < clen; i++) buf[w + i] = buf[ls + i];
+            if (hn == 3) { hs[0] = hs[1]; hs[1] = hs[2]; hn = 2; }
+            hs[hn++] = w;
+            w += clen;
+        }
+        C.len = w;
+    }
+}
+
+/* A plain variable into rax, by its width. */
+static void load_plain(sym *s, type *t)
+{
+    char place[NAME_MAX + 24];
+    place_of(s, place, sizeof(place));
+    if (t->size == 1) o(t->uns ? "    movzx rax, byte %s\n" : "    movsx rax, byte %s\n", place);
+    else if (t->size == 2) o(t->uns ? "    movzx rax, word %s\n" : "    movsx rax, word %s\n", place);
+    else if (t->size == 4) o(t->uns ? "    mov eax, dword %s\n" : "    movsxd rax, dword %s\n", place);
+    else o("    mov rax, %s\n", place);
+}
+
 /* The arguments, computed last to first and pushed, then the first
  * six pulled into their registers -- whole numbers to rdi, rsi, ...,
  * doubles to xmm0, xmm1, ..., each kind counted on its own -- and
@@ -3563,6 +3846,28 @@ static void gen_expr(u32 i)
     case ND_ASSIGN: {
         type *t = N(n->lhs)->ty;
         member *m = bitfield_of(n->lhs);
+        if (!n->op && !m && plain_var(N(n->lhs))) {
+            /* a plain variable takes the value without an address
+             * computed and kept around the right side */
+            gen_expr(n->rhs);
+            cast_to(N(n->rhs)->ty, t);
+            store_plain(&C.syms[N(n->lhs)->sym], t);
+            return;
+        }
+        if (n->op && !m && plain_var(N(n->lhs)) && !is_flt(N(n->rhs)->ty)) {
+            /* the same for x op= y: the right side, then the variable
+             * itself, the operation, and the variable again */
+            sym *s = &C.syms[N(n->lhs)->sym];
+            gen_expr(n->rhs);
+            o("    mov rdi, rax\n");
+            load_plain(s, t);
+            if (is_ptr(t) && (n->op == ND_ADD || n->op == ND_SUB))
+                o("    imul rdi, %d\n", (i64)(t->base->size ? t->base->size : 1));
+            emit_binop(n->op, t);
+            cast_to(t, t);
+            store_plain(s, t);
+            return;
+        }
         gen_addr(n->lhs);
         o("    push rax\n");
         gen_expr(n->rhs);
@@ -3594,6 +3899,17 @@ static void gen_expr(u32 i)
         member *m = bitfield_of(n->lhs);
         i64 step = n->val;
         if (is_ptr(t)) step *= (i64)(t->base->size ? t->base->size : 1);
+        if (!m && plain_var(N(n->lhs))) {
+            /* a plain variable counts up or down in place */
+            sym *s = &C.syms[N(n->lhs)->sym];
+            load_plain(s, t);
+            if (n->post) o("    mov r8, rax\n");
+            o("    add rax, %d\n", step);
+            cast_to(t, t);
+            store_plain(s, t);
+            if (n->post) o("    mov rax, r8\n");
+            return;
+        }
         gen_addr(n->lhs);
         o("    mov rdi, rax\n");
         if (m) load_bits(m); else load(t);
@@ -3660,14 +3976,22 @@ static void gen_expr(u32 i)
         break;
     }
 
-    /* The binary ones: left in rax/xmm0, right in rdi/xmm1. */
+    /* The binary ones: left in rax/xmm0, right in rdi/xmm1. A right
+     * side that is a number or a plain variable goes into rdi
+     * directly; anything else is computed with the left side pushed
+     * out of its way. */
     type *lt = N(n->lhs)->ty;
-    bool flt = is_flt(lt) || is_flt(N(n->rhs)->ty);
+    node *rn = N(n->rhs);
+    bool flt = is_flt(lt) || is_flt(rn->ty);
     gen_expr(n->lhs);
-    push_val(lt);
-    gen_expr(n->rhs);
-    if (flt) o("    movsd xmm1, xmm0\n    movsd xmm0, [rsp]\n    add rsp, 8\n");
-    else o("    mov rdi, rax\n    pop rax\n");
+    if (!flt && simple_int(rn)) {
+        load_into_rdi(rn);
+    } else {
+        push_val(lt);
+        gen_expr(n->rhs);
+        if (flt) o("    movsd xmm1, xmm0\n    movsd xmm0, [rsp]\n    add rsp, 8\n");
+        else o("    mov rdi, rax\n    pop rax\n");
+    }
     if (n->kind == ND_EQ || n->kind == ND_NE || n->kind == ND_LT || n->kind == ND_LE) {
         type *rt = N(n->rhs)->ty;
         emit_binop(n->kind, flt ? C.t_double
@@ -4269,8 +4593,11 @@ static void function(type *ft, const char *name, char pnames[NPARAMS][NAME_MAX],
     if (C.bad) return;
 
     u32 frame = (u32)((C.frame + 15) / 16 * 16);
+    u32 fn_start = C.len;
     if (is_static) o("\nprivate %s", symname(name));
-    o("\nsection %s\n%s:\n    push rbp\n    mov rbp, rsp\n", C.text_section, symname(name));
+    /* Functions begin on a sixteen-byte boundary, as processors like
+     * their jump targets. */
+    o("\nsection %s\nalign 16\n%s:\n    push rbp\n    mov rbp, rsp\n", C.text_section, symname(name));
     if (frame) o("    sub rsp, %d\n", (i64)frame);
     if (!ft->variadic) {
         u32 gi = 0, xi = 0;
@@ -4289,6 +4616,9 @@ static void function(type *ft, const char *name, char pnames[NPARAMS][NAME_MAX],
     }
     gen_stmt(body);
     o(".Lret%d:\n    mov rsp, rbp\n    pop rbp\n    ret\n", (i64)C.fn_no);
+    if (!C.bad && OPT_PEEP && !cc_peep_off &&
+        (!cc_peep_only || name_listed(cc_peep_only, name)))
+        peephole(fn_start);
     C.nsyms = fn_mark;                /* the function's names, given back at once */
     C.fn_ty = NULL;
 }

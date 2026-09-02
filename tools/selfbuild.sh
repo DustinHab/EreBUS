@@ -66,9 +66,10 @@ dd if=/dev/zero of=$OUT/store.img bs=1M count=32 status=none
 cp /usr/share/OVMF/OVMF_VARS_4M.fd $OUT/vars.fd
 
 # TRACE=1 asks QEMU for every exception and stops at the first reset,
-# so a triple fault says where it began.
-TRACEOPTS=""
-if [ -n "$TRACE" ]; then TRACEOPTS="-d int,cpu_reset -D $OUT/int.log -no-reboot -no-shutdown"; rm -f $OUT/int.log; fi
+# so a triple fault says where it began. QEMU_EXTRA adds whatever else
+# a measurement needs, -icount for instance.
+TRACEOPTS="$QEMU_EXTRA"
+if [ -n "$TRACE" ]; then TRACEOPTS="$TRACEOPTS -d int,cpu_reset -D $OUT/int.log -no-reboot -no-shutdown"; rm -f $OUT/int.log; fi
 
 {
     sleep ${WAIT:-30}

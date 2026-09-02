@@ -726,7 +726,17 @@ built binary.
   built outside. A struct goes to a function by value the way one
   comes back from it: the caller keeps a nameless copy and passes its
   address, the callee works on that copy -- its own convention, the
-  kernel being built by nothing else.
+  kernel being built by nothing else. The generator's output is
+  tidied on the way out: numbers and plain variables go straight into
+  the second operand, a plain variable is assigned or counted in
+  place, and a peephole over each function folds address-and-load
+  pairs, push-and-pop pairs, jumps to the next line, and the
+  set/movzx/test/je shape of every condition into one conditional
+  jump. Functions start on sixteen-byte boundaries, which came out of
+  a measurement: QEMU's translator chains jumps only within a page,
+  and a boot took twice as long because the console's scroll loop had
+  come to lie across one. The self-built kernel's text is a sixth
+  smaller than before and it boots faster than the unoptimized one.
 * **Installing.** The boot disk is a disk of its own to the kernel
   now, and "install" on a kernel's bytes -- the word in the terminal,
   the chip on the bytes -- lays it down in \erebus as kernel.new,
