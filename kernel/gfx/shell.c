@@ -19,6 +19,8 @@
 #include <eb/term.h>
 #include <eb/asm.h>
 #include <eb/cc.h>
+#include <eb/ld.h>
+#include <eb/lang.h>
 #include <eb/html.h>
 #include <eb/string.h>
 #include <eb/time.h>
@@ -214,7 +216,8 @@ typedef enum {
     HOT_TFIND,       /* search inside the focused text */
     HOT_LINE_SAY,    /* send what the bottom row has gathered */
     HOT_ASSEMBLE,    /* turn the focused text into a program image */
-    HOT_COMPILE      /* turn the focused text of c into assembly and an image */
+    HOT_COMPILE,     /* turn the focused text of c into assembly and an image */
+    HOT_BUILD        /* compile, assemble and link everything in the focused list */
 } hot_kind;
 
 typedef struct {
@@ -401,6 +404,30 @@ static bool lay_beside(object *holder, object *made, u32 rights, const char *nm)
     return true;
 }
 
+/* Whether a list holds anything the tools would build: a text of c
+ * or assembly, or an object. */
+static bool list_buildable(object *l)
+{
+    for (u64 i = 0; i < obj_slots(l); i++) {
+        object *t = obj_get_slot(l, i);
+        if (!t) continue;
+        if (obj_type(t) == TYPE_BYTES && ld_object_ok((const u8 *)obj_data(t), obj_size(t))) return true;
+        if (obj_type(t) != TYPE_TEXT) continue;
+        const char *nm = obj_slot_name(l, i);
+        if (!nm) nm = obj_name(t);
+        if (!nm) continue;
+        u32 n = (u32)strlen(nm);
+        if (n > 2 && nm[n - 2] == '.' && (nm[n - 1] == 'c' || nm[n - 1] == 'S' || nm[n - 1] == 's')) return true;
+    }
+    return false;
+}
+
+static void say_to_journal(void *ctx, const char *line)
+{
+    (void)ctx;
+    journal_says("build", line);
+}
+
 /* #include "name" reaches the texts lying beside the source, in the
  * holder one came through, by petname. */
 static bool find_beside_in(void *ctx, const char *name, const u8 **text, u64 *len)
@@ -412,9 +439,12 @@ static bool find_beside_in(void *ctx, const char *name, const u8 **text, u64 *le
         const char *nm = obj_slot_name(holder, i);
         if (!nm) nm = obj_name(t);
         if (!nm) continue;
+        /* <eb/types.h> asks for types.h: the way there is not a thing here */
+        const char *want = name;
+        for (const char *q = name; *q; q++) if (*q == '/') want = q + 1;
         u32 j = 0;
-        while (nm[j] && name[j] && to_lower(nm[j]) == to_lower(name[j])) j++;
-        if (nm[j] || name[j]) continue;
+        while (nm[j] && want[j] && to_lower(nm[j]) == to_lower(want[j])) j++;
+        if (nm[j] || want[j]) continue;
         *text = (const u8 *)obj_data(t);
         *len = text_len(*text, obj_size(t));
         return true;
@@ -3105,6 +3135,17 @@ static void draw_all(void)
             text_at(chip_x, 14, sw - PAD, "write out",
                     lit2 ? C_TEXT : C_ACCENT);
             hot_add(chip_x - 4, 11, 9 * GLYPH_W + 8, ROW, HOT_FATOUT, 0);
+            chip_x += 11 * GLYPH_W;
+        }
+
+        /* Last of all: a list with sources or objects in it builds. */
+        if (ft == TYPE_LIST && (focus_rights() & CAP_WRITE) &&
+            nav.at_generation == 0 && list_buildable(focus())) {
+            bool lit = is_hovered(HOT_BUILD, 0);
+            if (lit) fb_rect(chip_x - 4, 11, 5 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(chip_x, 14, sw - PAD, "build", lit ? C_TEXT : C_ACCENT);
+            hot_add(chip_x - 4, 11, 5 * GLYPH_W + 8, ROW, HOT_BUILD, 0);
+            chip_x += 7 * GLYPH_W;
         }
     }
 
@@ -4500,6 +4541,23 @@ static void act_on(const hot_region *r)
         say_commit();
         break;
 
+    case HOT_BUILD: {
+        /* Everything in the focused list that the tools read becomes
+         * one thing that runs -- or the kernel, when kmain is among
+         * it. The report goes to the journal, line by line. */
+        object *f = focus();
+        if (obj_type(f) != TYPE_LIST || nav.at_generation != 0) break;
+        if (!(focus_rights() & CAP_WRITE)) break;
+        char base[40];
+        if (nav.depth >= 2) label_of(nav.node[nav.depth - 2], nav.via[nav.depth - 1], f, base, sizeof(base));
+        else put(base, 0, "home");
+        base[19] = 0;
+        term_build_list(f, base, say_to_journal, NULL);
+        nav.changes++;
+        nav.redraw = true;
+        break;
+    }
+
     case HOT_ASSEMBLE:
     case HOT_COMPILE: {
         /* The text becomes an image, laid beside it in the holder one
@@ -4518,15 +4576,18 @@ static void act_on(const hot_region *r)
         label_of(holder, nav.via[nav.depth - 1], f, base, sizeof(base));
         base[19] = 0;
 
-        static char text[262144];
-        static u8 image[65536];
+        static char *text;
+        if (!text) text = (char *)lang_big_alloc(4u << 20);
+        u8 *image = lang_out_buffer();
+        if (!text || !image) { journal_says("compile", "there is no room for the tools' tables"); break; }
         char err[112];
         const u8 *src = (const u8 *)obj_data(f);
         u64 slen = text_len(src, obj_size(f));
+        bool gnu = false;
 
         if (r->kind == HOT_COMPILE) {
             i64 got = cc_compile(src, slen, base, find_beside_in, holder,
-                                 text, sizeof(text), err, sizeof(err));
+                                 text, 4u << 20, err, sizeof(err));
             if (got < 0) { journal_says("compile", err); nav.redraw = true; break; }
             object *asm_text = obj_create(TYPE_TEXT, (u64)got + 16, 0);
             if (!asm_text) break;
@@ -4541,9 +4602,15 @@ static void act_on(const hot_region *r)
             obj_release(asm_text);
             src = (const u8 *)text;
             slen = (u64)got;
+        } else {
+            /* the kernel's own assembly files are in the gnu dialect;
+             * the text says so itself */
+            u32 bl = (u32)strlen(base);
+            gnu = (bl > 2 && base[bl - 2] == '.' && base[bl - 1] == 'S') || gnu_looks(src, slen);
         }
 
-        i64 got = asm_assemble(src, slen, image, sizeof(image), err, sizeof(err));
+        u32 kind = 0;
+        i64 got = lang_build_text(src, slen, gnu, image, LANG_OUT_MAX, &kind, err, sizeof(err));
         if (got < 0) {
             journal_says(r->kind == HOT_COMPILE ? "the assembler refused what the compiler made"
                                                 : "assemble", err);
@@ -4556,14 +4623,15 @@ static void act_on(const hot_region *r)
         memcpy(obj_data(made), image, (u64)got);
         char nm[40];
         u32 n = put(nm, 0, base);
-        put(nm, n, " code");
+        put(nm, n, kind == LANG_IMAGE ? " code" : " object");
         if (!lay_beside(holder, made, CAP_READ | CAP_WRITE | CAP_GRANT, nm)) {
             obj_release(made);
             break;
         }
         obj_release(made);
         journal_says(r->kind == HOT_COMPILE ? "compile" : "assemble",
-                     "an image lies beside the text; run it");
+                     kind == LANG_IMAGE ? "an image lies beside the text; run it"
+                                        : "an object lies beside the text; it waits for other texts' names -- link joins them");
         nav.changes++;
         nav.redraw = true;
         break;

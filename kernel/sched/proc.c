@@ -319,26 +319,26 @@ process *proc_create(const char *name, const void *entry_point,
 process *proc_create_code(const char *name, const u8 *image, u64 len,
                           object *console)
 {
-    u32 code_len, data_len, zero_len;
-    if (!code_image_ok(image, len, &code_len, &data_len, &zero_len))
+    u32 head, code_len, data_len, zero_len, entry;
+    if (!code_image_read(image, len, &head, &code_len, &data_len, &zero_len, &entry))
         return NULL;
 
     process *p = proc_begin(name);
     if (!p) return NULL;
-    p->entry = USER_LOAD_CODE;
+    p->entry = USER_LOAD_CODE + entry;
 
     /* The code, copied into pages of its own and mapped to run but
      * never to be written; the data, mapped to be written but never
      * to run. The same wall the kernel keeps around itself, kept
      * around what a person builds here. */
     u64 csize = PAGE_UP((u64)code_len);
-    if (!map_fresh(p, USER_LOAD_CODE, csize, true, image + 16, code_len))
+    if (!map_fresh(p, USER_LOAD_CODE, csize, true, image + head, code_len))
         return proc_abandon(p);
 
     u64 dsize = PAGE_UP((u64)data_len + zero_len);
     if (dsize == 0) dsize = PAGE_SIZE;
     if (!map_fresh(p, USER_LOAD_DATA, dsize, false,
-                   image + 16 + code_len, data_len))
+                   image + head + code_len, data_len))
         return proc_abandon(p);
 
     return proc_finish(p, name, console);

@@ -5,9 +5,9 @@
  * reader takes the root directory's files in as objects; the writer
  * lays objects down as files with plain 8.3 names. Nothing here
  * mounts, caches or defers: every operation walks the disk when it
- * runs, and the honest limits -- root directory only, 64 KiB per
- * file, long names read but not written -- are stated rather than
- * papered over.
+ * runs, and the honest limits -- root directory only, 4 MiB per file
+ * coming in and 16 MiB going out, long names read but not written --
+ * are stated rather than papered over.
  */
 #include <eb/fat.h>
 #include <eb/blk.h>
@@ -16,8 +16,10 @@
 #include <eb/string.h>
 #include <eb/fmt.h>
 #include <eb/io.h>
+#include <eb/lang.h>
 
-#define FILE_MAX 65536
+#define FILE_MAX  (4u * 1024 * 1024)      /* what comes in: the reader's buffer */
+#define WRITE_MAX (16u * 1024 * 1024)     /* what goes out, straight from the object */
 
 static struct {
     bool ready;
@@ -231,7 +233,9 @@ static bool list_add(object *l, object *o, const char *nm)
     return true;
 }
 
-static u8 filebuf[FILE_MAX];
+/* The reader's buffer, asked for on first use: large enough for a
+ * kernel's own sources, too large for the kernel image to carry. */
+static u8 *filebuf;
 
 /* Reads one chain into filebuf. Returns bytes read, capped. */
 static u32 read_chain(u32 cluster, u32 size)
@@ -239,6 +243,8 @@ static u32 read_chain(u32 cluster, u32 size)
     u32 got = 0;
     u32 want = size > FILE_MAX ? FILE_MAX : size;
     static u8 cbuf[512];
+    if (!filebuf) filebuf = (u8 *)lang_big_alloc(FILE_MAX);
+    if (!filebuf) return 0;
 
     while (cluster >= 2 && cluster < 0x0FFFFFF8 && got < want) {
         for (u32 s = 0; s < vol.spc && got < want; s++) {
@@ -325,6 +331,7 @@ static bool take_visit(const char *name, u32 cluster, u32 size,
     if (list_has_name(ctx->into, name)) return true;
 
     u32 got = size ? read_chain(cluster, size) : 0;
+    if (size && !filebuf) return false;
 
     bool text = text_like(filebuf, got);
     object *o = obj_create(text ? TYPE_TEXT : TYPE_BYTES,
@@ -332,6 +339,7 @@ static bool take_visit(const char *name, u32 cluster, u32 size,
     if (!o) return false;
     if (got) memcpy(obj_data(o), filebuf, got);
     obj_set_name(o, name);
+    obj_set_transient(o, true);       /* the disk keeps it; the snapshot need not */
 
     if (list_add(ctx->into, o, name)) ctx->taken++;
     obj_release(o);
@@ -462,7 +470,7 @@ u32 fat_write_out(object *from)
             while (n < size && d[n]) n++;
             len = n;
         }
-        if (len > FILE_MAX) {
+        if (len > WRITE_MAX) {
             kprintf("fat:  %s is too big to write out\n", nm);
             continue;
         }

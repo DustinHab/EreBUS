@@ -669,14 +669,44 @@ built binary.
   checks, one per feature, compiled and run on the machine with every
   check answering ok; and the same compiler, built for the host from
   the same two files (make cchost), reading the kernel's own sources:
-  tools/cctrial.sh pushes all fifty kernel files through it, and every
-  one compiles -- eleven stand alone as running images, the rest wait
-  only for other files' names. The compiler reads its own text,
-  and the assembler's. Honest edges, on the page as well: a struct is
-  handed to a function by pointer, never by value; there is no 128-bit
-  type; and there is no linker -- one text at a time, with what it
-  #includes -- so the kernel as a whole is still built outside. The
-  distance is the linker.
+  tools/cctrial.sh pushes every kernel file through it, and every one
+  compiles. The compiler reads its own text, and the assembler's and
+  the linker's. Honest edges, on the page as well: a struct is handed
+  to a function by pointer, never by value, and there is no 128-bit
+  type.
+* **The linker.** What the assembler makes is an object now -- the
+  bytes of each section (text, rodata, data, bss, user), the names it
+  lays down and the names it only uses, and every place in the bytes
+  that wants a name's address -- and the linker joins objects into one
+  thing that runs: an image for the loader, or the kernel's own ELF
+  when one of the objects lays down kmain (linked at -2 GiB, loaded at
+  2 MiB, three segments, the layout's names such as __kernel_start
+  provided). C's static names are private to their text; the rest meet
+  assembly on the same words, so kmain is kmain and _start is _start.
+  A text with a main is still an image in one step; a text without one
+  is an object that says which names it waits for. The kernel's own
+  assembly files are in the gnu dialect, and a translator carries that
+  into the machine's: .set, .rept, .if, numbered labels, AT&T order.
+  In the terminal: compile and assemble as before, "link" on a list of
+  objects, "build" on a list of texts (every .c and .S in it, then the
+  link), "take in" and "write out" for the exchange disk. Proof on the
+  host: tools/selfbuild.sh builds the whole kernel with cchost -- the
+  same cc.c, asm.c, gnu.c and ld.c the kernel carries -- and boots it
+  in QEMU; it comes up to the desktop, with the network, the door and
+  the snapshots working. Proof on the machine: tools/selfbuild-machine.sh
+  carries every source and header in on the exchange disk, the
+  terminal takes them in and builds the list -- seventy-one objects
+  in a quarter of a minute -- into kernel.elf, writes it out, and the
+  host boots what the machine made: it comes up the same way. What
+  comes in from the disk and what the tools build is transient, alive
+  until the next boot and left out of the snapshot; the disk is its
+  persistence. Three bugs the clang build had hidden: a far return of
+  doublewords where quadwords were meant, imul with a number silently
+  encoded as imul with rax, and initializer address tables cut off at
+  sixteen entries. Honest edges: a struct is handed to a function by
+  pointer, never by value; there is no 128-bit type; the boot loader
+  is still built outside, and the kernel the machine builds still
+  travels to the boot disk by way of the host.
 * **The door.** The terminal reached over the network, by real ssh,
   so the client anyone already has can knock: version 2,
   curve25519-sha256 for the exchange, ssh-ed25519 for the host's

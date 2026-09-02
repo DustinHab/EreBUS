@@ -112,6 +112,8 @@ KERN_C   := kernel/main.c \
             kernel/lib/base64.c \
             kernel/lang/asm.c \
             kernel/lang/big.c \
+            kernel/lang/ld.c \
+            kernel/lang/gnu.c \
             kernel/lang/cc.c \
             kernel/term/term.c \
             kernel/user/runner.c \
@@ -470,12 +472,14 @@ relay: $(IMAGE) $(BUILD)/test-vars.fd
 # on the machine. Nothing runs here; the image is the machine's.
 cchost: $(BUILD)/cchost
 $(BUILD)/cchost: tools/cchost.c kernel/lang/cc.c kernel/lang/asm.c \
-                 kernel/include/eb/cc.h kernel/include/eb/asm.h
+                 kernel/lang/ld.c kernel/lang/gnu.c \
+                 kernel/include/eb/cc.h kernel/include/eb/asm.h kernel/include/eb/ld.h
 	@mkdir -p $(BUILD)
 	@echo "  HOST    $@"
 	@clang -O1 -g -std=c11 -Wall -Wno-unused-function \
 	    -Wno-incompatible-library-redeclaration -I$(ROOT)/kernel/include \
-	    -o $@ tools/cchost.c kernel/lang/cc.c kernel/lang/asm.c
+	    -o $@ tools/cchost.c kernel/lang/cc.c kernel/lang/asm.c \
+	    kernel/lang/ld.c kernel/lang/gnu.c
 
 sweep:
 	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)

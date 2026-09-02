@@ -52,6 +52,7 @@ struct object {
     u64     nslots;    /* outgoing references */
     u32     mark;      /* used by graph walks; not part of the object */
     u32     fleeting;  /* changes by design; its edits are not history */
+    u32     transient; /* lives until the next boot; the snapshot leaves it out */
     char    name[OBJ_NAME_MAX];   /* what the object calls itself */
     obj_slot *slots;              /* its own allocation, so it can grow */
 
@@ -670,4 +671,16 @@ void obj_set_fleeting(object *o, bool fleeting)
 {
     check(o, "set fleeting");
     o->fleeting = fleeting ? 1 : 0;
+}
+
+void obj_set_transient(object *o, bool transient)
+{
+    check(o, "set transient");
+    o->transient = transient ? 1 : 0;
+    if (transient) o->fleeting = 1;   /* and its edits are nobody's history */
+}
+
+bool obj_is_transient(const object *o)
+{
+    return o && o->magic == OBJ_MAGIC && o->transient;
 }

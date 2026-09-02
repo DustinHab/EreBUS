@@ -29,8 +29,8 @@
 #include <eb/string.h>
 
 #define NAME_MAX    40
-#define STR_POOL    131072
-#define NSTR        2048
+#define STR_POOL    524288
+#define NSTR        4096
 #define NTYPES      4096
 #define NMEMBERS    2048
 #define NSYMS       4096
@@ -205,7 +205,7 @@ static asm_block asms[NASM];
 static u32 nasm;
 
 /* register T name __asm__("r10"): the name the declarator carried. */
-static char last_asm_name[8];
+static char last_asm_name[NAME_MAX];
 
 /* ------------------------------------------------------------------ */
 /* The compiler's whole state, static: the kernel has no malloc to    */
@@ -265,6 +265,7 @@ typedef struct {
     char   gotos[NGOTO][NAME_MAX];    /* labels named in this function */
     u32    ngotos;
     u32    statics;                   /* static locals made so far */
+    char   text_section[16];          /* where functions go: code, or user under the pragma */
 
     /* initializers being built */
     u8     ibuf[INIT_MAX];
@@ -298,7 +299,7 @@ static void cpy(char *d, const char *s)
 
 static bool same(const char *a, const char *b) { return strcmp(a, b) == 0; }
 
-void global_add(const char *label, struct type *t, bool has_init, bool is_extern);
+void global_add(const char *label, struct type *t, bool has_init, bool is_extern, bool is_static, u32 align);
 
 /* ------------------------------------------------------------------ */
 /* Doubles without a vector unit                                       */
@@ -1025,7 +1026,27 @@ static void directive(void)
         return;
     }
     if (same(word, "error")) { fail("#error:", line + i); return; }
-    if (same(word, "pragma") || same(word, "line") || same(word, "warning")) return;
+    if (same(word, "pragma")) {
+        /* #pragma clang section text = "...": functions go to the
+         * named section from here on -- the kernel's ring-3 programs
+         * live in .user. An empty name brings them back to the code. */
+        const char *p = line + i;
+        const char *tx = NULL;
+        for (u32 k = 0; p[k]; k++)
+            if (p[k] == 't' && p[k + 1] == 'e' && p[k + 2] == 'x' && p[k + 3] == 't' && (k == 0 || p[k - 1] == ' ')) { tx = p + k + 4; break; }
+        if (tx) {
+            while (*tx == ' ' || *tx == '=') tx++;
+            if (*tx == '"') {
+                tx++;
+                bool user = false;
+                for (u32 k = 0; tx[k] && tx[k] != '"'; k++)
+                    if (tx[k] == 'u' && tx[k + 1] == 's' && tx[k + 2] == 'e' && tx[k + 3] == 'r') user = true;
+                cpy(C.text_section, user ? "user" : "code");
+            }
+        }
+        return;
+    }
+    if (same(word, "line") || same(word, "warning")) return;
     fail("i do not know the directive", word);
 }
 
@@ -1087,6 +1108,19 @@ static u32 macro_args(char args[MPARAMS][MACRO_TEXT])
     for (;;) {
         i32 c = getc_();
         if (c < 0) { fail("a macro's arguments never close", NULL); return 0; }
+        if (c == '\'' || c == '"') {
+            /* a letter or a string: its commas and parentheses are its own */
+            i32 q = c;
+            if (k < MACRO_TEXT - 1) args[n][k++] = (char)c;
+            for (;;) {
+                c = getc_();
+                if (c < 0) { fail("a macro's arguments never close", NULL); return 0; }
+                if (k < MACRO_TEXT - 1) args[n][k++] = (char)c;
+                if (c == '\\') { c = getc_(); if (c >= 0 && k < MACRO_TEXT - 1) args[n][k++] = (char)c; continue; }
+                if (c == q) break;
+            }
+            continue;
+        }
         if (c == '(' ) depth++;
         if (c == ')') { if (depth == 0) break; depth--; }
         if (c == ',' && depth == 0) {
@@ -1447,6 +1481,33 @@ static type *common_type(type *a, type *b)
     return uns ? C.t_uint : C.t_int;
 }
 
+/* A c name as the assembler's label. Names are kept as they are, so
+ * that c and assembly meet on the same words -- kmain is kmain; the
+ * few that read as a register get an underscore after them. */
+static const char *symname(const char *nm)
+{
+    static const char *const regs[] = {
+        "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+        "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi",
+        "ax", "cx", "dx", "bx", "sp", "bp", "si", "di",
+        "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil",
+        "cr0", "cr2", "cr3", "cr4", "cr8", "es", "cs", "ss", "ds", "fs", "gs", NULL };
+    static char bufs[2][NAME_MAX + 2];
+    static u32 which;
+    bool hit = false;
+    for (u32 i = 0; regs[i] && !hit; i++) if (same(nm, regs[i])) hit = true;
+    if (!hit && nm[0] == 'r' && nm[1] >= '0' && nm[1] <= '9') hit = true;            /* r8 .. r15d */
+    if (!hit && nm[0] == 'x' && nm[1] == 'm' && nm[2] == 'm' && nm[3] >= '0' && nm[3] <= '9') hit = true;
+    if (!hit) return nm;
+    char *b = bufs[which];
+    which ^= 1;
+    u32 k = 0;
+    while (nm[k] && k < NAME_MAX - 1) { b[k] = nm[k]; k++; }
+    b[k++] = '_';
+    b[k] = 0;
+    return b;
+}
+
 /* ------------------------------------------------------------------ */
 /* Symbols, scoped                                                     */
 /* ------------------------------------------------------------------ */
@@ -1796,7 +1857,10 @@ static bool is_typename(void)
     return C.cur.kind == TK_IDENT && is_typename_word(C.cur.text);
 }
 
-/* __attribute__((...)): packed matters, the rest is heard and let go. */
+/* __attribute__((...)): packed and aligned(n) matter, the rest is
+ * heard and let go. */
+static u32 last_aligned;              /* aligned(n) most recently read */
+
 static bool skip_one_attribute(void)
 {
     bool packed = false;
@@ -1807,6 +1871,13 @@ static bool skip_one_attribute(void)
     i32 depth = 2;
     while (depth > 0 && C.cur.kind != TK_EOF && !C.bad) {
         if (is_kw("packed") || is_kw("__packed__")) packed = true;
+        if ((is_kw("aligned") || is_kw("__aligned__")) && nxt_is("(")) {
+            advance();
+            advance();
+            depth++;
+            last_aligned = (u32)const_eval(assign());
+            continue;
+        }
         if (is("(")) depth++;
         if (is(")")) depth--;
         advance();
@@ -1817,6 +1888,7 @@ static bool skip_one_attribute(void)
 static void skip_attributes(void)
 {
     last_asm_name[0] = 0;
+    last_aligned = 0;
     while (is_kw("__attribute__")) skip_one_attribute();
     /* __asm__("name") after a declarator: for a register variable it
      * names the register, which the inline assembly then binds to;
@@ -1828,7 +1900,7 @@ static void skip_attributes(void)
         if (C.cur.kind == TK_STR) {
             const u8 *s = C.spool + C.strs[C.cur.str].at;
             u32 k = 0;
-            while (s[k] && k < 7) { last_asm_name[k] = (char)s[k]; k++; }
+            while (s[k] && k < NAME_MAX - 1) { last_asm_name[k] = (char)s[k]; k++; }
             last_asm_name[k] = 0;
             advance();
         }
@@ -2461,17 +2533,17 @@ static bool const_val(u32 i, cval *out)
     }
     case ND_VAR: {
         sym *s = &C.syms[n->sym];
-        if (s->kind == S_FUNC) { out->label[0] = 'f'; out->label[1] = '_'; cpy(out->label + 2, s->label); out->addr = true; return true; }
-        if (s->kind == S_GLOBAL && s->ty->kind == T_ARR) { out->label[0] = 'v'; out->label[1] = '_'; cpy(out->label + 2, s->label); out->addr = true; return true; }
+        if (s->kind == S_FUNC) { cpy(out->label, symname(s->label)); out->addr = true; return true; }
+        if (s->kind == S_GLOBAL && s->ty->kind == T_ARR) { cpy(out->label, symname(s->label)); out->addr = true; return true; }
         return false;
     }
     case ND_ADDR: {
         node *l = N(n->lhs);
         if (l->kind == ND_VAR && C.syms[l->sym].kind == S_GLOBAL) {
-            out->label[0] = 'v'; out->label[1] = '_'; cpy(out->label + 2, C.syms[l->sym].label); out->addr = true; return true;
+            cpy(out->label, symname(C.syms[l->sym].label)); out->addr = true; return true;
         }
         if (l->kind == ND_VAR && C.syms[l->sym].kind == S_FUNC) {
-            out->label[0] = 'f'; out->label[1] = '_'; cpy(out->label + 2, C.syms[l->sym].label); out->addr = true; return true;
+            cpy(out->label, symname(C.syms[l->sym].label)); out->addr = true; return true;
         }
         if (l->kind == ND_MEMBER && const_val(l->lhs, &a) && a.addr) { *out = a; out->v += C.members[l->aux].offset; return true; }
         if (l->kind == ND_DEREF && const_val(l->lhs, &a)) { *out = a; return true; }
@@ -2737,9 +2809,25 @@ static void block_append(u32 b, u32 *tail, u32 s)
 /* The hidden constant a local initializer copies from. */
 static u32 init_const_emit_later(u32 size);
 
-typedef struct { u32 no; u32 size; u8 *bytes; fixup fixes[32]; u32 nfix; } init_const;
-static init_const iconsts[64];
+typedef struct { u32 no; u32 size; u8 *bytes; fixup *fixes; u32 nfix; } init_const;
+static init_const iconsts[512];
 static u8 iconst_pool[65536];
+
+/* The addresses initializers carry, all of a text's together: a table
+ * of a dozen programs with three pointers a row is ordinary. */
+#define FIXPOOL 65536
+static fixup *fixpool;
+static u32    fixpool_used;
+
+static fixup *fixups_kept(u32 n)
+{
+    if (!fixpool) fixpool = (fixup *)lang_big_alloc(sizeof(fixup) * FIXPOOL);
+    if (!fixpool || fixpool_used + n > FIXPOOL) { fail("too many addresses in initializers together", NULL); return NULL; }
+    fixup *f = fixpool + fixpool_used;
+    memcpy(f, C.fixes, sizeof(fixup) * n);
+    fixpool_used += n;
+    return f;
+}
 static u32 iconst_used;
 
 static u32 init_const_emit_later(u32 size)
@@ -2750,8 +2838,9 @@ static u32 init_const_emit_later(u32 size)
     ic->size = size;
     ic->bytes = iconst_pool + iconst_used;
     memcpy(ic->bytes, C.ibuf, size);
-    ic->nfix = C.nfix > 32 ? 32 : C.nfix;
-    memcpy(ic->fixes, C.fixes, sizeof(fixup) * ic->nfix);
+    ic->nfix = C.nfix;
+    ic->fixes = fixups_kept(C.nfix);
+    if (!ic->fixes) ic->nfix = 0;
     iconst_used += size;
     return C.ninit_consts++;
 }
@@ -2789,7 +2878,7 @@ static u32 local_decl(void)
             C.ndyn = 0;
             bool has = false;
             if (eat("=")) { initializer(t, 0, false); has = true; }
-            global_add(label, t, has, false);
+            global_add(label, t, has, false, true, 0);
         } else if (nm[0]) {
             if (t->kind == T_VOID) { fail("a variable cannot be void", nm); return b; }
             if (t->kind == T_FUNC) { sym_add(nm, t, S_FUNC); if (!eat(",")) break; continue; }
@@ -3119,8 +3208,7 @@ static void gen_addr(u32 i)
             if (s->val < 0) o("    lea rax, [rbp - %d]\n", -s->val);
             else o("    lea rax, [rbp + %d]\n", s->val);
         }
-        else if (s->kind == S_FUNC) o("    lea rax, [f_%s]\n", s->label);
-        else o("    lea rax, [v_%s]\n", s->label);
+        else o("    lea rax, [%s]\n", symname(s->label));
         return;
     }
     case ND_STR:
@@ -3250,6 +3338,15 @@ static void to_bool(type *t)
     if (is_flt(t)) o("    xorpd xmm1, xmm1\n    ucomisd xmm0, xmm1\n    setne al\n    movzx rax, al\n");
 }
 
+/* An operation on 32-bit operands answers 32 bits, the way c has it:
+ * the upper half is cut off, and for a signed int the sign is carried
+ * back up. Narrower kinds were promoted to int already. */
+static void narrow(type *t)
+{
+    if (!t || t->size != 4 || is_flt(t) || t->kind == T_PTR) return;
+    o(t->uns ? "    mov eax, eax\n" : "    movsxd rax, eax\n");
+}
+
 static void emit_binop(u8 kind, type *t)
 {
     bool uns = t && t->uns;
@@ -3370,11 +3467,12 @@ static void gen_expr(u32 i)
     case ND_NEG:
         gen_expr(n->lhs);
         if (is_flt(N(n->lhs)->ty)) o("    mov rax, %d\n    movq xmm1, rax\n    xorpd xmm0, xmm1\n", (i64)0x8000000000000000ULL);
-        else o("    neg rax\n");
+        else { o("    neg rax\n"); narrow(n->ty); }
         return;
     case ND_BITNOT:
         gen_expr(n->lhs);
         o("    not rax\n");
+        narrow(n->ty);
         return;
     case ND_NOT:
         gen_expr(n->lhs);
@@ -3485,7 +3583,7 @@ static void gen_expr(u32 i)
         if (n->lhs) { gen_expr(n->lhs); o("    push rax\n"); }
         u32 extra = gen_args(n->aux, (u32)n->val, arg64, ft->variadic);
         if (n->lhs) o("    mov rax, [rsp + %d]\n    call rax\n", (i64)extra);
-        else o("    call f_%s\n", C.syms[n->sym].label);
+        else o("    call %s\n", symname(C.syms[n->sym].label));
         if (extra) o("    add rsp, %d\n", (i64)extra);
         if (n->lhs) o("    add rsp, 8\n");
         if (!is_flt(n->ty) && !is_rec(n->ty)) cast_to(n->ty, n->ty);
@@ -3530,6 +3628,7 @@ static void gen_expr(u32 i)
                             : (lt->uns || rt->uns || is_ptr(lt) || is_ptr(rt)) ? C.t_ulong : C.t_long);
     } else {
         emit_binop(n->kind, n->ty);
+        narrow(n->ty);
     }
 }
 
@@ -4022,8 +4121,10 @@ typedef struct {
     type *ty;
     bool  has_init;
     bool  is_extern;
+    bool  is_static;                  /* this text's own: private to it */
+    u32   align;                      /* asked for with aligned(n), or 0 */
     u8   *bytes;
-    fixup fixes[16];
+    fixup *fixes;
     u32   nfix;
 } global;
 
@@ -4049,13 +4150,14 @@ static void global_fill(global *g, type *t)
     g->bytes = gpool + gpool_used;
     memcpy(g->bytes, C.ibuf, t->size);
     gpool_used += t->size;
-    g->nfix = C.nfix > 16 ? 16 : C.nfix;
-    memcpy(g->fixes, C.fixes, sizeof(fixup) * g->nfix);
+    g->nfix = C.nfix;
+    g->fixes = fixups_kept(C.nfix);
+    if (!g->fixes) g->nfix = 0;
 }
 
-void global_add(const char *label, type *t, bool has_init, bool is_extern);
+void global_add(const char *label, type *t, bool has_init, bool is_extern, bool is_static, u32 align);
 
-void global_add(const char *label, type *t, bool has_init, bool is_extern)
+void global_add(const char *label, type *t, bool has_init, bool is_extern, bool is_static, u32 align)
 {
     if (nglobals >= NGLOBALS) { fail("too many globals", NULL); return; }
     global *g = &globals[nglobals];
@@ -4064,11 +4166,13 @@ void global_add(const char *label, type *t, bool has_init, bool is_extern)
     g->ty = t;
     g->has_init = has_init;
     g->is_extern = is_extern;
+    g->is_static = is_static;
+    g->align = align;
     if (has_init) global_fill(g, t);
     nglobals++;
 }
 
-static void function(type *ft, const char *name, char pnames[NPARAMS][NAME_MAX])
+static void function(type *ft, const char *name, char pnames[NPARAMS][NAME_MAX], bool is_static)
 {
     sym *fs = sym_find(name);
     if (fs && fs->kind == S_FUNC && fs->defined) { fail("that function already has a body", name); return; }
@@ -4115,7 +4219,8 @@ static void function(type *ft, const char *name, char pnames[NPARAMS][NAME_MAX])
     if (C.bad) return;
 
     u32 frame = (u32)((C.frame + 15) / 16 * 16);
-    o("\nf_%s:\n    push rbp\n    mov rbp, rsp\n", name);
+    if (is_static) o("\nprivate %s", symname(name));
+    o("\nsection %s\n%s:\n    push rbp\n    mov rbp, rsp\n", C.text_section, symname(name));
     if (frame) o("    sub rsp, %d\n", (i64)frame);
     if (!ft->variadic) {
         u32 gi = 0, xi = 0;
@@ -4140,6 +4245,7 @@ static void function(type *ft, const char *name, char pnames[NPARAMS][NAME_MAX])
 static void toplevel(void)
 {
     C.nnodes = 1;                     /* nothing outside a function keeps its nodes */
+    last_aligned = 0;
     if (is_kw("_Static_assert")) { stmt(); return; }
     if (eat(";")) return;
     bool td, ex, st;
@@ -4173,7 +4279,7 @@ static void toplevel(void)
         if (td) {
             typedef_add(nm, t);
         } else if (t->kind == T_FUNC) {
-            if (is("{")) { function(t, nm, pnames); return; }
+            if (is("{")) { function(t, nm, pnames, st); return; }
             sym *fs = sym_find(nm);
             if (!fs || fs->kind != S_FUNC) sym_add(nm, t, S_FUNC);
         } else if (nm[0]) {
@@ -4196,6 +4302,8 @@ static void toplevel(void)
                 }
             } else {
                 sym *s = sym_add(nm, t, S_GLOBAL);
+                /* extern char x[] __asm__("y"): known here as x, laid down as y */
+                if (last_asm_name[0]) cpy(s->label, last_asm_name);
                 memset(C.ibuf, 0, t->size > INIT_MAX ? INIT_MAX : t->size + 8);
                 C.nfix = 0;
                 C.ndyn = 0;
@@ -4208,7 +4316,7 @@ static void toplevel(void)
                 }
                 if (t->kind == T_ARR && t->len == 0 && !ex) { fail("an array without a size needs values", nm); return; }
                 s->ty = t;
-                global_add(s->label, t, has, ex && !has);
+                global_add(s->label, t, has, ex && !has, st, last_aligned);
             }
         }
         if (!eat(",")) break;
@@ -4256,9 +4364,11 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
         return -1;
     }
     memset(&C, 0, sizeof(C));
+    cpy(C.text_section, "code");
     nglobals = 0;
     gpool_used = 0;
     iconst_used = 0;
+    fixpool_used = 0;
     nasm = 0;
     last_asm_name[0] = 0;
     C.find = find;
@@ -4294,26 +4404,31 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
 
     o("; made by the compiler; the source lies beside this\n");
     o("section code\n");
-    o("    mov rbp, rsp\n    call f_main\n    mov rdi, rax\n    mov rax, 0\n    syscall\n");
 
     while (C.cur.kind != TK_EOF && !C.bad) toplevel();
     if (C.bad) return -1;
     if (C.ncond) { fail_at(0, src_name, "an #if never met its #endif", NULL); return -1; }
 
+    /* A text with a main is a program: it begins at _start, which
+     * calls main with what the program starts holding and ends with
+     * main's answer. A text without one is a part of something larger,
+     * and the linker joins it to the rest. */
     sym *m = sym_find("main");
-    if (!m || m->kind != S_FUNC || !m->defined) { fail_at(0, src_name, "there is no main", NULL); return -1; }
+    if (m && m->kind == S_FUNC && m->defined)
+        o("\nsection code\n_start:\n    mov rbp, rsp\n    call main\n    mov rdi, rax\n    mov rax, 0\n    syscall\n");
 
-    /* The data: what has values first, then the strings and constants,
-     * and the merely reserved room last, so that all of it is the
-     * zeroed tail the image does not have to carry. */
+    /* The data: what has values, then the strings and constants; the
+     * room without values goes to bss, which no image carries. */
     o("\nsection data\n");
     for (u32 i = 0; i < nglobals; i++) {
         global *g = &globals[i];
         if (g->is_extern || !g->has_init) continue;
         u32 al = g->ty->align ? g->ty->align : 1;
-        if (al > 16) al = 16;
+        if (g->align > al) al = g->align;
+        if (al > 4096) al = 4096;
+        if (g->is_static) o("private %s\n", symname(g->label));
         o("    align %d\n", (i64)al);
-        o("v_%s:\n", g->label);
+        o("%s:\n", symname(g->label));
         emit_image(g->bytes, g->ty->size, g->fixes, g->nfix);
     }
     for (u32 i = 0; i < C.ninit_consts; i++) {
@@ -4326,13 +4441,16 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
             o("%s %d", k ? "," : "", (i64)C.spool[C.strs[i].at + k]);
         o("\n");
     }
+    o("\nsection bss\n");
     for (u32 i = 0; i < nglobals; i++) {
         global *g = &globals[i];
         if (g->is_extern || g->has_init) continue;
         u32 al = g->ty->align ? g->ty->align : 1;
-        if (al > 16) al = 16;
+        if (g->align > al) al = g->align;
+        if (al > 4096) al = 4096;
+        if (g->is_static) o("private %s\n", symname(g->label));
         o("    align %d\n", (i64)al);
-        o("v_%s:\n    res %d\n", g->label, (i64)(g->ty->size ? g->ty->size : 1));
+        o("%s:\n    res %d\n", symname(g->label), (i64)(g->ty->size ? g->ty->size : 1));
     }
     if (C.bad) return -1;
     return (i64)C.len;

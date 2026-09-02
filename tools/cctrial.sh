@@ -29,7 +29,7 @@ for f in $FILES; do
         kernel/net/gf25519.h kernel/gfx/*.h common/*.h 2>&1 | tail -1)
     case "$r" in
         ok:*) images=$((images + 1)); tag="image   " ;;
-        "assemble: "*"not a name laid down"*) compiled=$((compiled + 1)); tag="compiled"; r="(needs other files' names to stand alone)" ;;
+        object:*) compiled=$((compiled + 1)); tag="compiled"; r="(an object: waits for other files' names)" ;;
         *) failed=$((failed + 1)); tag="FAILED  " ;;
     esac
     printf '%s  %-28s %s\n' "$tag" "$f" "$r"

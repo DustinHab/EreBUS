@@ -112,6 +112,7 @@ static u64 align8(u64 v) { return (v + 7) & ~7ULL; }
 static bool collect(object *o)
 {
     if (!o || obj_marked(o)) return true;
+    if (obj_is_transient(o)) return true;     /* the disk's, and the tools': not history */
     if (collected_count >= SNAP_MAX_OBJECTS) return false;
 
     obj_set_mark(o, true);

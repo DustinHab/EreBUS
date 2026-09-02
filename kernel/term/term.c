@@ -29,6 +29,10 @@
 #include <eb/settings.h>
 #include <eb/asm.h>
 #include <eb/cc.h>
+#include <eb/ld.h>
+#include <eb/lang.h>
+#include <eb/fat.h>
+#include <eb/fmt.h>
 #include <eb/time.h>
 #include <eb/string.h>
 
@@ -695,6 +699,42 @@ static void cmd_letgo(term_session *s, const char *what)
 /* A text becomes a program through the assembler: the image lies
  * beside it, named after it, ready to run. What went wrong is said
  * with its line. */
+/* A name that ends in .S is a text in the gnu dialect, the way the
+ * kernel's own assembly files are written. */
+static bool gnu_named(const char *nm)
+{
+    u32 n = (u32)strlen(nm);
+    return n > 2 && nm[n - 2] == '.' && nm[n - 1] == 'S';
+}
+
+/* Lays what a text became -- an image, or an object that waits for
+ * other texts' names -- here, named after the text, and says so. */
+static void lay_made(term_session *s, const char *base, const u8 *bytes, u64 len, u32 kind)
+{
+    object *made = obj_create(TYPE_BYTES, len, 0);
+    if (!made) { t_say(s, "nothing came of it; memory is short."); return; }
+    memcpy(obj_data(made), bytes, len);
+    char nm[NAME_SHOWN + 8];
+    u32 n = 0;
+    while (base[n] && n < 19) { nm[n] = base[n]; n++; }
+    const char *tail = kind == LANG_IMAGE ? " code" : " object";
+    for (u32 i = 0; tail[i]; i++) nm[n++] = tail[i];
+    nm[n] = 0;
+    i64 at = lay_here(s, made, CAP_READ | CAP_WRITE | CAP_GRANT, nm);
+    obj_release(made);
+    if (at < 0) { t_say(s, "no room to lay it here."); return; }
+    t_puts(s, nm);
+    t_puts(s, "  lies beside it: ");
+    t_dec(s, len);
+    if (kind == LANG_IMAGE) { t_say(s, " bytes of image.  'run' it."); return; }
+    char wants[120];
+    ld_object_wants(bytes, len, wants, sizeof(wants));
+    t_say(s, " bytes of object.  it waits for other texts' names:");
+    t_puts(s, "  ");
+    t_say(s, wants);
+    t_say(s, "  'link' joins objects; 'build' makes them from a list of texts.");
+}
+
 static void cmd_assemble(term_session *s, const char *what)
 {
     if (!what[0]) { t_say(s, "assemble which text?"); return; }
@@ -704,30 +744,16 @@ static void cmd_assemble(term_session *s, const char *what)
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
     if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "the image would lie here, and you may not lay things in here."); return; }
 
-    char nm[NAME_SHOWN];
-    u32 n = 0;
-    while (sp.nm[n] && n < 19) { nm[n] = sp.nm[n]; n++; }
-    const char *tail = " code";
-    for (u32 i = 0; tail[i]; i++) nm[n++] = tail[i];
-    nm[n] = 0;
-
-    static u8 image[65536];
+    u8 *out = lang_out_buffer();
+    if (!out) { t_say(s, "there is no room for the tools' tables."); return; }
     char err[120];
+    u32 kind = 0;
     const u8 *src = (const u8 *)obj_data(sp.o);
-    i64 got = asm_assemble(src, text_len(src, obj_size(sp.o)), image,
-                           sizeof(image), err, sizeof(err));
+    u64 slen = text_len(src, obj_size(sp.o));
+    i64 got = lang_build_text(src, slen, gnu_named(sp.nm) || gnu_looks(src, slen),
+                              out, LANG_OUT_MAX, &kind, err, sizeof(err));
     if (got < 0) { t_say(s, err); return; }
-
-    object *made = obj_create(TYPE_BYTES, (u64)got, 0);
-    if (!made) { t_say(s, "nothing came of it; memory is short."); return; }
-    memcpy(obj_data(made), image, (u64)got);
-    i64 at = lay_here(s, made, CAP_READ | CAP_WRITE | CAP_GRANT, nm);
-    obj_release(made);
-    if (at < 0) { t_say(s, "no room to lay the image here."); return; }
-    t_puts(s, nm);
-    t_puts(s, "  lies beside it: ");
-    t_dec(s, (u64)got);
-    t_say(s, " bytes.  'run' it.");
+    lay_made(s, sp.nm, out, (u64)got, kind);
 }
 
 /* #include "name" reaches the texts lying beside the source: the
@@ -740,9 +766,12 @@ static bool find_beside(void *ctx, const char *name, const u8 **text, u64 *len)
         object *t = obj_get_slot(holder, i);
         if (!t || obj_type(t) != TYPE_TEXT) continue;
         const char *nm = shown_name(holder, i);
+        /* <eb/types.h> asks for types.h: the way there is not a thing here */
+        const char *want = name;
+        for (const char *q = name; *q; q++) if (*q == '/') want = q + 1;
         u32 j = 0;
-        while (nm[j] && name[j] && low(nm[j]) == low(name[j])) j++;
-        if (nm[j] || name[j]) continue;
+        while (nm[j] && want[j] && low(nm[j]) == low(want[j])) j++;
+        if (nm[j] || want[j]) continue;
         *text = (const u8 *)obj_data(t);
         *len = text_len(*text, obj_size(t));
         return true;
@@ -767,12 +796,13 @@ static void cmd_compile(term_session *s, const char *what)
     while (sp.nm[n] && n < 19) { base[n] = sp.nm[n]; n++; }
     base[n] = 0;
 
-    static char text[262144];
-    static u8 image[65536];
+    char *text = lang_text_buffer();
+    u8 *out = lang_out_buffer();
+    if (!text || !out) { t_say(s, "there is no room for the tools' tables."); return; }
     char err[120];
     const u8 *src = (const u8 *)obj_data(sp.o);
     i64 got = cc_compile(src, text_len(src, obj_size(sp.o)), base,
-                         find_beside, focus(s), text, sizeof(text),
+                         find_beside, focus(s), text, LANG_TEXT_MAX,
                          err, sizeof(err));
     if (got < 0) { t_say(s, err); return; }
 
@@ -788,34 +818,250 @@ static void cmd_compile(term_session *s, const char *what)
     i64 at = lay_here(s, made, CAP_READ | CAP_WRITE | CAP_GRANT, nm);
     obj_release(made);
     if (at < 0) { t_say(s, "no room to lay the assembly here."); return; }
+    t_puts(s, nm);
+    t_puts(s, "  lies beside it: ");
+    t_dec(s, (u64)got);
+    t_say(s, " letters of assembly.");
 
-    i64 img = asm_assemble((const u8 *)text, (u64)got, image, sizeof(image),
-                           err, sizeof(err));
+    u32 kind = 0;
+    i64 img = lang_build_text((const u8 *)text, (u64)got, false, out, LANG_OUT_MAX,
+                              &kind, err, sizeof(err));
     if (img < 0) {
-        t_puts(s, nm);
-        t_say(s, "  lies beside it, but the assembler refused what the compiler made:");
+        t_say(s, "the assembler refused what the compiler made:");
         t_say(s, err);
         return;
     }
-    object *bytes = obj_create(TYPE_BYTES, (u64)img, 0);
-    if (!bytes) { t_say(s, "nothing came of it; memory is short."); return; }
-    memcpy(obj_data(bytes), image, (u64)img);
-    n = 0;
-    while (base[n]) { nm[n] = base[n]; n++; }
-    const char *t2 = " code";
-    for (u32 i = 0; t2[i]; i++) nm[n++] = t2[i];
-    nm[n] = 0;
-    at = lay_here(s, bytes, CAP_READ | CAP_WRITE | CAP_GRANT, nm);
-    obj_release(bytes);
-    if (at < 0) { t_say(s, "no room to lay the image here."); return; }
-    t_puts(s, base);
-    t_puts(s, " asm and ");
-    t_puts(s, nm);
-    t_puts(s, "  lie beside it: ");
-    t_dec(s, (u64)got);
-    t_puts(s, " letters of assembly, ");
-    t_dec(s, (u64)img);
-    t_say(s, " bytes of image.  'run' the image.");
+    lay_made(s, base, out, (u64)img, kind);
+}
+
+/* ------------------------------------------------------------------ */
+/* Linking and building                                                */
+/* ------------------------------------------------------------------ */
+
+/* The objects of a build, kept while it runs: their bytes in one
+ * arena, asked for once. */
+#define ARENA_MAX (24u * 1024 * 1024)
+#define UNITS_MAX 128
+static u8 *arena;
+static ld_unit units[UNITS_MAX];
+static char unit_names[UNITS_MAX][NAME_SHOWN];
+
+/* Lays o into the list, replacing what carries the name already. */
+static bool lay_into(object *holder, object *o, const char *nm)
+{
+    u64 n = obj_slots(holder), at = n;
+    for (u64 i = 0; i < n; i++) {
+        const char *have = obj_slot_name(holder, i);
+        if (obj_get_slot(holder, i) && have && strcmp(have, nm) == 0) { at = i; break; }
+    }
+    if (at == n) for (u64 i = 0; i < n; i++) if (!obj_get_slot(holder, i)) { at = i; break; }
+    if (at == n && !obj_grow_slots(holder, n + 1)) return false;
+    obj_set_slot(holder, at, o, CAP_READ | CAP_WRITE | CAP_GRANT);
+    obj_set_slot_name(holder, at, nm);
+    obj_touch(holder);
+    return true;
+}
+
+/* A line for the report, built from pieces and numbers. */
+static void ap(char *line, u32 *at, const char *s)
+{
+    while (*s && *at < 158) line[(*at)++] = *s++;
+    line[*at] = 0;
+}
+
+static void apd(char *line, u32 *at, u64 v)
+{
+    char d[24];
+    u32 n = 0;
+    if (v == 0) d[n++] = '0';
+    while (v) { d[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n && *at < 158) line[(*at)++] = d[--n];
+    line[*at] = 0;
+}
+
+/* Links the gathered units, into the list: a kernel when one of them
+ * lays kmain down, an image otherwise. */
+static bool link_units(object *into, const char *listname, u32 n, term_say_fn say, void *ctx)
+{
+    char line[160];
+    u32 at = 0;
+    if (n == 0) { say(ctx, "there is nothing to link in it."); return false; }
+    bool kernel = false;
+    for (u32 i = 0; i < n; i++) if (ld_object_defines(units[i].data, units[i].len, "kmain")) kernel = true;
+
+    u8 *out = lang_out_buffer();
+    if (!out) { say(ctx, "there is no room for the tools' tables."); return false; }
+    char err[160];
+    i64 got = ld_link(units, n, kernel ? LD_KERNEL : LD_PROGRAM, out, LANG_OUT_MAX, err, sizeof(err));
+    if (got < 0) { say(ctx, err); return false; }
+
+    char nm[NAME_SHOWN + 8];
+    if (kernel) {
+        const char *k = "kernel.elf";
+        u32 q = 0;
+        while (k[q]) { nm[q] = k[q]; q++; }
+        nm[q] = 0;
+    } else {
+        u32 k = 0;
+        while (listname[k] && k < 19) { nm[k] = listname[k]; k++; }
+        const char *tail = " code";
+        for (u32 i = 0; tail[i]; i++) nm[k++] = tail[i];
+        nm[k] = 0;
+    }
+    object *made = obj_create(TYPE_BYTES, (u64)got, 0);
+    if (!made) { say(ctx, "nothing came of it; memory is short."); return false; }
+    memcpy(obj_data(made), out, (u64)got);
+    obj_set_transient(made, true);    /* built things live until the next boot; write out keeps them */
+    bool ok = lay_into(into, made, nm);
+    obj_release(made);
+    if (!ok) { say(ctx, "no room to lay it in the list."); return false; }
+    kprintf("build: %s, %llu bytes from %u objects\n", nm, (u64)got, n);
+    ap(line, &at, nm);
+    ap(line, &at, "  lies in the list: ");
+    apd(line, &at, (u64)got);
+    ap(line, &at, " bytes, ");
+    apd(line, &at, n);
+    ap(line, &at, kernel ? " objects, the kernel's shape.  'write out' carries it to the disk."
+                         : " objects.  'run' it.");
+    say(ctx, line);
+    return true;
+}
+
+bool term_link_list(object *list, const char *name, term_say_fn say, void *ctx)
+{
+    u32 n = 0;
+    for (u64 i = 0; i < obj_slots(list) && n < UNITS_MAX; i++) {
+        object *t = obj_get_slot(list, i);
+        if (!t || obj_type(t) != TYPE_BYTES) continue;
+        if (!(obj_slot_rights(list, i) & CAP_READ)) continue;
+        if (!ld_object_ok((const u8 *)obj_data(t), obj_size(t))) continue;
+        const char *nm = shown_name(list, i);
+        u32 k = 0;
+        while (nm[k] && k < NAME_SHOWN - 1) { unit_names[n][k] = nm[k]; k++; }
+        unit_names[n][k] = 0;
+        units[n].data = (const u8 *)obj_data(t);
+        units[n].len = obj_size(t);
+        units[n].name = unit_names[n];
+        n++;
+    }
+    return link_units(list, name, n, say, ctx);
+}
+
+bool term_build_list(object *list, const char *name, term_say_fn say, void *ctx)
+{
+    if (!arena) arena = (u8 *)lang_big_alloc(ARENA_MAX);
+    char *text = lang_text_buffer();
+    u8 *out = lang_out_buffer();
+    if (!arena || !text || !out) { say(ctx, "there is no room for the tools' tables."); return false; }
+
+    u32 n = 0, used = 0, texts = 0;
+    char err[160];
+    char line[160];
+    for (u64 i = 0; i < obj_slots(list) && n < UNITS_MAX; i++) {
+        object *t = obj_get_slot(list, i);
+        if (!t || obj_type(t) != TYPE_TEXT) continue;
+        if (!(obj_slot_rights(list, i) & CAP_READ)) continue;
+        const char *nm = shown_name(list, i);
+        u32 nl = (u32)strlen(nm);
+        bool is_c = nl > 2 && nm[nl - 2] == '.' && nm[nl - 1] == 'c';
+        bool is_S = nl > 2 && nm[nl - 2] == '.' && (nm[nl - 1] == 'S' || nm[nl - 1] == 's');
+        if (!is_c && !is_S) continue;
+        texts++;
+
+        const u8 *src = (const u8 *)obj_data(t);
+        u64 slen = text_len(src, obj_size(t));
+        u8 *at = arena + used;
+        u64 room = ARENA_MAX - used;
+        i64 got;
+        if (is_c) {
+            i64 al = cc_compile(src, slen, nm, find_beside, list, text, LANG_TEXT_MAX, err, sizeof(err));
+            if (al < 0) { u32 q = 0; ap(line, &q, nm); ap(line, &q, ": "); ap(line, &q, err); say(ctx, line); return false; }
+            got = asm_assemble((const u8 *)text, (u64)al, at, room, err, sizeof(err));
+        } else {
+            /* the kernel's own assembly is in the gnu dialect; the
+             * text says so itself, whatever its name's case */
+            bool gnu = nm[nl - 1] == 'S' || gnu_looks(src, slen);
+            got = gnu ? asm_assemble_gnu(src, slen, at, room, err, sizeof(err))
+                      : asm_assemble(src, slen, at, room, err, sizeof(err));
+        }
+        if (got < 0) { u32 q = 0; ap(line, &q, nm); ap(line, &q, ": "); ap(line, &q, err); say(ctx, line); return false; }
+
+        u32 k = 0;
+        while (nm[k] && k < NAME_SHOWN - 1) { unit_names[n][k] = nm[k]; k++; }
+        unit_names[n][k] = 0;
+        units[n].data = at;
+        units[n].len = (u64)got;
+        units[n].name = unit_names[n];
+        n++;
+        used += (u32)((got + 15) & ~15);
+        u32 q = 0;
+        ap(line, &q, "  ");
+        ap(line, &q, nm);
+        ap(line, &q, "  ");
+        apd(line, &q, (u64)got);
+        ap(line, &q, " bytes of object");
+        say(ctx, line);
+    }
+    if (texts == 0) { say(ctx, "there is no text of c or assembly in it."); return false; }
+    return link_units(list, name, n, say, ctx);
+}
+
+static void say_to_session(void *ctx, const char *line)
+{
+    t_say((term_session *)ctx, line);
+}
+
+/* link <list>: every object in the list, joined. */
+static void cmd_link(term_session *s, const char *what)
+{
+    if (!what[0]) { t_say(s, "link which list?"); return; }
+    spot sp;
+    if (!resolve(s, what, &sp)) return;
+    if (obj_type(sp.o) != TYPE_LIST) { t_say(s, "link takes a list of objects."); return; }
+    if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
+    if (!(sp.r & CAP_WRITE)) { t_say(s, "what it makes would lie in the list, and you may not lay things in there."); return; }
+    term_link_list(sp.o, sp.nm, say_to_session, s);
+}
+
+/* build <list>: every text in the list that is c or assembly becomes
+ * an object, and the objects are linked. The headers the c includes
+ * lie in the same list. */
+static void cmd_build(term_session *s, const char *what)
+{
+    if (!what[0]) { t_say(s, "build which list?"); return; }
+    spot sp;
+    if (!resolve(s, what, &sp)) return;
+    if (obj_type(sp.o) != TYPE_LIST) { t_say(s, "build takes a list of texts."); return; }
+    if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
+    if (!(sp.r & CAP_WRITE)) { t_say(s, "what it makes would lie in the list, and you may not lay things in there."); return; }
+    term_build_list(sp.o, sp.nm, say_to_session, s);
+}
+
+/* take in <list>, write out <list>: the exchange disk's files into the
+ * list, and the list's things onto the disk -- the same two acts the
+ * chips on the disk offer. */
+static void cmd_take_in(term_session *s, const char *what)
+{
+    if (!what[0]) { t_say(s, "take in to which list?"); return; }
+    spot sp;
+    if (!resolve(s, what, &sp)) return;
+    if (obj_type(sp.o) != TYPE_LIST || !(sp.r & CAP_WRITE)) { t_say(s, "take in fills a list you may write."); return; }
+    if (!fat_present()) { t_say(s, "there is no exchange disk."); return; }
+    u32 n = fat_take_in(sp.o);
+    t_dec(s, n);
+    t_say(s, " files came in.");
+}
+
+static void cmd_write_out(term_session *s, const char *what)
+{
+    if (!what[0]) { t_say(s, "write out which list?"); return; }
+    spot sp;
+    if (!resolve(s, what, &sp)) return;
+    if (obj_type(sp.o) != TYPE_LIST || !(sp.r & CAP_READ)) { t_say(s, "write out takes a list you may read."); return; }
+    if (!fat_present()) { t_say(s, "there is no exchange disk."); return; }
+    u32 n = fat_write_out(sp.o);
+    t_dec(s, n);
+    t_say(s, " files went out.");
 }
 
 static void cmd_run(term_session *s, const char *what)
@@ -1213,6 +1459,10 @@ static void cmd_help(term_session *s)
     t_say(s, "  run <name>       run that text, or that image, as a program, here");
     t_say(s, "  assemble <name>  turn that text of instructions into an image");
     t_say(s, "  compile <name>   turn that text of c into assembly, and that into an image");
+    t_say(s, "  link <list>      join the objects in a list into one image, or a kernel");
+    t_say(s, "  build <list>     compile and assemble every text in a list, then link");
+    t_say(s, "  take in <list>   the exchange disk's files, into the list");
+    t_say(s, "  write out <list> the list's texts and bytes, onto the exchange disk");
     t_say(s, "  give <name> to <program>   hand it a reference");
     t_say(s, "  end <name>       end a running program");
     t_end(s);
@@ -1253,6 +1503,8 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "home", NULL))     cmd_home(s);
     else if (word_starts(line, "find", &rest))    cmd_find(s, rest);
     else if (word_starts(line, "read", &rest))    cmd_read(s, rest);
+    else if (word_starts(line, "write out", &rest)) cmd_write_out(s, rest);
+    else if (word_starts(line, "take in", &rest)) cmd_take_in(s, rest);
     else if (word_starts(line, "write", &rest))   cmd_write(s, rest);
     else if (word_starts(line, "make", &rest))    cmd_make(s, rest);
     else if (word_starts(line, "copy", &rest))    cmd_copy(s, rest);
@@ -1261,6 +1513,8 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "run", &rest))     cmd_run(s, rest);
     else if (word_starts(line, "assemble", &rest))cmd_assemble(s, rest);
     else if (word_starts(line, "compile", &rest)) cmd_compile(s, rest);
+    else if (word_starts(line, "link", &rest))    cmd_link(s, rest);
+    else if (word_starts(line, "build", &rest))   cmd_build(s, rest);
     else if (word_starts(line, "give", &rest))    cmd_give(s, rest);
     else if (word_starts(line, "end", &rest))     cmd_end(s, rest);
     else if (word_starts(line, "send", &rest))    cmd_send(s, rest);

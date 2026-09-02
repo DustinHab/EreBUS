@@ -130,6 +130,13 @@ void obj_touch(object *o);
 u64  obj_touches(void);
 void obj_set_fleeting(object *o, bool fleeting);
 
+/* A transient object lives until the next boot and is left out of the
+ * snapshot: what came in from the exchange disk, and what the tools
+ * build. Their persistence is the disk itself -- write out keeps them.
+ * A reference to one becomes an empty slot on the disk. */
+void obj_set_transient(object *o, bool transient);
+bool obj_is_transient(const object *o);
+
 bool obj_selftest(void);
 bool obj_collect_selftest(void);
 

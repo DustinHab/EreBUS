@@ -1,12 +1,9 @@
 ; made by the compiler; the source lies beside this
 section code
-    mov rbp, rsp
-    call f_main
-    mov rdi, rax
-    mov rax, 0
-    syscall
 
-f_from_words:
+private from_words
+section code
+from_words:
     push rbp
     mov rbp, rsp
     sub rsp, 16
@@ -24,7 +21,9 @@ f_from_words:
     pop rbp
     ret
 
-f_add:
+private add
+section code
+add:
     push rbp
     mov rbp, rsp
     sub rsp, 16
@@ -44,7 +43,9 @@ f_add:
     pop rbp
     ret
 
-f_mul:
+private mul
+section code
+mul:
     push rbp
     mov rbp, rsp
     sub rsp, 16
@@ -64,7 +65,9 @@ f_mul:
     pop rbp
     ret
 
-f_say:
+private say
+section code
+say:
     push rbp
     mov rbp, rsp
     sub rsp, 48
@@ -226,7 +229,7 @@ f_say:
     push rax
     mov rax, 1415071060
     push rax
-    lea rax, [v_console_handle]
+    lea rax, [console_handle]
     mov rax, [rax]
     push rax
     mov rax, 2
@@ -273,7 +276,9 @@ f_say:
     pop rbp
     ret
 
-f_check:
+private check
+section code
+check:
     push rbp
     mov rbp, rsp
     sub rsp, 48
@@ -488,7 +493,7 @@ f_check:
     pop rdi
     movsx rax, al
     mov byte [rdi], al
-    lea rax, [v_bad_count]
+    lea rax, [bad_count]
     mov rdi, rax
     mov rax, [rax]
     mov r8, rax
@@ -501,13 +506,15 @@ f_check:
     lea rax, [rbp - 33]
     push rax
     pop rdi
-    call f_say
+    call say
 .Lret5:
     mov rsp, rbp
     pop rbp
     ret
 
-f_sum_var:
+private sum_var
+section code
+sum_var:
     push rbp
     mov rbp, rsp
     sub rsp, 16
@@ -563,7 +570,9 @@ f_sum_var:
     pop rbp
     ret
 
-f_average:
+private average
+section code
+average:
     push rbp
     mov rbp, rsp
     sub rsp, 32
@@ -602,10 +611,12 @@ f_average:
     pop rbp
     ret
 
-f_counted:
+private counted
+section code
+counted:
     push rbp
     mov rbp, rsp
-    lea rax, [v_calls.1]
+    lea rax, [calls.1]
     mov rdi, rax
     mov rax, [rax]
     add rax, 1
@@ -618,7 +629,9 @@ f_counted:
     pop rbp
     ret
 
-f_make_pair:
+private make_pair
+section code
+make_pair:
     push rbp
     mov rbp, rsp
     sub rsp, 48
@@ -660,19 +673,20 @@ f_make_pair:
     pop rbp
     ret
 
-f_main:
+section code
+main:
     push rbp
     mov rbp, rsp
     sub rsp, 448
     mov [rbp - 8], rdi
     mov [rbp - 16], rsi
-    lea rax, [v_console_handle]
+    lea rax, [console_handle]
     push rax
     lea rax, [rbp - 8]
     mov rax, [rax]
     pop rdi
     mov [rdi], rax
-    lea rax, [v_bad_count]
+    lea rax, [bad_count]
     push rax
     mov rax, 0
     pop rdi
@@ -736,7 +750,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     lea rax, [.Ls5]
     push rax
     mov rax, 0
@@ -773,7 +787,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     lea rax, [rbp - 23]
     push rax
     mov rax, 1
@@ -884,8 +898,8 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
-    lea rax, [v_seed]
+    call check
+    lea rax, [seed]
     movzx rax, byte [rax]
     push rax
     mov rax, 7
@@ -896,7 +910,7 @@ f_main:
     movzx rax, al
     test rax, rax
     je .L37
-    lea rax, [v_seed]
+    lea rax, [seed]
     add rax, 4
     mov eax, dword [rax]
     push rax
@@ -915,7 +929,7 @@ f_main:
 .L38:
     test rax, rax
     je .L35
-    lea rax, [v_seed]
+    lea rax, [seed]
     add rax, 8
     movzx rax, word [rax]
     push rax
@@ -954,7 +968,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     lea rax, [rbp - 36]
     push rax
     mov rax, 67305985
@@ -1020,7 +1034,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     lea rax, [rbp - 40]
     push rax
     mov rax, 5
@@ -1154,7 +1168,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     lea rax, [rbp - 40]
     push rax
     mov rax, 2
@@ -1283,8 +1297,8 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
-    lea rax, [v_table]
+    call check
+    lea rax, [table]
     push rax
     mov rax, 1
     push rax
@@ -1305,7 +1319,7 @@ f_main:
     movzx rax, al
     test rax, rax
     je .L59
-    lea rax, [v_table]
+    lea rax, [table]
     push rax
     mov rax, 3
     push rax
@@ -1333,7 +1347,7 @@ f_main:
 .L60:
     test rax, rax
     je .L57
-    lea rax, [v_names]
+    lea rax, [names]
     push rax
     mov rax, 2
     push rax
@@ -1367,7 +1381,7 @@ f_main:
 .L58:
     test rax, rax
     je .L55
-    lea rax, [v_ops]
+    lea rax, [ops]
     push rax
     mov rax, 1
     push rax
@@ -1408,7 +1422,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     lea rax, [rbp - 64]
     mov rdi, rax
     lea rsi, [.Li0]
@@ -1524,7 +1538,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     mov rax, 40
     push rax
     mov rax, 30
@@ -1535,7 +1549,7 @@ f_main:
     push rax
     mov rax, 4
     push rax
-    call f_sum_var
+    call sum_var
     add rsp, 40
     push rax
     mov rax, 100
@@ -1548,7 +1562,7 @@ f_main:
     je .L67
     mov rax, 0
     push rax
-    call f_sum_var
+    call sum_var
     add rsp, 8
     push rax
     mov rax, 0
@@ -1569,7 +1583,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     lea rax, [rbp - 88]
     push rax
     mov rax, 4618441417868443648
@@ -1590,7 +1604,7 @@ f_main:
     add rsp, 8
     movsd xmm2, [rsp]
     add rsp, 8
-    call f_average
+    call average
     pop rdi
     movsd [rdi], xmm0
     mov rax, 4613915300242936300
@@ -1631,7 +1645,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     lea rax, [rbp - 92]
     push rax
     mov rax, 4612811918334230528
@@ -1736,7 +1750,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     lea rax, [rbp - 120]
     push rax
     mov rax, 0
@@ -1781,9 +1795,9 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
-    call f_counted
-    call f_counted
+    call check
+    call counted
+    call counted
     lea rax, [rbp - 122]
     push rax
     mov rax, 7
@@ -1797,7 +1811,7 @@ f_main:
     pop rdi
     movzx rax, ax
     mov word [rdi], ax
-    call f_counted
+    call counted
     push rax
     mov rax, 3
     mov rdi, rax
@@ -1875,7 +1889,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     lea rax, [rbp - 136]
     push rax
     mov rax, 0
@@ -2013,11 +2027,11 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     mov rax, 3
     push rax
     pop rdi
-    call f_from_words
+    call from_words
     push rax
     mov rax, 30
     mov rdi, rax
@@ -2030,7 +2044,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     lea rax, [rbp - 176]
     push rax
     lea rax, [rbp - 168]
@@ -2224,7 +2238,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     rdtsc
     push rax
     push rdx
@@ -2338,7 +2352,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     lea rax, [rbp - 288]
     push rax
     mov rax, 4
@@ -2350,7 +2364,7 @@ f_main:
     pop rdi
     pop rsi
     pop rdx
-    call f_make_pair
+    call make_pair
     pop rdi
     mov rcx, [rax + 0]
     mov [rdi + 0], rcx
@@ -2385,7 +2399,7 @@ f_main:
     pop rdi
     pop rsi
     pop rdx
-    call f_make_pair
+    call make_pair
     add rax, 8
     mov rax, [rax]
     push rax
@@ -2413,7 +2427,7 @@ f_main:
     pop rdi
     pop rsi
     pop rdx
-    call f_make_pair
+    call make_pair
     add rax, 16
     movzx rax, byte [rax]
     push rax
@@ -2435,7 +2449,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     lea rax, [rbp - 344]
     push rax
     lea rax, [rbp - 368]
@@ -2554,7 +2568,7 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
+    call check
     mov rax, 8
     push rax
     mov rax, 7
@@ -2573,7 +2587,7 @@ f_main:
     push rax
     mov rax, 8
     push rax
-    call f_sum_var
+    call sum_var
     add rsp, 72
     push rax
     mov rax, 36
@@ -2587,8 +2601,8 @@ f_main:
     push rax
     pop rdi
     pop rsi
-    call f_check
-    lea rax, [v_bad_count]
+    call check
+    lea rax, [bad_count]
     mov rax, [rax]
     push rax
     mov rax, 0
@@ -2602,15 +2616,15 @@ f_main:
     lea rax, [.Ls25]
     push rax
     pop rdi
-    call f_say
+    call say
     jmp .L110
 .L109:
     lea rax, [.Ls26]
     push rax
     pop rdi
-    call f_say
+    call say
 .L110:
-    lea rax, [v_bad_count]
+    lea rax, [bad_count]
     mov rax, [rax]
     jmp .Lret10
 .Lret10:
@@ -2618,25 +2632,38 @@ f_main:
     pop rbp
     ret
 
+section code
+_start:
+    mov rbp, rsp
+    call main
+    mov rdi, rax
+    mov rax, 0
+    syscall
+
 section data
+private names
     align 8
-v_names:
+names:
     dq .Ls2
     dq .Ls3
     dq .Ls4
+private table
     align 8
-v_table:
+table:
     db 10, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0
     db 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+private seed
     align 4
-v_seed:
+seed:
     db 7, 0, 0, 0, 112, 17, 1, 0, 44, 1, 0, 0
+private ops
     align 8
-v_ops:
-    dq f_add
-    dq f_mul
+ops:
+    dq add
+    dq mul
+private calls.1
     align 8
-v_calls.1:
+calls.1:
     db 0, 0, 0, 0, 0, 0, 0, 0
     align 8
 .Li0:
@@ -2680,9 +2707,11 @@ v_calls.1:
 .Ls24: db 61, 100, 0
 .Ls25: db 97, 108, 108, 32, 99, 104, 101, 99, 107, 115, 32, 111, 107, 0
 .Ls26: db 115, 111, 109, 101, 32, 99, 104, 101, 99, 107, 115, 32, 98, 97, 100, 0
+
+section bss
     align 8
-v_console_handle:
+console_handle:
     res 8
     align 8
-v_bad_count:
+bad_count:
     res 8

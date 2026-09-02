@@ -44,6 +44,14 @@ u64 term_sequence(term_session *s);
 /* The line being gathered, for a view that shows typing as it
  * happens. A feeder that has whole lines uses term_line directly. */
 const char *term_gather(term_session *s, u32 *len);
+
+/* Building, for the terminal and the shell's chip alike: every c and
+ * assembly text in the list becomes an object, the objects are linked
+ * -- a kernel when one lays down kmain, an image otherwise -- and the
+ * result lies in the list. Each line of the report goes to say. */
+typedef void (*term_say_fn)(void *ctx, const char *line);
+bool term_build_list(object *list, const char *name, term_say_fn say, void *ctx);
+bool term_link_list(object *list, const char *name, term_say_fn say, void *ctx);
 void term_key(term_session *s, char c);
 void term_rub(term_session *s);
 void term_clear_line(term_session *s);
