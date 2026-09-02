@@ -644,10 +644,69 @@ static void ensure_page(object *root, const char *name,
     journal_says("system", note);
 }
 
+/* The compiler's page: c as this machine speaks it, and a program
+ * in it. Stand on the page, press compile, run what it made. */
+static const char compiler_text[] =
+    "/* the compiler: c, the way this machine speaks it.\n"
+    " *\n"
+    " * a program is a text like this one. stand on it, press\n"
+    " * compile: beside it lands the assembly it became, to be read,\n"
+    " * and the image that runs. main is called with the two things\n"
+    " * a program starts holding, and its answer is the exit code.\n"
+    " *\n"
+    " * types: char (1 byte), int (4), long (8), unsigned ones,\n"
+    " * pointers, arrays, struct, typedef, enum. arithmetic is done\n"
+    " * in 64 bits and cut to size on the way into a variable.\n"
+    " * functions take six arguments at most; pointers to them work.\n"
+    " * if else while for do switch break continue return.\n"
+    " * the operators of c, with c's precedence; sizeof; casts.\n"
+    " * #define NAME words, #include \"name\" (a text beside this\n"
+    " * one), #ifdef #ifndef #else #endif. comments both ways.\n"
+    " * syscall(nr, a0, a1, a2, a3, a4) is the door to the kernel;\n"
+    " * the machine page names the calls.\n"
+    " *\n"
+    " * not here: unions, bit fields, floating point, varargs,\n"
+    " * function-like macros, #if with arithmetic, goto. the kernel\n"
+    " * needs some of those; that is the honest distance to go.\n"
+    " */\n"
+    "\n"
+    "#define SEND 2\n"
+    "#define TEXT 0x54584554\n"
+    "\n"
+    "long say(long console, char *s)\n"
+    "{\n"
+    "    long w[3];\n"
+    "    char *b = (char *)w;\n"
+    "    long i;\n"
+    "    for (i = 0; i < 24; i++) b[i] = ' ';\n"
+    "    for (i = 0; i < 24 && s[i]; i++) b[i] = s[i];\n"
+    "    return syscall(SEND, console, TEXT, w[0], w[1], w[2]);\n"
+    "}\n"
+    "\n"
+    "long sum_to(long n)\n"
+    "{\n"
+    "    long s = 0;\n"
+    "    while (n > 0) s += n--;\n"
+    "    return s;\n"
+    "}\n"
+    "\n"
+    "long main(long console, long inbox)\n"
+    "{\n"
+    "    char digits[24];\n"
+    "    long v = sum_to(100);\n"
+    "    long i = 23;\n"
+    "    digits[i] = 0;\n"
+    "    do { digits[--i] = '0' + v % 10; v /= 10; } while (v);\n"
+    "    say(console, \"hello from c\");\n"
+    "    say(console, digits + i);\n"
+    "    return 0;\n"
+    "}\n";
+
 static void ensure_language(object *root)
 {
     ensure_page(root, "the language", lang_text, sizeof(lang_text), 2048);
     ensure_page(root, "the machine", machine_text, sizeof(machine_text), 3000);
+    ensure_page(root, "the compiler", compiler_text, sizeof(compiler_text), 3000);
 }
 
 /* Rewrites the activity table once a second. Between rewrites it only

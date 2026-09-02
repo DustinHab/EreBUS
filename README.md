@@ -636,9 +636,25 @@ built binary.
   nothing about the rules, only about who wrote the code. The honest
   edge: the kernel itself is C, and a C compiler is a project of its
   own; until one exists, the kernel is built outside and everything
-  above it can be built inside. The classic way to close that gap is
-  to write the compiler here, in this assembler, which is exactly
-  what the assembler is for.
+  above it can be built inside.
+* **The compiler.** C lives in the system now, in the shape a person
+  writes it: char, int and long, signed or not; pointers, arrays,
+  structs, typedefs, enums; functions with up to six parameters and
+  pointers to them; the operators with their precedence; if, while,
+  for, do, switch, break, continue, return; sizeof and casts;
+  #define, #include of a text lying beside the source, #ifdef and
+  its kin. "compile" on a text lays the assembly it became beside
+  it -- to be read, which is the difference between a tool and a
+  trick -- and the image beside that, through the same assembler.
+  No library comes with it: main is called with the two handles a
+  program starts holding, and syscall(nr, ...) is the door to the
+  kernel. The page "the compiler" is the contract and a program at
+  once; compiled and run, it says hello and the sum it worked out.
+  Honest edges, on the page as well: arithmetic is done in 64 bits
+  and cut to size on the way into a variable; no unions, bit fields,
+  floating point, varargs, function-like macros, #if with arithmetic
+  or goto yet. The kernel needs some of those, so the kernel is still
+  built outside -- but the distance is now a list, not a wall.
 * **The door.** The terminal reached over the network, by real ssh,
   so the client anyone already has can knock: version 2,
   curve25519-sha256 for the exchange, ssh-ed25519 for the host's

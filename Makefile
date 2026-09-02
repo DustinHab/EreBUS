@@ -111,6 +111,7 @@ KERN_C   := kernel/main.c \
             kernel/net/ssh.c \
             kernel/lib/base64.c \
             kernel/lang/asm.c \
+            kernel/lang/cc.c \
             kernel/term/term.c \
             kernel/user/runner.c \
             kernel/user/foreman.c \

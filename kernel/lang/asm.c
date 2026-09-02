@@ -527,6 +527,41 @@ static void do_movzx(as *a, operand *d, operand *s)
     else modrm_rr(a, d->reg, s->reg);
 }
 
+/* movsx widens a byte with its sign, movsxd a doubleword: what a
+ * compiler needs to load a char or an int into a full register. */
+static void do_movsx(as *a, operand *d, operand *s, bool dword)
+{
+    if (d->kind != OP_REG || d->size != 64) {
+        fail(a, dword ? "movsxd wants a 64-bit register first"
+                      : "movsx wants a 64-bit register first", NULL);
+        return;
+    }
+    u8 want = dword ? 32 : 8;
+    bool ok = (s->kind == OP_REG && s->size == want) ||
+              (s->kind == OP_MEM && s->size == want);
+    if (!ok) {
+        fail(a, dword ? "movsxd takes a doubleword: a 32-bit register, or dword [..]"
+                      : "movsx takes a byte: a byte register, or byte [..]", NULL);
+        return;
+    }
+    u8 base = s->kind == OP_MEM ? (s->base < 0 ? 0 : (u8)s->base) : s->reg;
+    rex(a, true, d->reg, 0, base, byte_needs_rex(s, 8));
+    if (dword) emit8(a, 0x63);
+    else { emit8(a, 0x0F); emit8(a, 0xBE); }
+    if (s->kind == OP_MEM) mem_tail(a, d->reg, s, 0);
+    else modrm_rr(a, d->reg, s->reg);
+}
+
+/* setcc: a byte register becomes 1 or 0 after a compare. */
+static void do_setcc(as *a, u8 cc, operand *d)
+{
+    if (d->kind != OP_REG || d->size != 8) { fail(a, "set.. wants a byte register", NULL); return; }
+    rex(a, false, 0, 0, d->reg, byte_needs_rex(d, 8));
+    emit8(a, 0x0F);
+    emit8(a, (u8)(0x90 + (cc - 0x80)));
+    modrm_rr(a, 0, d->reg);
+}
+
 static void do_lea(as *a, operand *d, operand *s)
 {
     if (d->kind != OP_REG || d->size != 64 || s->kind != OP_MEM) {
@@ -728,10 +763,13 @@ static void assemble_line(as *a, const char *s, u32 n)
     if (word_is(mn, ml, "nop"))     { if (nops) goto count; emit8(a, 0x90); return; }
     if (word_is(mn, ml, "cqo"))     { if (nops) goto count; emit8(a, 0x48); emit8(a, 0x99); return; }
     if (word_is(mn, ml, "cdq"))     { if (nops) goto count; emit8(a, 0x99); return; }
+    if (word_is(mn, ml, "cdqe"))    { if (nops) goto count; emit8(a, 0x48); emit8(a, 0x98); return; }
 
     if (nops == 2) {
         if (word_is(mn, ml, "mov"))   { do_mov(a, &d, &sr); return; }
         if (word_is(mn, ml, "movzx")) { do_movzx(a, &d, &sr); return; }
+        if (word_is(mn, ml, "movsx")) { do_movsx(a, &d, &sr, false); return; }
+        if (word_is(mn, ml, "movsxd")){ do_movsx(a, &d, &sr, true); return; }
         if (word_is(mn, ml, "lea"))   { do_lea(a, &d, &sr); return; }
         if (word_is(mn, ml, "add"))   { arith(a, 0, &d, &sr); return; }
         if (word_is(mn, ml, "or"))    { arith(a, 1, &d, &sr); return; }
@@ -789,6 +827,12 @@ static void assemble_line(as *a, const char *s, u32 n)
         }
         for (u32 k = 0; k < sizeof(jccs) / sizeof(jccs[0]); k++)
             if (word_is(mn, ml, jccs[k].nm)) { jump_rel(a, jccs[k].cc, true, &d); return; }
+
+        /* set.. shares the jump's condition names: sete is je's. */
+        if (ml > 3 && mn[0] == 's' && mn[1] == 'e' && mn[2] == 't') {
+            for (u32 k = 0; k < sizeof(jccs) / sizeof(jccs[0]); k++)
+                if (word_is(mn + 3, ml - 3, jccs[k].nm + 1)) { do_setcc(a, jccs[k].cc, &d); return; }
+        }
     }
 
 count:

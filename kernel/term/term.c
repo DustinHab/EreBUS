@@ -28,6 +28,7 @@
 #include <eb/standard.h>
 #include <eb/settings.h>
 #include <eb/asm.h>
+#include <eb/cc.h>
 #include <eb/time.h>
 #include <eb/string.h>
 
@@ -729,6 +730,92 @@ static void cmd_assemble(term_session *s, const char *what)
     t_say(s, " bytes.  'run' it.");
 }
 
+/* #include "name" reaches the texts lying beside the source: the
+ * holder the standpoint is on, searched by petname. */
+static bool find_beside(void *ctx, const char *name, const u8 **text, u64 *len)
+{
+    object *holder = (object *)ctx;
+    u64 n = obj_slots(holder);
+    for (u64 i = 0; i < n; i++) {
+        object *t = obj_get_slot(holder, i);
+        if (!t || obj_type(t) != TYPE_TEXT) continue;
+        const char *nm = shown_name(holder, i);
+        if (strcmp(nm, name) != 0) continue;
+        *text = (const u8 *)obj_data(t);
+        *len = text_len(*text, obj_size(t));
+        return true;
+    }
+    return false;
+}
+
+/* A text of c becomes a text of assembly beside it, and that becomes
+ * an image beside it too. The assembly stays: what the compiler
+ * made is there to be read. */
+static void cmd_compile(term_session *s, const char *what)
+{
+    if (!what[0]) { t_say(s, "compile which text?"); return; }
+    spot sp;
+    if (!resolve(s, what, &sp)) return;
+    if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "only a text can be compiled."); return; }
+    if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
+    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "what it makes would lie here, and you may not lay things in here."); return; }
+
+    char base[NAME_SHOWN];
+    u32 n = 0;
+    while (sp.nm[n] && n < 19) { base[n] = sp.nm[n]; n++; }
+    base[n] = 0;
+
+    static char text[262144];
+    static u8 image[65536];
+    char err[120];
+    const u8 *src = (const u8 *)obj_data(sp.o);
+    i64 got = cc_compile(src, text_len(src, obj_size(sp.o)), base,
+                         find_beside, focus(s), text, sizeof(text),
+                         err, sizeof(err));
+    if (got < 0) { t_say(s, err); return; }
+
+    object *made = obj_create(TYPE_TEXT, (u64)got + 16, 0);
+    if (!made) { t_say(s, "nothing came of it; memory is short."); return; }
+    memcpy(obj_data(made), text, (u64)got);
+    char nm[NAME_SHOWN];
+    n = 0;
+    while (base[n]) { nm[n] = base[n]; n++; }
+    const char *t1 = " asm";
+    for (u32 i = 0; t1[i]; i++) nm[n++] = t1[i];
+    nm[n] = 0;
+    i64 at = lay_here(s, made, CAP_READ | CAP_WRITE | CAP_GRANT, nm);
+    obj_release(made);
+    if (at < 0) { t_say(s, "no room to lay the assembly here."); return; }
+
+    i64 img = asm_assemble((const u8 *)text, (u64)got, image, sizeof(image),
+                           err, sizeof(err));
+    if (img < 0) {
+        t_puts(s, nm);
+        t_say(s, "  lies beside it, but the assembler refused what the compiler made:");
+        t_say(s, err);
+        return;
+    }
+    object *bytes = obj_create(TYPE_BYTES, (u64)img, 0);
+    if (!bytes) { t_say(s, "nothing came of it; memory is short."); return; }
+    memcpy(obj_data(bytes), image, (u64)img);
+    n = 0;
+    while (base[n]) { nm[n] = base[n]; n++; }
+    const char *t2 = " code";
+    for (u32 i = 0; t2[i]; i++) nm[n++] = t2[i];
+    nm[n] = 0;
+    at = lay_here(s, bytes, CAP_READ | CAP_WRITE | CAP_GRANT, nm);
+    obj_release(bytes);
+    if (at < 0) { t_say(s, "no room to lay the image here."); return; }
+    t_puts(s, base);
+    t_puts(s, " asm and ");
+    t_puts(s, nm);
+    t_puts(s, "  lie beside it: ");
+    t_dec(s, (u64)got);
+    t_puts(s, " letters of assembly, ");
+    t_dec(s, (u64)img);
+    t_say(s, " bytes of image.  'run' the image.");
+}
+
 static void cmd_run(term_session *s, const char *what)
 {
     if (!what[0]) { t_say(s, "run which text, or which image?"); return; }
@@ -1123,6 +1210,7 @@ static void cmd_help(term_session *s)
     t_say(s, "programs");
     t_say(s, "  run <name>       run that text, or that image, as a program, here");
     t_say(s, "  assemble <name>  turn that text of instructions into an image");
+    t_say(s, "  compile <name>   turn that text of c into assembly, and that into an image");
     t_say(s, "  give <name> to <program>   hand it a reference");
     t_say(s, "  end <name>       end a running program");
     t_end(s);
@@ -1170,6 +1258,7 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "let go", &rest))  cmd_letgo(s, rest);
     else if (word_starts(line, "run", &rest))     cmd_run(s, rest);
     else if (word_starts(line, "assemble", &rest))cmd_assemble(s, rest);
+    else if (word_starts(line, "compile", &rest)) cmd_compile(s, rest);
     else if (word_starts(line, "give", &rest))    cmd_give(s, rest);
     else if (word_starts(line, "end", &rest))     cmd_end(s, rest);
     else if (word_starts(line, "send", &rest))    cmd_send(s, rest);

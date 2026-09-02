@@ -18,6 +18,7 @@
 #include <eb/fat.h>
 #include <eb/term.h>
 #include <eb/asm.h>
+#include <eb/cc.h>
 #include <eb/html.h>
 #include <eb/string.h>
 #include <eb/time.h>
@@ -212,7 +213,8 @@ typedef enum {
     HOT_COPY,        /* lay a copy of the focused thing beside it */
     HOT_TFIND,       /* search inside the focused text */
     HOT_LINE_SAY,    /* send what the bottom row has gathered */
-    HOT_ASSEMBLE     /* turn the focused text into a program image */
+    HOT_ASSEMBLE,    /* turn the focused text into a program image */
+    HOT_COMPILE      /* turn the focused text of c into assembly and an image */
 } hot_kind;
 
 typedef struct {
@@ -382,6 +384,40 @@ static char to_lower(char c);
  * two hundred letters, and so does this. */
 static char say_buf[201];
 static u32  say_len;
+
+static u64 text_len(const u8 *d, u64 size);
+
+/* Lays a fresh object into a holder: first hole or a grown one. The
+ * slot takes its own reference. */
+static bool lay_beside(object *holder, object *made, u32 rights, const char *nm)
+{
+    u64 slots = obj_slots(holder), spot = slots;
+    for (u64 i = 0; i < slots; i++)
+        if (!obj_get_slot(holder, i)) { spot = i; break; }
+    if (spot == slots && !obj_grow_slots(holder, slots + 1)) return false;
+    obj_set_slot(holder, spot, made, rights);
+    obj_set_slot_name(holder, spot, nm);
+    obj_touch(holder);
+    return true;
+}
+
+/* #include "name" reaches the texts lying beside the source, in the
+ * holder one came through, by petname. */
+static bool find_beside_in(void *ctx, const char *name, const u8 **text, u64 *len)
+{
+    object *holder = (object *)ctx;
+    for (u64 i = 0; i < obj_slots(holder); i++) {
+        object *t = obj_get_slot(holder, i);
+        if (!t || obj_type(t) != TYPE_TEXT) continue;
+        const char *nm = obj_slot_name(holder, i);
+        if (!nm) nm = obj_name(t);
+        if (!nm || strcmp(nm, name) != 0) continue;
+        *text = (const u8 *)obj_data(t);
+        *len = text_len(*text, obj_size(t));
+        return true;
+    }
+    return false;
+}
 
 /* Says the gathered word and clears the row. Enter and the send word
  * both land here, so the click and the key cannot drift apart. */
@@ -3041,6 +3077,12 @@ static void draw_all(void)
             text_at(chip_x, 14, sw - PAD, "assemble", lit ? C_TEXT : C_ACCENT);
             hot_add(chip_x - 4, 11, 8 * GLYPH_W + 8, ROW, HOT_ASSEMBLE, 0);
             chip_x += 10 * GLYPH_W;
+
+            lit = is_hovered(HOT_COMPILE, 0);
+            if (lit) fb_rect(chip_x - 4, 11, 7 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(chip_x, 14, sw - PAD, "compile", lit ? C_TEXT : C_ACCENT);
+            hot_add(chip_x - 4, 11, 7 * GLYPH_W + 8, ROW, HOT_COMPILE, 0);
+            chip_x += 9 * GLYPH_W;
         }
 
         /* The exchange disk's list carries its two acts: reading the
@@ -4455,10 +4497,13 @@ static void act_on(const hot_region *r)
         say_commit();
         break;
 
-    case HOT_ASSEMBLE: {
+    case HOT_ASSEMBLE:
+    case HOT_COMPILE: {
         /* The text becomes an image, laid beside it in the holder one
-         * came through, named after it. What went wrong is said in
-         * the journal with its line, and nothing is laid. */
+         * came through, named after it -- through the compiler first
+         * when it is c, and then the assembly lies there too, to be
+         * read. What went wrong is said in the journal with its line,
+         * and nothing is laid. */
         object *f = focus();
         if (obj_type(f) != TYPE_TEXT || nav.at_generation != 0) break;
         if (nav.depth < 2) break;
@@ -4466,13 +4511,39 @@ static void act_on(const hot_region *r)
         if (!(nav.rights[nav.depth - 2] & CAP_WRITE)) break;
         if (obj_type(holder) == TYPE_PROGRAM) break;
 
+        char base[40];
+        label_of(holder, nav.via[nav.depth - 1], f, base, sizeof(base));
+        base[19] = 0;
+
+        static char text[262144];
         static u8 image[65536];
         char err[112];
         const u8 *src = (const u8 *)obj_data(f);
-        i64 got = asm_assemble(src, text_len(src, obj_size(f)), image,
-                               sizeof(image), err, sizeof(err));
+        u64 slen = text_len(src, obj_size(f));
+
+        if (r->kind == HOT_COMPILE) {
+            i64 got = cc_compile(src, slen, base, find_beside_in, holder,
+                                 text, sizeof(text), err, sizeof(err));
+            if (got < 0) { journal_says("compile", err); nav.redraw = true; break; }
+            object *asm_text = obj_create(TYPE_TEXT, (u64)got + 16, 0);
+            if (!asm_text) break;
+            memcpy(obj_data(asm_text), text, (u64)got);
+            char an[40];
+            u32 n = put(an, 0, base);
+            put(an, n, " asm");
+            if (!lay_beside(holder, asm_text, CAP_READ | CAP_WRITE | CAP_GRANT, an)) {
+                obj_release(asm_text);
+                break;
+            }
+            obj_release(asm_text);
+            src = (const u8 *)text;
+            slen = (u64)got;
+        }
+
+        i64 got = asm_assemble(src, slen, image, sizeof(image), err, sizeof(err));
         if (got < 0) {
-            journal_says("assemble", err);
+            journal_says(r->kind == HOT_COMPILE ? "the assembler refused what the compiler made"
+                                                : "assemble", err);
             nav.redraw = true;
             break;
         }
@@ -4480,28 +4551,16 @@ static void act_on(const hot_region *r)
         object *made = obj_create(TYPE_BYTES, (u64)got, 0);
         if (!made) break;
         memcpy(obj_data(made), image, (u64)got);
-
-        u64 slots = obj_slots(holder), spot = slots;
-        for (u64 i = 0; i < slots; i++)
-            if (!obj_get_slot(holder, i)) { spot = i; break; }
-        if (spot == slots && !obj_grow_slots(holder, slots + 1)) {
+        char nm[40];
+        u32 n = put(nm, 0, base);
+        put(nm, n, " code");
+        if (!lay_beside(holder, made, CAP_READ | CAP_WRITE | CAP_GRANT, nm)) {
             obj_release(made);
             break;
         }
-
-        char nm[40];
-        label_of(holder, nav.via[nav.depth - 1], f, nm, sizeof(nm));
-        u32 n = 0;
-        while (nm[n] && n < 19) n++;
-        const char *tail = " code";
-        for (u32 i = 0; tail[i]; i++) nm[n++] = tail[i];
-        nm[n] = 0;
-
-        obj_set_slot(holder, spot, made, CAP_READ | CAP_WRITE | CAP_GRANT);
-        obj_set_slot_name(holder, spot, nm);
         obj_release(made);
-        obj_touch(holder);
-        journal_says("assemble", "an image lies beside the text; run it");
+        journal_says(r->kind == HOT_COMPILE ? "compile" : "assemble",
+                     "an image lies beside the text; run it");
         nav.changes++;
         nav.redraw = true;
         break;
