@@ -722,9 +722,11 @@ built binary.
   history nobody asked for. Three bugs the clang build had hidden: a far return of
   doublewords where quadwords were meant, imul with a number silently
   encoded as imul with rax, and initializer address tables cut off at
-  sixteen entries. Honest edges: a struct is handed to a function by
-  pointer, never by value; there is no 128-bit type; the boot loader
-  is still built outside.
+  sixteen entries. Honest edges: there is no 128-bit type; the boot loader is still
+  built outside. A struct goes to a function by value the way one
+  comes back from it: the caller keeps a nameless copy and passes its
+  address, the callee works on that copy -- its own convention, the
+  kernel being built by nothing else.
 * **Installing.** The boot disk is a disk of its own to the kernel
   now, and "install" on a kernel's bytes -- the word in the terminal,
   the chip on the bytes -- lays it down in \erebus as kernel.new,

@@ -20,9 +20,10 @@
  * headers a program leans on. Integer arithmetic is done in 64 bits
  * and cut to size on the way into a variable.
  *
- * Not here, and said so on the compiler's own page: passing or
- * returning a struct by value, inline assembly with operands, more
- * than six arguments to a call.
+ * Structs travel by value in both directions under a convention of
+ * this compiler's own: the caller keeps a nameless copy and hands its
+ * address over, the callee works on that copy. Not here, and said so
+ * on the compiler's own page: a 128-bit type, and va_arg of a struct.
  */
 #include <eb/cc.h>
 #include <eb/lang.h>
@@ -96,6 +97,7 @@ typedef struct {
     i64   val;                        /* local: its offset below rbp; enum: its value */
     bool  defined;                    /* func: a body was seen */
     bool  hidden;                     /* its scope has closed; the slot stays */
+    bool  indirect;                   /* local: the slot holds the value's address -- a struct parameter */
     char  reg[8];                     /* register variable: the register asm binds it to */
 } sym;
 
@@ -109,7 +111,7 @@ enum {
     ND_SHL, ND_SHR, ND_EQ, ND_NE, ND_LT, ND_LE,
     ND_LAND, ND_LOR, ND_NOT, ND_BITNOT, ND_NEG,
     ND_ASSIGN, ND_COND, ND_ADDR, ND_DEREF, ND_MEMBER, ND_CALL,
-    ND_CAST, ND_INCDEC, ND_SYSCALL, ND_COMMA, ND_VASTART, ND_VAARG,
+    ND_CAST, ND_INCDEC, ND_SYSCALL, ND_COMMA, ND_VASTART, ND_VAARG, ND_BYVAL,
     ND_EXPR, ND_RETURN, ND_IF, ND_WHILE, ND_DO, ND_FOR, ND_BLOCK,
     ND_BREAK, ND_CONTINUE, ND_SWITCH, ND_CASE, ND_DEFAULT,
     ND_GOTO, ND_LABEL, ND_ASM, ND_MEMCPY, ND_ZERO
@@ -1782,6 +1784,20 @@ static void add_type(u32 i)
             else if (!is_flt(want) && is_num(want) && is_flt(an->ty)) rep = mk_cast(a, C.t_long);
             else if (want->kind == T_FLOAT && an->ty->kind == T_DOUBLE) rep = a;
             else if (want->boolean && an->ty && !an->ty->boolean) rep = mk_cast(a, want);   /* 0 or 1 on arrival */
+            else if (is_rec(want) && an->kind != ND_BYVAL) {
+                if (!is_rec(an->ty) || an->ty->size != want->size) { fail_at(n->line, NULL, "this parameter takes a struct", NULL); break; }
+                if (!C.fn_ty) { fail_at(n->line, NULL, "a struct handed over outside a function is not here", NULL); break; }
+                /* By value means the callee gets a copy of its own: a
+                 * nameless local of the caller's, filled at the call,
+                 * whose address travels like any other argument. */
+                sym *tmp = sym_add("", want, S_LOCAL);
+                tmp->val = local_slot(want);
+                u32 bv = mk_un(ND_BYVAL, a);
+                N(bv)->sym = (u32)(tmp - C.syms);
+                N(bv)->ty = ptr_to(want);
+                N(bv)->val = (i64)want->size;
+                rep = bv;
+            }
             if (rep && rep != a) {
                 N(rep)->next = an->next;
                 an->next = 0;
@@ -2095,7 +2111,6 @@ static type *func_suffix(type *ret, char pnames[NPARAMS][NAME_MAX])
         skip_attributes();
         if (pt->kind == T_ARR) pt = ptr_to(pt->base);
         if (pt->kind == T_FUNC) pt = ptr_to(pt);
-        if (is_rec(pt)) { fail("a struct is passed by pointer here, not by value", nm); return f; }
         if (pnames) cpy(pnames[f->nparams], nm);
         f->params[f->nparams++] = pt;
         if (!eat(",")) break;
@@ -3214,8 +3229,14 @@ static void gen_addr(u32 i)
         sym *s = &C.syms[n->sym];
         if (s->kind == S_LOCAL) {
             /* Below rbp for the function's own; above it for the
-             * arguments the caller left on the stack. */
-            if (s->val < 0) o("    lea rax, [rbp - %d]\n", -s->val);
+             * arguments the caller left on the stack. A struct
+             * parameter's slot holds the address of the caller's copy,
+             * and that copy is the parameter. */
+            if (s->indirect) {
+                if (s->val < 0) o("    mov rax, [rbp - %d]\n", -s->val);
+                else o("    mov rax, [rbp + %d]\n", s->val);
+            }
+            else if (s->val < 0) o("    lea rax, [rbp - %d]\n", -s->val);
             else o("    lea rax, [rbp + %d]\n", s->val);
         }
         else o("    lea rax, [%s]\n", symname(s->label));
@@ -3623,6 +3644,16 @@ static void gen_expr(u32 i)
         o("    mov rdi, rax\n    mov rax, [rdi]\n    add qword [rdi], 8\n");
         if (is_flt(n->ty)) o("    movsd xmm0, [rax]\n");
         else load(n->ty);
+        return;
+    }
+    case ND_BYVAL: {
+        /* The record's address in rax; its bytes into the caller's
+         * nameless copy; the copy's address is the argument. */
+        i64 off = -C.syms[n->sym].val;
+        gen_expr(n->lhs);
+        o("    lea rdi, [rbp - %d]\n", off);
+        store(N(n->lhs)->ty);
+        o("    lea rax, [rbp - %d]\n", off);
         return;
     }
     default:
@@ -4218,13 +4249,17 @@ static void function(type *ft, const char *name, char pnames[NPARAMS][NAME_MAX],
         hidden = 1;
     }
     for (u32 p = 0; p < ft->nparams; p++) {
-        params[p] = sym_add(pnames[p][0] ? pnames[p] : "?", ft->params[p], S_LOCAL);
+        type *pt = ft->params[p];
+        params[p] = sym_add(pnames[p][0] ? pnames[p] : "?", pt, S_LOCAL);
         /* A variadic function's arguments all lie above the frame, in
          * one row; anyone else's first six arrive in registers and
-         * are given a home below it. */
+         * are given a home below it. A struct arrives as the address
+         * of the caller's copy, and the parameter is reached through
+         * it. */
+        params[p]->indirect = is_rec(pt);
         if (ft->variadic) params[p]->val = 16 + (i64)p * 8;
         else if (p + hidden >= REGARGS) params[p]->val = 16 + (i64)(p + hidden - REGARGS) * 8;
-        else params[p]->val = local_slot(ft->params[p]);
+        else params[p]->val = local_slot(is_rec(pt) ? ptr_to(pt) : pt);
     }
     expect("{");
     u32 body = block();
@@ -4245,6 +4280,7 @@ static void function(type *ft, const char *name, char pnames[NPARAMS][NAME_MAX],
             i64 off = -params[p]->val;
             if (pt->kind == T_DOUBLE) o("    movsd [rbp - %d], %s\n", off, argx[xi++]);
             else if (pt->kind == T_FLOAT) o("    cvtsd2ss %s, %s\n    movss dword [rbp - %d], %s\n", argx[xi], argx[xi], off, argx[xi]), xi++;
+            else if (is_rec(pt)) o("    mov [rbp - %d], %s\n", off, arg64[gi++]);     /* the copy's address */
             else if (pt->size == 1) o("    mov byte [rbp - %d], %s\n", off, arg8[gi++]);
             else if (pt->size == 2) o("    mov word [rbp - %d], %s\n", off, arg16[gi++]);
             else if (pt->size == 4) o("    mov dword [rbp - %d], %s\n", off, arg32[gi++]);

@@ -123,6 +123,29 @@ static pair_t make_pair(long a, long b)
     return p;
 }
 
+typedef struct { long a, b, c; } triple_t;
+typedef struct { char k; } tiny_t;
+
+/* the callee's changes stay with its own copy */
+static long sum_triple(triple_t t, long k)
+{
+    t.a += k;
+    return t.a + t.b + t.c;
+}
+
+static triple_t bump(triple_t t)
+{
+    t.c++;
+    return t;
+}
+
+static long many(long a, long b, long c, long d, long e, triple_t t, long f)
+{
+    return a + b + c + d + e + f + t.a * 100 + t.b * 10 + t.c;
+}
+
+static long tiny(tiny_t t) { return t.k; }
+
 long main(long console, long inbox)
 {
     console_handle = console;
@@ -231,6 +254,13 @@ again:
 
     /* 21: eight arguments to a variadic function */
     check(21, sum_var(8, 1, 2, 3, 4, 5, 6, 7, 8) == 36);
+
+    /* 22: a struct handed over by value; what the callee changes is its copy */
+    triple_t tr = { 1, 2, 3 };
+    check(22, sum_triple(tr, 10) == 16 && tr.a == 1 && bump(tr).c == 4 && tr.c == 3);
+
+    /* 23: by value among many arguments, past the sixth, and a one-byte one */
+    check(23, many(1, 1, 1, 1, 1, tr, 1) == 129 && tiny((tiny_t){ 7 }) == 7);
 
     if (bad_count == 0) say("all checks ok");
     else say("some checks bad");
