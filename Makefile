@@ -88,6 +88,7 @@ KERN_C   := kernel/main.c \
             kernel/obj/cap.c \
             kernel/obj/port.c \
             kernel/obj/snapshot.c \
+            kernel/obj/blob.c \
             kernel/obj/journal.c \
             kernel/obj/settings.c \
             kernel/obj/activity.c \

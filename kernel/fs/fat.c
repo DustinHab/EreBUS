@@ -608,7 +608,8 @@ static bool take_visit(const dir_entry *e, void *ctxp)
     if (!o) return false;
     if (got) memcpy(obj_data(o), filebuf, got);
     obj_set_name(o, e->name);
-    obj_set_transient(o, true);       /* the disk keeps it; the snapshot need not */
+    /* The machine's own copy from here on: it stays across boots, and
+     * the disk's version is taken again only once this one is let go. */
 
     if (list_add(ctx->into, o, e->name)) ctx->taken++;
     obj_release(o);

@@ -19,8 +19,13 @@ KEYS=$HOME/.erebus-door
 DOOR_DIR=$BUILD/door
 mkdir -p $DOOR_DIR
 DOOR_SERIAL=$DOOR_DIR/serial.log
-rm -f $DOOR_SERIAL $DOOR_DIR/store.img $DOOR_DIR/esp.img $KEYS/known_hosts
-cp $BUILD/door-store.img $DOOR_DIR/store.img
+# DOOR_KEEP=1 boots the store the last door machine left behind, for a
+# test that needs a second boot of the same machine.
+rm -f $DOOR_SERIAL $DOOR_DIR/esp.img $KEYS/known_hosts
+[ -n "$DOOR_KEEP" ] || { rm -f $DOOR_DIR/store.img; cp $BUILD/door-store.img $DOOR_DIR/store.img; }
+# DOOR_STORE_MB=<n> cuts the fresh store down, for a test that wants the
+# log of big objects to run full.
+[ -n "$DOOR_STORE_MB" ] && [ -z "$DOOR_KEEP" ] && truncate -s ${DOOR_STORE_MB}M $DOOR_DIR/store.img
 cp $BUILD/esp.img $DOOR_DIR/esp.img
 cp /usr/share/OVMF/OVMF_VARS_4M.fd $DOOR_DIR/vars.fd
 

@@ -809,12 +809,18 @@ void system_restart(void)
  * for quiet rather than saving on every keystroke means a burst of
  * typing costs one write instead of thirty, and half a second of
  * stillness is far below the point where anyone would notice. */
+static u32 taken_at_boot;         /* files the exchange disk handed over before this ran */
+
 static void persist_thread(void *arg)
 {
     (void)arg;
 
+    /* What the boot took in from the exchange disk changed the graph
+     * before anyone was counting; the first quiet moment writes it
+     * down, or a machine turned off in the meantime would come up
+     * without it. */
     u64 seen = shell_changes() + obj_touches();
-    u64 written = seen;
+    u64 written = taken_at_boot ? seen - 1 : seen;
     u64 quiet_since = time_ns();
 
     for (;;) {
@@ -1829,7 +1835,7 @@ void kmain(eb_boot_info *bi)
             }
             if (dl) {
                 disk_list = dl;
-                fat_take_in(dl);
+                taken_at_boot = fat_take_in(dl);
             }
         }
 

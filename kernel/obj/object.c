@@ -673,6 +673,11 @@ void obj_set_fleeting(object *o, bool fleeting)
     o->fleeting = fleeting ? 1 : 0;
 }
 
+bool obj_is_fleeting(const object *o)
+{
+    return o && o->magic == OBJ_MAGIC && o->fleeting;
+}
+
 void obj_set_transient(object *o, bool transient)
 {
     check(o, "set transient");

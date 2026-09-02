@@ -25,6 +25,9 @@ bool journal_create(void)
 {
     if (journal) return true;
     journal = obj_create(TYPE_TEXT, JOURNAL_BYTES, 0);
+    /* The record changes by design: it is nobody's edit, and it stays
+     * in the generation rather than costing the log an entry per save. */
+    if (journal) obj_set_fleeting(journal, true);
     if (!journal) return false;
     obj_set_name(journal, "log");
     return true;
@@ -35,6 +38,7 @@ void journal_adopt(object *o)
     if (!o || obj_type(o) != TYPE_TEXT) return;
     if (journal) obj_release(journal);
     obj_retain(o);
+    obj_set_fleeting(o, true);  /* a restored record is a record still */
     journal = o;
     sequence++;                 /* whoever displays it should look again */
 }

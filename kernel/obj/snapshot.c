@@ -3,13 +3,16 @@
  * any point in its history.
  */
 #include <eb/snapshot.h>
+#include <eb/blob.h>
 #include <eb/blk.h>
 #include <eb/pmm.h>
 #include <eb/mm.h>
 #include <eb/fmt.h>
+#include <eb/crypto.h>
 
 #define SNAP_MAGIC   0x50414E5342455245ULL   /* "EREBSNAP" */
-#define SNAP_VERSION 4u
+#define SNAP_VERSION 5u
+#define SNAP_OLDEST  4u                      /* still read: everything inline */
 
 /* A ring of slots rather than two.
  *
@@ -30,6 +33,24 @@
 #define SLOT_MAX_DATA ((u64)(SLOT_SECTORS - 1) * BLK_SECTOR_SIZE)
 
 #define SNAP_MAX_OBJECTS 4096u
+
+/* Big payloads leave the generation and go to the log.
+ *
+ * A slot holds a megabyte, and a system that keeps its own sources
+ * carries more than that. So a text or a run of bytes from this size up
+ * is written to the log of big objects instead, once, under the hash of
+ * its contents, and the generation keeps the hash and where the log had
+ * it. Two generations that share an unchanged text share one entry; an
+ * edit adds one. Pictures, and everything that changes by design, stay
+ * in the generation: they are bounded, and hashing them at every save
+ * would buy nothing. */
+#define BIG_FROM 4096u
+#define REC_BIG  0x80000000u   /* on a record's type: its payload is a big_ref */
+
+typedef struct {
+    u8  hash[32];
+    u64 lba;                      /* where the log had it; a hint */
+} big_ref;
 
 typedef struct {
     u64 magic;
@@ -69,6 +90,17 @@ static u64  buffer_bytes;
 static object *collected[SNAP_MAX_OBJECTS];
 static u32     collected_count;
 
+/* The big ones of the save at hand: hash and place, by collected index. */
+static u8  big_hash[SNAP_MAX_OBJECTS][32];
+static u64 big_lba[SNAP_MAX_OBJECTS];
+static u8  is_big[SNAP_MAX_OBJECTS];
+
+/* Every hash some generation on the disk still refers to, gathered
+ * before the log is compacted. */
+#define LIVE_MAX 8192u
+static u8  *live;
+static u32  live_count;
+
 /* ------------------------------------------------------------------ */
 
 static u32 slot_lba(u32 slot) { return SNAP_BASE_LBA + slot * SLOT_SECTORS; }
@@ -101,6 +133,19 @@ static bool ensure_buffer(void)
 
 static u64 align8(u64 v) { return (v + 7) & ~7ULL; }
 
+static bool same32(const u8 *a, const u8 *b)
+{
+    for (u32 i = 0; i < 32; i++) if (a[i] != b[i]) return false;
+    return true;
+}
+
+/* How long a record's payload is in the buffer: a big one holds only
+ * the reference, whatever its size says. */
+static u64 payload_bytes(const snap_record *r)
+{
+    return (r->type & REC_BIG) ? sizeof(big_ref) : align8(r->size);
+}
+
 /* ------------------------------------------------------------------ */
 /* Walking the graph                                                    */
 /* ------------------------------------------------------------------ */
@@ -112,7 +157,7 @@ static u64 align8(u64 v) { return (v + 7) & ~7ULL; }
 static bool collect(object *o)
 {
     if (!o || obj_marked(o)) return true;
-    if (obj_is_transient(o)) return true;     /* the disk's, and the tools': not history */
+    if (obj_is_transient(o)) return true;     /* the tools' products: not history */
     if (collected_count >= SNAP_MAX_OBJECTS) return false;
 
     obj_set_mark(o, true);
@@ -144,6 +189,128 @@ static void copy_name(char *dst, const char *src)
     for (u32 i = 0; i < OBJ_NAME_MAX - 1 && src[i]; i++) dst[i] = src[i];
 }
 
+static bool big_worthy(object *o)
+{
+    if (obj_size(o) < BIG_FROM || obj_is_fleeting(o)) return false;
+    type_id t = obj_type(o);
+    return t == TYPE_TEXT || t == TYPE_BYTES;
+}
+
+/* ------------------------------------------------------------------ */
+/* Reading headers                                                     */
+/* ------------------------------------------------------------------ */
+
+static bool read_header(u32 slot, snap_header *out)
+{
+    static u8 sector[BLK_SECTOR_SIZE];
+    if (!blk_read(slot_lba(slot), 1, sector)) return false;
+
+    const snap_header *h = (const snap_header *)sector;
+    if (h->magic != SNAP_MAGIC) return false;
+    if (h->version < SNAP_OLDEST || h->version > SNAP_VERSION) return false;
+    if (h->data_bytes > SLOT_MAX_DATA) return false;
+    if (h->object_count > SNAP_MAX_OBJECTS) return false;
+
+    *out = *h;
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Room in the log                                                     */
+/* ------------------------------------------------------------------ */
+
+static bool ensure_live(void)
+{
+    if (live) return true;
+    phys_addr p = pmm_alloc_contig(PAGE_UP((u64)LIVE_MAX * 32) / PAGE_SIZE);
+    if (p == PMM_NO_FRAME) return false;
+    live = (u8 *)phys_to_virt(p);
+    return true;
+}
+
+static bool live_add(const u8 *h)
+{
+    for (u32 i = 0; i < live_count; i++)
+        if (same32(live + (u64)i * 32, h)) return true;
+    if (live_count >= LIVE_MAX) return false;
+    for (u32 i = 0; i < 32; i++) live[(u64)live_count * 32 + i] = h[i];
+    live_count++;
+    return true;
+}
+
+/* Adds the big objects one generation on the disk refers to. The slot
+ * is read into the buffer, which is free at this point: the save that
+ * needs the room has not begun building yet. A generation that does
+ * not read holds nothing. */
+static bool live_from_slot(u32 slot)
+{
+    snap_header h;
+    if (!read_header(slot, &h)) return true;
+    if (h.version < 5) return true;
+
+    u32 sectors = (u32)((h.data_bytes + BLK_SECTOR_SIZE - 1) / BLK_SECTOR_SIZE);
+    if (sectors && !blk_read(slot_lba(slot) + 1, sectors, buffer)) return true;
+    if (checksum(buffer, h.data_bytes) != h.checksum) return true;
+
+    u64 at = h.root_count * sizeof(u64);
+    for (u64 i = 0; i < h.object_count; i++) {
+        if (at + sizeof(snap_record) > h.data_bytes) return true;
+        const snap_record *r = (const snap_record *)(buffer + at);
+        at += sizeof(snap_record);
+        u64 payload = payload_bytes(r);
+        if (at + payload + (u64)r->slot_count * sizeof(snap_ref) > h.data_bytes) return true;
+        if (r->type & REC_BIG) {
+            const big_ref *b = (const big_ref *)(buffer + at);
+            if (!live_add(b->hash)) return false;
+        }
+        at += payload + (u64)r->slot_count * sizeof(snap_ref);
+    }
+    return true;
+}
+
+/* Blanks the oldest generation, so the log can let go of what only it
+ * referred to. The newest is never let go. */
+static bool drop_oldest(void)
+{
+    u64 oldest = ~0ULL;
+    i32 slot = -1;
+    u32 n = 0;
+    for (u32 s = 0; s < SLOT_COUNT; s++) {
+        snap_header h;
+        if (!read_header(s, &h)) continue;
+        n++;
+        if (h.generation < oldest) { oldest = h.generation; slot = (i32)s; }
+    }
+    if (n < 2 || slot < 0) return false;
+
+    static u8 zero[BLK_SECTOR_SIZE];
+    if (!blk_write(slot_lba((u32)slot), 1, zero)) return false;
+    kprintf("snap: generation %llu let go, to make room in the log\n", oldest);
+    return true;
+}
+
+/* Makes room in the log for the big objects of the save at hand: first
+ * by compacting it down to what some generation still refers to, then,
+ * if that is not enough, by letting the oldest generations go one by
+ * one. */
+static bool make_room(u64 need_sectors)
+{
+    for (;;) {
+        if (blob_free_sectors() >= need_sectors) return true;
+        if (!ensure_live()) return false;
+
+        live_count = 0;
+        for (u32 i = 0; i < collected_count; i++)
+            if (is_big[i] && !live_add(big_hash[i])) return false;
+        for (u32 s = 0; s < SLOT_COUNT; s++)
+            if (!live_from_slot(s)) return false;
+
+        if (!blob_compact(live, live_count)) return false;
+        if (blob_free_sectors() >= need_sectors) return true;
+        if (!drop_oldest()) return false;
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Writing                                                             */
 /* ------------------------------------------------------------------ */
@@ -156,6 +323,39 @@ bool snap_save(object **roots, u32 root_count)
     collected_count = 0;
     for (u32 i = 0; i < root_count; i++)
         if (!collect(roots[i])) { clear_marks(); return false; }
+
+    /* The big ones first: hashed, looked up in the log, and written
+     * there when new -- before the generation is built, so that it can
+     * say where each of them lies. */
+    u64 need = 0;
+    for (u32 i = 0; i < collected_count; i++) {
+        object *o = collected[i];
+        is_big[i] = big_worthy(o) ? 1 : 0;
+        if (!is_big[i]) continue;
+        sha256(obj_data(o), obj_size(o), big_hash[i]);
+        u64 lba, size;
+        if (blob_find(big_hash[i], &lba, &size) && size == obj_size(o)) {
+            big_lba[i] = lba;
+        } else {
+            big_lba[i] = 0;
+            need += 1 + (obj_size(o) + BLK_SECTOR_SIZE - 1) / BLK_SECTOR_SIZE;
+        }
+    }
+    if (need && !make_room(need)) {
+        clear_marks();
+        kprintf("snap: no room in the log for %llu KiB of big objects\n",
+                need * BLK_SECTOR_SIZE / 1024);
+        return false;
+    }
+    for (u32 i = 0; i < collected_count; i++) {
+        if (!is_big[i] || big_lba[i]) continue;
+        object *o = collected[i];
+        if (!blob_store(big_hash[i], obj_data(o), obj_size(o), &big_lba[i])) {
+            clear_marks();
+            kprintf("snap: the log would not take %llu bytes\n", obj_size(o));
+            return false;
+        }
+    }
 
     /* The roots, by position, before anything else.
      *
@@ -173,22 +373,28 @@ bool snap_save(object **roots, u32 root_count)
         object *o = collected[i];
         u64 payload = obj_size(o);
         u64 slots = obj_slots(o);
-        u64 need = sizeof(snap_record) + align8(payload)
-                 + slots * sizeof(snap_ref);
+        u64 body = is_big[i] ? sizeof(big_ref) : align8(payload);
+        u64 need_here = sizeof(snap_record) + body + slots * sizeof(snap_ref);
 
-        if (at + need > SLOT_MAX_DATA) { clear_marks(); return false; }
+        if (at + need_here > SLOT_MAX_DATA) { clear_marks(); return false; }
 
         snap_record *r = (snap_record *)(buffer + at);
-        r->type = obj_type(o);
+        r->type = obj_type(o) | (is_big[i] ? REC_BIG : 0);
         r->slot_count = (u32)slots;
         r->size = payload;
         copy_name(r->name, obj_name(o));
         at += sizeof(snap_record);
 
-        const u8 *src = (const u8 *)obj_data(o);
-        for (u64 b = 0; b < payload; b++) buffer[at + b] = src[b];
-        for (u64 b = payload; b < align8(payload); b++) buffer[at + b] = 0;
-        at += align8(payload);
+        if (is_big[i]) {
+            big_ref *b = (big_ref *)(buffer + at);
+            for (u32 k = 0; k < 32; k++) b->hash[k] = big_hash[i][k];
+            b->lba = big_lba[i];
+        } else {
+            const u8 *src = (const u8 *)obj_data(o);
+            for (u64 b = 0; b < payload; b++) buffer[at + b] = src[b];
+            for (u64 b = payload; b < align8(payload); b++) buffer[at + b] = 0;
+        }
+        at += body;
 
         /* References become positions in this snapshot. A pointer means
          * nothing once the memory is gone; a position is still true
@@ -242,21 +448,6 @@ bool snap_save(object **roots, u32 root_count)
 /* Reading                                                             */
 /* ------------------------------------------------------------------ */
 
-static bool read_header(u32 slot, snap_header *out)
-{
-    static u8 sector[BLK_SECTOR_SIZE];
-    if (!blk_read(slot_lba(slot), 1, sector)) return false;
-
-    const snap_header *h = (const snap_header *)sector;
-    if (h->magic != SNAP_MAGIC) return false;
-    if (h->version != SNAP_VERSION) return false;
-    if (h->data_bytes > SLOT_MAX_DATA) return false;
-    if (h->object_count > SNAP_MAX_OBJECTS) return false;
-
-    *out = *h;
-    return true;
-}
-
 u32 snap_history(u64 *generations, u32 max)
 {
     if (!blk_present()) return 0;
@@ -281,7 +472,9 @@ u32 snap_history(u64 *generations, u32 max)
 /* Rebuilds a graph from the buffer. Two passes: the first creates every
  * object, because a reference may point forward as easily as back, and
  * the second fills the references in once there is something to point
- * at. */
+ * at. A big object's bytes come from the log; a generation whose log
+ * entry is gone is not rebuilt half-way but refused whole, and the one
+ * before it is tried. */
 static u32 rebuild(const snap_header *h, object **roots, u32 max_roots)
 {
     collected_count = 0;
@@ -292,26 +485,36 @@ static u32 rebuild(const snap_header *h, object **roots, u32 max_roots)
         /* The checksum vouches for the bytes, not for their sense: a
          * record that reaches past the data is refused rather than
          * read past the buffer. */
-        if (at + sizeof(snap_record) > h->data_bytes) return 0;
+        if (at + sizeof(snap_record) > h->data_bytes) goto refuse;
         const snap_record *r = (const snap_record *)(buffer + at);
         at += sizeof(snap_record);
-        if (at + align8(r->size) + (u64)r->slot_count * sizeof(snap_ref) > h->data_bytes) return 0;
+        u64 payload = payload_bytes(r);
+        if (at + payload + (u64)r->slot_count * sizeof(snap_ref) > h->data_bytes) goto refuse;
 
-        object *o = obj_create(r->type, r->size, r->slot_count);
-        if (!o) return 0;
+        object *o = obj_create(r->type & ~REC_BIG, r->size, r->slot_count);
+        if (!o) goto refuse;
+        collected[collected_count++] = o;
 
         u8 *dst = (u8 *)obj_data(o);
-        for (u64 b = 0; b < r->size; b++) dst[b] = buffer[at + b];
+        if (r->type & REC_BIG) {
+            const big_ref *b = (const big_ref *)(buffer + at);
+            if (!blob_read(b->hash, b->lba, r->size, dst)) {
+                kprintf("snap: generation %llu names a big object of %llu bytes the log no longer has\n",
+                        h->generation, r->size);
+                goto refuse;
+            }
+        } else {
+            for (u64 b = 0; b < r->size; b++) dst[b] = buffer[at + b];
+        }
         obj_set_name(o, r->name[0] ? r->name : NULL);
 
-        at += align8(r->size) + (u64)r->slot_count * sizeof(snap_ref);
-        collected[collected_count++] = o;
+        at += payload + (u64)r->slot_count * sizeof(snap_ref);
     }
 
     at = root_table;
     for (u64 i = 0; i < h->object_count; i++) {
         const snap_record *r = (const snap_record *)(buffer + at);
-        at += sizeof(snap_record) + align8(r->size);
+        at += sizeof(snap_record) + payload_bytes(r);
 
         const snap_ref *refs = (const snap_ref *)(buffer + at);
         for (u32 s = 0; s < r->slot_count; s++) {
@@ -340,6 +543,12 @@ static u32 rebuild(const snap_header *h, object **roots, u32 max_roots)
      * caller, so let ours go. */
     for (u32 i = 0; i < collected_count; i++) obj_release(collected[i]);
     return n;
+
+refuse:
+    /* Nothing points at what was made so far; letting go frees it. */
+    for (u32 i = 0; i < collected_count; i++) obj_release(collected[i]);
+    collected_count = 0;
+    return 0;
 }
 
 static u32 load_slot(u32 slot, object **roots, u32 max_roots,

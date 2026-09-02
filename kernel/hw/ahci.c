@@ -457,9 +457,10 @@ bool blk_selftest(void)
 {
     if (!present || store_d.sectors < 4096) return false;
 
-    /* Well away from anything we keep, and restored afterwards, so a
-     * test run leaves the disk exactly as it found it. */
-    const u64 probe = 2048;
+    /* Below the ring of generations, which begins at sector 1024, and
+     * restored afterwards, so a test run leaves the disk exactly as it
+     * found it. */
+    const u64 probe = 768;
     static u8 original[BLK_SECTOR_SIZE];
     static u8 pattern[BLK_SECTOR_SIZE];
     static u8 readback[BLK_SECTOR_SIZE];

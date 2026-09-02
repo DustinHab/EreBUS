@@ -175,7 +175,20 @@ built binary.
   interrupted write costs the changes since the last one and never the
   graph. Nothing is saved by hand -- the system writes when changes stop
   arriving. make persist types into a window on one boot and shows it
-  still there on the next.
+  still there on the next. A generation slot holds a megabyte; texts
+  and bytes from four kilobytes up lie in a log of their own behind the
+  ring, once each under the SHA-256 of their contents, and the
+  generation keeps hash and place. Unchanged sources cost nothing per
+  save, an edit adds one entry, and when the log is full it is
+  compacted down to what some generation still refers to -- the oldest
+  generations giving way if even that is not enough. An entry that
+  does not hash to its name is never handed back; a generation whose
+  entry is gone is refused whole and the one before it tried.
+  tools/bigpersist.sh carries a source, a header and a kernel image in
+  and reads all three back after a boot without the disk;
+  tools/logfull.sh cuts the store down until a dozen versions of one
+  source fill the log, and shows the compaction, the generations let
+  go, and the latest text whole after the next boot.
 * **The shell.** No task bar, no window frames, no close and minimise --
   none of them mean anything when a view is just somewhere you are
   looking. Three ways of seeing one navigation state: focus with the
@@ -701,9 +714,12 @@ built binary.
   terminal takes them in and builds the list -- seventy-one objects
   in a quarter of a minute -- into kernel.elf, writes it out, and the
   host boots what the machine made: it comes up the same way. What
-  comes in from the disk and what the tools build is transient, alive
-  until the next boot and left out of the snapshot; the disk is its
-  persistence. Three bugs the clang build had hidden: a far return of
+  comes in from the disk is the machine's own from then on -- it lies
+  in the log of big objects and comes back after a boot without the
+  disk; the disk's version is taken again only once the copy is let go.
+  A kernel the tools build stays transient: it is reproducible from
+  the sources, and a new one per build would fill the log with
+  history nobody asked for. Three bugs the clang build had hidden: a far return of
   doublewords where quadwords were meant, imul with a number silently
   encoded as imul with rax, and initializer address tables cut off at
   sixteen entries. Honest edges: a struct is handed to a function by

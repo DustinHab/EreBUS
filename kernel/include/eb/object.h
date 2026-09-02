@@ -136,6 +136,7 @@ void obj_set_fleeting(object *o, bool fleeting);
  * A reference to one becomes an empty slot on the disk. */
 void obj_set_transient(object *o, bool transient);
 bool obj_is_transient(const object *o);
+bool obj_is_fleeting(const object *o);
 
 bool obj_selftest(void);
 bool obj_collect_selftest(void);
