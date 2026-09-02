@@ -34,6 +34,7 @@
 #include <eb/fat.h>
 #include <eb/fmt.h>
 #include <eb/time.h>
+#include <eb/thread.h>
 #include <eb/string.h>
 
 #define TERM_SESSIONS 3
@@ -743,6 +744,7 @@ static void cmd_assemble(term_session *s, const char *what)
     if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "only a text can be assembled."); return; }
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
     if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "the image would lie here, and you may not lay things in here."); return; }
+    if (term_building()) { t_say(s, "a build is running; the tools are busy until it is done."); return; }
 
     u8 *out = lang_out_buffer();
     if (!out) { t_say(s, "there is no room for the tools' tables."); return; }
@@ -790,6 +792,7 @@ static void cmd_compile(term_session *s, const char *what)
     if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "only a text can be compiled."); return; }
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
     if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "what it makes would lie here, and you may not lay things in here."); return; }
+    if (term_building()) { t_say(s, "a build is running; the tools are busy until it is done."); return; }
 
     char base[NAME_SHOWN];
     u32 n = 0;
@@ -1014,6 +1017,48 @@ static void say_to_session(void *ctx, const char *line)
     t_say((term_session *)ctx, line);
 }
 
+/* ------------------------------------------------------------------ */
+/* A build in the background                                           */
+/* ------------------------------------------------------------------ */
+
+static void say_to_journal_line(void *ctx, const char *line)
+{
+    (void)ctx;
+    journal_says("build", line);
+}
+
+static struct { object *list; char name[NAME_SHOWN]; } job;
+static volatile bool building;
+
+static void build_thread(void *arg)
+{
+    (void)arg;
+    term_build_list(job.list, job.name, say_to_journal_line, NULL);
+    obj_release(job.list);
+    job.list = NULL;
+    building = false;
+}
+
+bool term_building(void) { return building; }
+
+bool term_build_start(object *list, const char *name)
+{
+    if (building || !list) return false;
+    building = true;
+    job.list = list;
+    obj_retain(list);
+    u32 k = 0;
+    while (name && name[k] && k < NAME_SHOWN - 1) { job.name[k] = name[k]; k++; }
+    job.name[k] = 0;
+    if (!thread_create("build", build_thread, NULL, thread_domain(sched_current()))) {
+        obj_release(list);
+        job.list = NULL;
+        building = false;
+        return false;
+    }
+    return true;
+}
+
 /* link <list>: every object in the list, joined. */
 static void cmd_link(term_session *s, const char *what)
 {
@@ -1023,6 +1068,7 @@ static void cmd_link(term_session *s, const char *what)
     if (obj_type(sp.o) != TYPE_LIST) { t_say(s, "link takes a list of objects."); return; }
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
     if (!(sp.r & CAP_WRITE)) { t_say(s, "what it makes would lie in the list, and you may not lay things in there."); return; }
+    if (building) { t_say(s, "a build is running; the tools are busy until it is done."); return; }
     term_link_list(sp.o, sp.nm, say_to_session, s);
 }
 
@@ -1037,7 +1083,9 @@ static void cmd_build(term_session *s, const char *what)
     if (obj_type(sp.o) != TYPE_LIST) { t_say(s, "build takes a list of texts."); return; }
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
     if (!(sp.r & CAP_WRITE)) { t_say(s, "what it makes would lie in the list, and you may not lay things in there."); return; }
-    term_build_list(sp.o, sp.nm, say_to_session, s);
+    if (!term_build_start(sp.o, sp.nm)) { t_say(s, "a build is running already; the journal says how it goes."); return; }
+    t_say(s, "building, in the background: the journal names each text as it is done,");
+    t_say(s, "and what lies in the list at the end.");
 }
 
 /* take in <list>, write out <list>: the exchange disk's files into the
@@ -1053,6 +1101,34 @@ static void cmd_take_in(term_session *s, const char *what)
     u32 n = fat_take_in(sp.o);
     t_dec(s, n);
     t_say(s, " files came in.");
+}
+
+/* install <name>: the kernel in those bytes becomes the one the next
+ * start runs; the running one stays beside it as kernel.old, and the
+ * loader comes back to it if the new one does not come up twice. */
+static void cmd_install(term_session *s, const char *what)
+{
+    if (!what[0]) { t_say(s, "install which kernel?"); return; }
+    spot sp;
+    if (!resolve(s, what, &sp)) return;
+    if (obj_type(sp.o) != TYPE_BYTES) { t_say(s, "a kernel is bytes: the kernel.elf a build makes."); return; }
+    if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
+    char why[120];
+    if (!fat_install_kernel((const u8 *)obj_data(sp.o), obj_size(sp.o), why, sizeof(why))) {
+        t_say(s, why);
+        return;
+    }
+    kprintf("boot: a kernel of %llu bytes is installed; the previous one is kernel.old\n", obj_size(sp.o));
+    journal_says("system", "a new kernel is installed for the next start");
+    t_say(s, "installed.  the next start runs it; the running kernel stays as kernel.old,");
+    t_say(s, "and the loader returns to that one if the new kernel does not come up twice.");
+    t_say(s, "'restart' starts it now.");
+}
+
+static void cmd_restart(term_session *s)
+{
+    t_say(s, "starting again.");
+    system_restart();
 }
 
 static void cmd_write_out(term_session *s, const char *what)
@@ -1087,6 +1163,7 @@ static void cmd_run(term_session *s, const char *what)
         object *prog = code_launch(sp.o);
         if (!prog) { t_say(s, "it would not start."); return; }
         i64 at = lay_here(s, prog, CAP_READ | CAP_GRANT, nm);
+        obj_release(prog);                       /* the slot holds it now */
         if (at < 0) { t_say(s, "it runs, but there was no room to lay it here."); return; }
         t_say(s, "it runs; the journal carries what it says.");
         return;
@@ -1101,13 +1178,14 @@ static void cmd_run(term_session *s, const char *what)
     while (sp.nm[n] && n < NAME_SHOWN - 1) { nm[n] = sp.nm[n]; n++; }
     nm[n] = 0;
 
-    /* runner_launch lends the program object -- the live table holds
-     * the reference. The slot below takes its own; releasing here
-     * would give away what was never ours, and the reaper would then
-     * free the object under the slot at the program's end. */
+    /* The launcher hands the program back with a hold of our own: a
+     * short program can run to its end and be reaped before the slot
+     * takes its hold, and ours is what keeps the object real across
+     * that gap. Once it lies here, the slot's hold is enough. */
     object *prog = runner_launch(sp.o);
     if (!prog) { t_say(s, "it would not start."); return; }
     i64 at = lay_here(s, prog, CAP_READ | CAP_GRANT, nm);
+    obj_release(prog);
     if (at < 0) { t_say(s, "it runs, but there was no room to lay it here."); return; }
     t_say(s, "it runs; the journal carries what it says.");
 }
@@ -1466,6 +1544,8 @@ static void cmd_help(term_session *s)
     t_say(s, "  build <list>     compile and assemble every text in a list, then link");
     t_say(s, "  take in <list>   the exchange disk's files, into the list");
     t_say(s, "  write out <list> the list's texts and bytes, onto the exchange disk");
+    t_say(s, "  install <name>   make that kernel the one the next start runs");
+    t_say(s, "  restart          start the machine again");
     t_say(s, "  give <name> to <program>   hand it a reference");
     t_say(s, "  end <name>       end a running program");
     t_end(s);
@@ -1508,6 +1588,8 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "read", &rest))    cmd_read(s, rest);
     else if (word_starts(line, "write out", &rest)) cmd_write_out(s, rest);
     else if (word_starts(line, "take in", &rest)) cmd_take_in(s, rest);
+    else if (word_starts(line, "install", &rest)) cmd_install(s, rest);
+    else if (word_starts(line, "restart", NULL))  cmd_restart(s);
     else if (word_starts(line, "write", &rest))   cmd_write(s, rest);
     else if (word_starts(line, "make", &rest))    cmd_make(s, rest);
     else if (word_starts(line, "copy", &rest))    cmd_copy(s, rest);

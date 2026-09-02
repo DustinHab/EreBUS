@@ -71,6 +71,17 @@ SECTIONS
         *(.data .data.*)
     } :data
 
+    /* The names of the code, for the crash report to read addresses
+     * back: after the data and before the bss, so that a change in
+     * the table's size between the first link and the second moves
+     * no code. */
+    .names : AT(ADDR(.names) - KERNEL_VMA) {
+        . = ALIGN(8);
+        __names_start = .;
+        KEEP(*(.names))
+        __names_end = .;
+    } :data
+
     .bss : AT(ADDR(.bss) - KERNEL_VMA) {
         __bss_start = .;
         *(COMMON)

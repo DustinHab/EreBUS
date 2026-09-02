@@ -208,10 +208,36 @@ typedef struct {
     u64 text_start, text_end;          /* kernel */
     u64 rodata_start, user_start, user_end, rodata_end;
     u64 bss_start, bss_end;
+    u64 names_start, names_end;        /* kernel: the table of the code's names */
     u64 seg_vaddr[3], seg_off[3], seg_filesz[3], seg_memsz[3];
     u32 seg_of[ASM_NSEC];              /* which segment a section is in, 3 = none */
     u64 entry;
 } plan;
+
+/* The names of the code, for the kernel's crash report to read an
+ * address back: every defined name in text or user that is not a
+ * text's own mark. The table's shape is the one kernel/lib/names.c
+ * reads and tools/mknames.py writes for the outside build. */
+#define NAMES_MAX 65536
+static u32 names_bytes;
+
+static bool names_worthy(const unit *u, u32 s)
+{
+    if ((sym_flags(u, s) & 2) == 0) return false;
+    i32 sec = sym_sec(u, s);
+    if (sec != ASM_SEC_TEXT && sec != ASM_SEC_USER) return false;
+    return sym_name(u, s)[0] != '.';
+}
+
+static void names_measure(u32 n)
+{
+    u32 count = 0;
+    u64 letters = 0;
+    for (u32 i = 0; i < n; i++)
+        for (u32 s = 0; s < units[i].nsym && count < NAMES_MAX; s++)
+            if (names_worthy(&units[i], s)) { count++; letters += strlen(sym_name(&units[i], s)) + 1; }
+    names_bytes = count ? (u32)align_up(8 + (u64)count * 16 + letters, 8) : 0;
+}
 
 static void lay_section(u32 n, u32 s, u64 *at)
 {
@@ -275,6 +301,13 @@ static void plan_kernel(plan *p, u32 n)
     p->data_start = at;
     lay_section(n, ASM_SEC_DATA, &at);
     p->data_laid_end = laid_end(n, ASM_SEC_DATA, p->data_start);
+    /* the names, after the data and before the bss, where the outside
+     * build's linker script keeps them too */
+    at = align_up(at, 8);
+    p->names_start = at;
+    at += names_bytes;
+    p->names_end = at;
+    if (names_bytes && p->names_end > p->data_laid_end) p->data_laid_end = p->names_end;
     at = align_up(at, 16);
     p->bss_start = at;
     lay_section(n, ASM_SEC_BSS, &at);
@@ -305,6 +338,7 @@ static bool layout_symbol(const plan *p, const char *name, u64 *v)
         { "__user_end", p->user_end }, { "__rodata_end", p->rodata_end },
         { "__data_start", p->data_start }, { "__bss_start", p->bss_start },
         { "__bss_end", p->bss_end }, { "__kernel_end", p->bss_end },
+        { "__names_start", p->names_start }, { "__names_end", p->names_end },
         { "__kernel_phys", KERNEL_LMA } };
     for (u32 i = 0; i < sizeof(t) / sizeof(t[0]); i++)
         if (strcmp(t[i].nm, name) == 0) { *v = t[i].val; return true; }
@@ -405,6 +439,49 @@ static i64 write_program(u8 *out, u64 max, plan *p, u32 n)
     return (i64)total;
 }
 
+/* Writes the table of names into its place: entries in address
+ * order, then the letters. */
+static void write_names(u8 *out, const plan *p, u32 n)
+{
+    if (!names_bytes) return;
+    typedef struct { u64 addr; const char *name; } ent;
+    static ent *ents;
+    if (!ents) ents = (ent *)lang_big_alloc(sizeof(ent) * NAMES_MAX);
+    if (!ents) return;
+    u32 count = 0;
+    for (u32 i = 0; i < n; i++) {
+        unit *u = &units[i];
+        for (u32 s = 0; s < u->nsym && count < NAMES_MAX; s++) {
+            if (!names_worthy(u, s)) continue;
+            ents[count].addr = u->base[sym_sec(u, s)] + sym_off(u, s);
+            ents[count].name = sym_name(u, s);
+            count++;
+        }
+    }
+    for (u32 gap = count / 2; gap > 0; gap /= 2)
+        for (u32 i = gap; i < count; i++) {
+            ent t = ents[i];
+            u32 j = i;
+            while (j >= gap && ents[j - gap].addr > t.addr) { ents[j] = ents[j - gap]; j -= gap; }
+            ents[j] = t;
+        }
+    u8 *at = place(out, p, ASM_SEC_DATA, p->names_start);
+    if (!at) return;
+    wr32(at, count);
+    wr32(at + 4, 8 + count * 16);
+    u32 soff = 0;
+    u8 *letters = at + 8 + (u64)count * 16;
+    for (u32 i = 0; i < count; i++) {
+        u8 *e = at + 8 + (u64)i * 16;
+        wr64(e, ents[i].addr);
+        wr32(e + 8, soff);
+        wr32(e + 12, 0);
+        const char *s = ents[i].name;
+        while (*s) letters[soff++] = (u8)*s++;
+        letters[soff++] = 0;
+    }
+}
+
 static i64 write_kernel(u8 *out, u64 max, plan *p, u32 n)
 {
     u64 total = p->seg_off[2] + p->seg_filesz[2];
@@ -413,6 +490,7 @@ static i64 write_kernel(u8 *out, u64 max, plan *p, u32 n)
     memset(out, 0, total);
     copy_bytes(out, p, n);
     if (!apply(out, p, n)) return -1;
+    write_names(out, p, n);
 
     gsym *start = global_find("_start");
     if (!start) { fail("a kernel begins at _start, and nothing lays that name down", NULL, NULL, NULL); return -1; }
@@ -476,7 +554,8 @@ i64 ld_link(const ld_unit *in, u32 n, u32 layout, u8 *out, u64 max,
     memset(&p, 0, sizeof(p));
     p.layout = layout;
     p.seg_of[ASM_SEC_BSS] = 3;
-    if (layout == LD_KERNEL) plan_kernel(&p, n);
+    names_bytes = 0;
+    if (layout == LD_KERNEL) { names_measure(n); plan_kernel(&p, n); }
     else plan_program(&p, n);
 
     /* Every public name, once. */

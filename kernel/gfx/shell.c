@@ -217,7 +217,9 @@ typedef enum {
     HOT_LINE_SAY,    /* send what the bottom row has gathered */
     HOT_ASSEMBLE,    /* turn the focused text into a program image */
     HOT_COMPILE,     /* turn the focused text of c into assembly and an image */
-    HOT_BUILD        /* compile, assemble and link everything in the focused list */
+    HOT_BUILD,       /* compile, assemble and link everything in the focused list */
+    HOT_INSTALL,     /* make the focused kernel the one the next start runs */
+    HOT_RESTART      /* save everything and start the machine again */
 } hot_kind;
 
 typedef struct {
@@ -404,6 +406,15 @@ static bool lay_beside(object *holder, object *made, u32 rights, const char *nm)
     return true;
 }
 
+/* Whether these bytes begin the way an elf does: a kernel, as far as
+ * the shell can tell; the installer looks closer. */
+static bool elf_smells(object *o)
+{
+    if (!o || obj_type(o) != TYPE_BYTES || obj_size(o) < 64) return false;
+    const u8 *d = (const u8 *)obj_data(o);
+    return d && d[0] == 0x7F && d[1] == 'E' && d[2] == 'L' && d[3] == 'F';
+}
+
 /* Whether a list holds anything the tools would build: a text of c
  * or assembly, or an object. */
 static bool list_buildable(object *l)
@@ -420,12 +431,6 @@ static bool list_buildable(object *l)
         if (n > 2 && nm[n - 2] == '.' && (nm[n - 1] == 'c' || nm[n - 1] == 'S' || nm[n - 1] == 's')) return true;
     }
     return false;
-}
-
-static void say_to_journal(void *ctx, const char *line)
-{
-    (void)ctx;
-    journal_says("build", line);
 }
 
 /* #include "name" reaches the texts lying beside the source, in the
@@ -3147,6 +3152,17 @@ static void draw_all(void)
             hot_add(chip_x - 4, 11, 5 * GLYPH_W + 8, ROW, HOT_BUILD, 0);
             chip_x += 7 * GLYPH_W;
         }
+
+        /* Bytes that begin the way an elf does are a kernel to install:
+         * the next start runs it, the running one stays as kernel.old. */
+        if (ft == TYPE_BYTES && (focus_rights() & CAP_READ) &&
+            nav.at_generation == 0 && elf_smells(focus()) && fat_boot_present()) {
+            bool lit = is_hovered(HOT_INSTALL, 0);
+            if (lit) fb_rect(chip_x - 4, 11, 7 * GLYPH_W + 8, ROW, C_EDGE);
+            text_at(chip_x, 14, sw - PAD, "install", lit ? C_TEXT : C_READONLY);
+            hot_add(chip_x - 4, 11, 7 * GLYPH_W + 8, ROW, HOT_INSTALL, 0);
+            chip_x += 9 * GLYPH_W;
+        }
     }
 
     /* Marked letters, and letters being carried. The mark offers
@@ -3387,9 +3403,20 @@ static void draw_all(void)
                 lit ? C_READONLY : C_FAINT);
         hot_add(off_x - 4, sh - 28, 8 * GLYPH_W + 8, 28, HOT_OFF, 0);
     }
+    /* And the other end that is a beginning: saved, then started
+     * again -- the way a newly installed kernel is tried. */
+    i32 again_x = off_x - 10 * GLYPH_W;
+    {
+        bool lit = is_hovered(HOT_RESTART, 0);
+        if (lit) fb_rect(again_x - 4, sh - 28 + 3, 7 * GLYPH_W + 8,
+                         ROW, C_EDGE);
+        text_at(again_x, sh - 28 + 6, sw, "restart",
+                lit ? C_READONLY : C_FAINT);
+        hot_add(again_x - 4, sh - 28, 7 * GLYPH_W + 8, 28, HOT_RESTART, 0);
+    }
 
     line[at] = 0;
-    text_at(mx, sh - 28 + 6, off_x - 2 * GLYPH_W, line,
+    text_at(mx, sh - 28 + 6, again_x - 2 * GLYPH_W, line,
             mouth ? C_TEXT : C_FAINT);
 
     /* The send word, right after the gathered letters: the same act
@@ -4353,7 +4380,10 @@ static void act_on(const hot_region *r)
         u64 slots = obj_slots(holder), spot = slots;
         for (u64 i = 0; i < slots; i++)
             if (!obj_get_slot(holder, i)) { spot = i; break; }
-        if (spot == slots && !obj_grow_slots(holder, slots + 1)) break;
+        if (spot == slots && !obj_grow_slots(holder, slots + 1)) {
+            obj_release(prog);              /* it runs, but lies nowhere */
+            break;
+        }
 
         char nm[40];
         label_of(holder, nav.via[nav.depth - 1], f, nm, sizeof(nm));
@@ -4362,6 +4392,7 @@ static void act_on(const hot_region *r)
         obj_set_slot_name(holder, spot, nm);
         if (obj_type(holder) == TYPE_PROGRAM)
             proc_grant(holder, prog, CAP_READ | CAP_GRANT);
+        obj_release(prog);                  /* the slot holds it now */
 
         nav.changes++;
         nav.redraw = true;
@@ -4523,6 +4554,25 @@ static void act_on(const hot_region *r)
         nav.redraw = true;
         break;
 
+    case HOT_RESTART:
+        system_restart();
+        nav.redraw = true;
+        break;
+
+    case HOT_INSTALL: {
+        object *f = focus();
+        if (!(focus_rights() & CAP_READ) || nav.at_generation != 0 || !elf_smells(f)) break;
+        char why[120];
+        if (!fat_install_kernel((const u8 *)obj_data(f), obj_size(f), why, sizeof(why))) {
+            journal_says("install", why);
+        } else {
+            kprintf("boot: a kernel of %llu bytes is installed; the previous one is kernel.old\n", obj_size(f));
+            journal_says("system", "a new kernel is installed for the next start; restart runs it");
+        }
+        nav.redraw = true;
+        break;
+    }
+
     case HOT_END:
         if ((focus_rights() & CAP_GRANT) && nav.at_generation == 0 &&
             proc_end(focus())) {
@@ -4552,8 +4602,10 @@ static void act_on(const hot_region *r)
         if (nav.depth >= 2) label_of(nav.node[nav.depth - 2], nav.via[nav.depth - 1], f, base, sizeof(base));
         else put(base, 0, "home");
         base[19] = 0;
-        term_build_list(f, base, say_to_journal, NULL);
-        nav.changes++;
+        if (term_build_start(f, base))
+            journal_says("build", "building in the background; each text is named here as it is done");
+        else
+            journal_says("build", "a build is running already");
         nav.redraw = true;
         break;
     }
@@ -4576,6 +4628,7 @@ static void act_on(const hot_region *r)
         label_of(holder, nav.via[nav.depth - 1], f, base, sizeof(base));
         base[19] = 0;
 
+        if (term_building()) { journal_says("compile", "a build is running; the tools are busy until it is done"); break; }
         static char *text;
         if (!text) text = (char *)lang_big_alloc(4u << 20);
         u8 *image = lang_out_buffer();
@@ -4882,13 +4935,13 @@ static void act_on(const hot_region *r)
             created = true;
         }
         else if (r->index < PALETTE_FIXED + standard_count()) {
-            /* A fresh instance. The process holds its own program
-             * object; the slot below takes its own hold on it, so
-             * nothing is released here. Read and grant go on the
-             * reference -- running programs are watched and given to,
-             * never written into. */
+            /* A fresh instance, handed back with a hold of ours that
+             * the slot below replaces with its own. Read and grant go
+             * on the reference -- running programs are watched and
+             * given to, never written into. */
             made = standard_launch(r->index - PALETTE_FIXED);
             if (!made) break;
+            created = true;
             give = CAP_READ | CAP_GRANT;
             suggest = standard_name(r->index - PALETTE_FIXED);
         }

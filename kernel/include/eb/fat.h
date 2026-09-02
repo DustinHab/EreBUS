@@ -4,17 +4,23 @@
 #include <eb/types.h>
 #include <eb/object.h>
 
-/* The exchange disk: a FAT32 disk beside the store, read and written
- * the way the rest of the world formats sticks and cards.
+/* Two FAT32 disks, spoken in the world's own format.
  *
- * On boot, when such a disk is attached, its root directory's files
- * become objects in a list called "the disk" on the system shelf --
- * texts when they read like text, bytes otherwise. Writing back is a
- * deliberate act: "write out" on that list writes every entry that
- * does not have a file yet, under a plain 8.3 name, into the root
- * directory. Honest limits: FAT32 only, the root directory only,
- * files up to 64 KiB either way, and long names are read but not
- * written.
+ * The exchange disk sits beside the store. On boot, when one is
+ * attached, its root directory's files become objects in a list
+ * called "the disk" on the system shelf -- texts when they read like
+ * text, bytes otherwise. Writing back is a deliberate act: "write
+ * out" on that list writes every entry that does not have a file yet,
+ * under a plain 8.3 name, into the root directory. Honest limits:
+ * FAT32 only, the root directory only, files up to 4 MiB coming in
+ * and 16 MiB going out, long names read but not written.
+ *
+ * The boot disk is where the kernel lives, in \erebus. A kernel built
+ * here is installed there: laid down as kernel.new, then the names
+ * turned -- the running kernel becomes kernel.old, the new one
+ * kernel.elf -- and the count of starts set to zero. The loader counts
+ * the starts; a kernel that does not come up twice is set aside for
+ * kernel.old again, by the loader, and the kernel says so.
  */
 
 /* Mounts the exchange disk, if one is there and speaks FAT32. */
@@ -29,5 +35,16 @@ u32 fat_take_in(object *into);
 /* Writes entries of the list that have no file of their name yet.
  * Returns how many went out. */
 u32 fat_write_out(object *from);
+
+/* The boot disk's volume, mounted on first need. */
+bool fat_boot_present(void);
+
+/* Lays a kernel down as the one the next start runs, keeping the
+ * running one as kernel.old. False with a reason in why. */
+bool fat_install_kernel(const u8 *elf, u64 len, char *why, u32 max);
+
+/* The kernel has come up: the loader's count of starts goes back to
+ * zero. Answers what the count was, or 0 when there was none. */
+u32 fat_boot_settle(void);
 
 #endif /* EB_FAT_H */

@@ -18,6 +18,7 @@
 #include <eb/vmm.h>
 #include <eb/proc.h>
 #include <eb/fmt.h>
+#include <eb/names.h>
 #include <eb/io.h>
 
 /* ------------------------------------------------------------------ */
@@ -180,7 +181,10 @@ static void backtrace(u64 rbp)
         const u64 *frame = (const u64 *)rbp;
         u64 ret = frame[1];
         if (ret < (u64)__kernel_start || ret >= (u64)__kernel_end) break;
-        kprintf(" %p", (void *)ret);
+        u64 off = 0;
+        const char *nm = names_of(ret, &off);
+        if (nm) kprintf(" %p (%s+0x%llx)", (void *)ret, nm, off);
+        else kprintf(" %p", (void *)ret);
         printed++;
         rbp = frame[0];
     }
@@ -191,8 +195,14 @@ static void backtrace(u64 rbp)
 static void report(trap_frame *f)
 {
     kprintf("\n");
-    kprintf("kern: exception %llu (%s) at %p\n",
-            f->vector, exception_name(f->vector), (void *)f->rip);
+    u64 off = 0;
+    const char *nm = names_of(f->rip, &off);
+    if (nm)
+        kprintf("kern: exception %llu (%s) at %p (%s+0x%llx)\n",
+                f->vector, exception_name(f->vector), (void *)f->rip, nm, off);
+    else
+        kprintf("kern: exception %llu (%s) at %p\n",
+                f->vector, exception_name(f->vector), (void *)f->rip);
 
     switch (f->vector) {
     case 14:

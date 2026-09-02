@@ -155,16 +155,17 @@ static EFI_FILE_PROTOCOL *open_boot_volume(EFI_HANDLE image)
     return root;
 }
 
-/* Reads a file completely into freshly allocated pool memory. */
-static VOID *read_file(EFI_FILE_PROTOCOL *root, const CHAR16 *path,
-                       UINTN *out_size)
+/* Reads a file completely into freshly allocated pool memory; NULL
+ * when there is no such file. */
+static VOID *read_file_opt(EFI_FILE_PROTOCOL *root, const CHAR16 *path,
+                           UINTN *out_size)
 {
     EFI_GUID info_guid = EFI_FILE_INFO_GUID;
     EFI_FILE_PROTOCOL *f = NULL;
     EFI_STATUS st;
 
     st = root->Open(root, &f, (CHAR16 *)path, EFI_FILE_MODE_READ, 0);
-    if (EFI_ERROR(st)) halt(u"kernel.elf not found", st);
+    if (EFI_ERROR(st)) return NULL;
 
     /* Ask for the size first: GetInfo tells us through BUFFER_TOO_SMALL
      * how much room the trailing file name needs. */
@@ -192,6 +193,44 @@ static VOID *read_file(EFI_FILE_PROTOCOL *root, const CHAR16 *path,
     f->Close(f);
     *out_size = size;
     return buf;
+}
+
+static VOID *read_file(EFI_FILE_PROTOCOL *root, const CHAR16 *path,
+                       UINTN *out_size)
+{
+    VOID *b = read_file_opt(root, path, out_size);
+    if (!b) halt(u"kernel.elf not found", 0);
+    return b;
+}
+
+/* Writes a file whole, replacing one of the name. Failures are let
+ * pass: a medium that cannot be written is still one to boot from. */
+static void write_file(EFI_FILE_PROTOCOL *root, const CHAR16 *path,
+                       const VOID *data, UINTN size)
+{
+    EFI_FILE_PROTOCOL *f = NULL;
+    if (!EFI_ERROR(root->Open(root, &f, (CHAR16 *)path,
+                              EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)))
+        f->Delete(f);                        /* closes the handle as well */
+    if (EFI_ERROR(root->Open(root, &f, (CHAR16 *)path,
+                             EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
+                             EFI_FILE_MODE_CREATE, 0)))
+        return;
+    UINTN n = size;
+    f->Write(f, &n, (VOID *)data);
+    f->Close(f);
+}
+
+/* The count of starts since a kernel was installed: raised here before
+ * the kernel runs, set back to zero by the kernel once it is up. */
+static UINTN read_tries(EFI_FILE_PROTOCOL *root)
+{
+    UINTN n = 0;
+    VOID *b = read_file_opt(root, u"\\erebus\\tries", &n);
+    if (!b) return 0;
+    UINTN v = n ? ((UINT8 *)b)[0] : 0;
+    BS->FreePool(b);
+    return v;
 }
 
 /* Copies the PT_LOAD segments to their target addresses and returns the
@@ -453,8 +492,28 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     pt_pool  = (UINT64 *)pagetab;
     pt_total = PAGETAB_PAGES;
 
-    /* Read and place the kernel. */
+    /* Read and place the kernel.
+     *
+     * Two starts that never cleared the count mean the installed kernel
+     * does not come up. The previous one, kept beside it as kernel.old,
+     * is put back under the name the loader reads, and boots; the
+     * kernel is told, so that it can say so. */
     EFI_FILE_PROTOCOL *root = open_boot_volume(image);
+    UINT32 flags = 0;
+    UINTN tries = read_tries(root);
+    UINTN old_size = 0;
+    VOID *old = tries >= 2 ? read_file_opt(root, u"\\erebus\\kernel.old", &old_size) : NULL;
+    if (old) {
+        print(u"erebus: the installed kernel did not come up twice; the previous one boots\r\n");
+        write_file(root, u"\\erebus\\kernel.elf", old, old_size);
+        BS->FreePool(old);
+        UINT8 zero = 0;
+        write_file(root, u"\\erebus\\tries", &zero, 1);
+        flags |= EB_BOOT_FELL_BACK;
+    } else {
+        UINT8 next = (UINT8)(tries < 255 ? tries + 1 : 255);
+        write_file(root, u"\\erebus\\tries", &next, 1);
+    }
     UINTN elf_size = 0;
     VOID *elf = read_file(root, u"\\erebus\\kernel.elf", &elf_size);
 
@@ -474,6 +533,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     bi->fb_stride = mi->PixelsPerScanLine;
     bi->fb_format = (mi->PixelFormat == PixelRedGreenBlueReserved8BitPerColor)
                     ? EB_FB_RGBX8888 : EB_FB_BGRX8888;
+    bi->flags     = flags;
     bi->kernel_phys      = kbase;
     bi->kernel_virt      = EB_KERNEL_BASE + kbase;
     bi->kernel_size      = kspan;

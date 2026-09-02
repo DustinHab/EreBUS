@@ -99,7 +99,7 @@ static void put_n(tr *t, const char *s, u32 n)
 static void put_num(tr *t, i64 v)
 {
     char d[24]; u32 nd = 0;
-    u64 u = v < 0 ? (u64)(-v) : (u64)v;
+    u64 u = v < 0 ? (u64)0 - (u64)v : (u64)v;   /* the most negative has no positive twin */
     if (v < 0) put(t, "-");
     if (u == 0) d[nd++] = '0';
     while (u) { d[nd++] = (char)('0' + u % 10); u /= 10; }
@@ -166,11 +166,11 @@ static i64 ex_primary(ex *e)
     if (e->i >= e->n) { e->ok = false; return 0; }
     char c = e->s[e->i];
     if (c == '(') { e->i++; i64 v = ex_or(e); e->i = skip_sp(e->s, e->n, e->i); if (e->i < e->n && e->s[e->i] == ')') e->i++; else e->ok = false; return v; }
-    if (c == '-') { e->i++; return -ex_primary(e); }
+    if (c == '-') { e->i++; return (i64)((u64)0 - (u64)ex_primary(e)); }
     if (c == '!') { e->i++; return !ex_primary(e); }
     if (c == '~') { e->i++; return ~ex_primary(e); }
     if (c >= '0' && c <= '9') {
-        i64 v = 0;
+        u64 v = 0;
         if (c == '0' && e->i + 1 < e->n && (e->s[e->i + 1] == 'x' || e->s[e->i + 1] == 'X')) {
             e->i += 2;
             while (e->i < e->n) {
@@ -180,13 +180,13 @@ static i64 ex_primary(ex *e)
                 else if (h >= 'a' && h <= 'f') d = (u32)(h - 'a' + 10);
                 else if (h >= 'A' && h <= 'F') d = (u32)(h - 'A' + 10);
                 else break;
-                v = (i64)(((u64)v << 4) | d);
+                v = (v << 4) | d;
                 e->i++;
             }
-            return v;
+            return (i64)v;
         }
-        while (e->i < e->n && e->s[e->i] >= '0' && e->s[e->i] <= '9') v = v * 10 + (e->s[e->i++] - '0');
-        return v;
+        while (e->i < e->n && e->s[e->i] >= '0' && e->s[e->i] <= '9') v = v * 10 + (u64)(e->s[e->i++] - '0');
+        return (i64)v;
     }
     if (c == '\'' && e->i + 2 < e->n && e->s[e->i + 2] == '\'') { i64 v = (u8)e->s[e->i + 1]; e->i += 3; return v; }
     if (is_ident_char(c)) {
@@ -208,9 +208,9 @@ static i64 ex_mul(ex *e)
         e->i = skip_sp(e->s, e->n, e->i);
         if (e->i >= e->n) return v;
         char c = e->s[e->i];
-        if (c == '*') { e->i++; v *= ex_primary(e); }
-        else if (c == '/') { e->i++; i64 d = ex_primary(e); v = d ? v / d : 0; }
-        else if (c == '%') { e->i++; i64 d = ex_primary(e); v = d ? v % d : 0; }
+        if (c == '*') { e->i++; v = (i64)((u64)v * (u64)ex_primary(e)); }
+        else if (c == '/') { e->i++; i64 d = ex_primary(e); v = (d && !(d == -1 && v == (i64)0x8000000000000000ULL)) ? v / d : 0; }
+        else if (c == '%') { e->i++; i64 d = ex_primary(e); v = (d && !(d == -1 && v == (i64)0x8000000000000000ULL)) ? v % d : 0; }
         else return v;
     }
 }
@@ -222,8 +222,8 @@ static i64 ex_add(ex *e)
         e->i = skip_sp(e->s, e->n, e->i);
         if (e->i >= e->n) return v;
         char c = e->s[e->i];
-        if (c == '+') { e->i++; v += ex_mul(e); }
-        else if (c == '-') { e->i++; v -= ex_mul(e); }
+        if (c == '+') { e->i++; v = (i64)((u64)v + (u64)ex_mul(e)); }
+        else if (c == '-') { e->i++; v = (i64)((u64)v - (u64)ex_mul(e)); }
         else return v;
     }
 }
@@ -233,8 +233,8 @@ static i64 ex_shift(ex *e)
     i64 v = ex_add(e);
     for (;;) {
         e->i = skip_sp(e->s, e->n, e->i);
-        if (e->i + 1 < e->n && e->s[e->i] == '<' && e->s[e->i + 1] == '<') { e->i += 2; v = (i64)((u64)v << ex_add(e)); }
-        else if (e->i + 1 < e->n && e->s[e->i] == '>' && e->s[e->i + 1] == '>') { e->i += 2; v = (i64)((u64)v >> ex_add(e)); }
+        if (e->i + 1 < e->n && e->s[e->i] == '<' && e->s[e->i + 1] == '<') { e->i += 2; v = (i64)((u64)v << ((u64)ex_add(e) & 63)); }
+        else if (e->i + 1 < e->n && e->s[e->i] == '>' && e->s[e->i + 1] == '>') { e->i += 2; v = (i64)((u64)v >> ((u64)ex_add(e) & 63)); }
         else return v;
     }
 }

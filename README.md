@@ -689,7 +689,10 @@ built binary.
   into the machine's: .set, .rept, .if, numbered labels, AT&T order.
   In the terminal: compile and assemble as before, "link" on a list of
   objects, "build" on a list of texts (every .c and .S in it, then the
-  link), "take in" and "write out" for the exchange disk. Proof on the
+  link), "take in" and "write out" for the exchange disk. A build runs
+  in a thread of its own and reports to the journal, so the screen
+  keeps up while the compiler works; one build at a time, and the
+  other tools wait for it, since they share its tables. Proof on the
   host: tools/selfbuild.sh builds the whole kernel with cchost -- the
   same cc.c, asm.c, gnu.c and ld.c the kernel carries -- and boots it
   in QEMU; it comes up to the desktop, with the network, the door and
@@ -705,8 +708,48 @@ built binary.
   encoded as imul with rax, and initializer address tables cut off at
   sixteen entries. Honest edges: a struct is handed to a function by
   pointer, never by value; there is no 128-bit type; the boot loader
-  is still built outside, and the kernel the machine builds still
-  travels to the boot disk by way of the host.
+  is still built outside.
+* **Installing.** The boot disk is a disk of its own to the kernel
+  now, and "install" on a kernel's bytes -- the word in the terminal,
+  the chip on the bytes -- lays it down in \erebus as kernel.new,
+  then turns the names: the running kernel becomes kernel.old, the
+  new one kernel.elf, and the count of starts goes to zero. "restart"
+  saves the graph and starts the machine again. The loader keeps the
+  count: it raises it before every start, the kernel clears it once
+  it is up, and two starts that never cleared it mean the installed
+  kernel does not come up -- the loader puts kernel.old back under
+  the name it reads, boots it, and that kernel says in the journal
+  what happened. So the loop is closed: change a source on the
+  machine, build, install, restart, and the machine runs what it
+  built; a mistake costs two failed starts and nothing else. Proof in
+  tools/install-test.sh: the self-built kernel installed and started
+  from inside, saying it was built here; then a kernel whose first
+  instruction is ud2, installed the same way, and the machine back on
+  the previous kernel two starts later. The FAT reader learned
+  directories and the writer to replace, rename and delete for this,
+  and one fat sector is held between uses, which made writing a
+  kernel out five times faster.
+* **Tests through the door.** tools/door.sh types a test key into the
+  settings once, the honest way, and keeps that store; tools/doorboot.sh
+  starts a copy of it with the door reachable, and door_say runs one
+  terminal line over ssh and hands the answer back as text. No key
+  timings, no screen coordinates: tools/doortest.sh runs the
+  compiler's proof that way. The older tests keep typing on the
+  screen, which is also a test of the screen.
+* **Fuzzing the tools.** tools/fuzz/run.sh builds the compiler, the
+  assembler in both dialects and the linker under libFuzzer with the
+  address and undefined-behaviour sanitizers, seeds them with the
+  kernel's own sources, and lets a machine look for the input that
+  makes one of them read or write where it should not. Its first
+  minutes found the signed overflows in the expression evaluators,
+  which are unsigned now.
+* **Names in the crash report.** The kernel carries a table of its
+  code's names, between the data and the bss, and the report reads a
+  fault's address and every step of the trace back to a name and an
+  offset. The outside build links twice -- once to learn the
+  addresses, once with the table -- and the machine's own linker
+  writes the table itself, in the same shape, so a self-built kernel
+  reports the same way.
 * **The door.** The terminal reached over the network, by real ssh,
   so the client anyone already has can knock: version 2,
   curve25519-sha256 for the exchange, ssh-ed25519 for the host's

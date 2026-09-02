@@ -219,7 +219,9 @@ typedef struct {
 #define EFI_FILE_INFO_GUID \
     { 0x09576e92, 0x6d3f, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } }
 
-#define EFI_FILE_MODE_READ 0x0000000000000001ULL
+#define EFI_FILE_MODE_READ   0x0000000000000001ULL
+#define EFI_FILE_MODE_WRITE  0x0000000000000002ULL
+#define EFI_FILE_MODE_CREATE 0x8000000000000000ULL
 
 struct _EFI_FILE_PROTOCOL;
 
@@ -230,10 +232,11 @@ typedef struct _EFI_FILE_PROTOCOL {
                               CHAR16 *FileName, UINT64 OpenMode,
                               UINT64 Attributes);
     EFI_STATUS (EFIAPI *Close)(struct _EFI_FILE_PROTOCOL *This);
-    VOID       *Delete;
+    EFI_STATUS (EFIAPI *Delete)(struct _EFI_FILE_PROTOCOL *This);
     EFI_STATUS (EFIAPI *Read)(struct _EFI_FILE_PROTOCOL *This,
                               UINTN *BufferSize, VOID *Buffer);
-    VOID       *Write;
+    EFI_STATUS (EFIAPI *Write)(struct _EFI_FILE_PROTOCOL *This,
+                               UINTN *BufferSize, VOID *Buffer);
     VOID       *GetPosition;
     EFI_STATUS (EFIAPI *SetPosition)(struct _EFI_FILE_PROTOCOL *This,
                                      UINT64 Position);

@@ -191,6 +191,18 @@ static void standard_wire(const char *name, object *prog)
     proc_grant(prog, net_port(), CAP_CALL);
 }
 
+/* The caller's hold on a program object, taken before the program
+ * starts. A program can run to its end and be reaped between its
+ * start and the caller's next line; the process's own hold goes with
+ * the reaping, and without this one the object would be freed memory
+ * by the time it is laid anywhere. */
+static object *held(process *p)
+{
+    object *o = proc_object(p);
+    obj_retain(o);
+    return o;
+}
+
 object *standard_launch(u32 i)
 {
     if (i >= STANDARD_COUNT || !console_port) return NULL;
@@ -198,12 +210,13 @@ object *standard_launch(u32 i)
     process *p = proc_create(standard[i].name, standard[i].entry,
                              console_port);
     if (!p) return NULL;
-    if (!proc_start(p)) return NULL;
-    standard_wire(standard[i].name, proc_object(p));
+    object *prog = held(p);
+    if (!proc_start(p)) { obj_release(prog); return NULL; }
+    standard_wire(standard[i].name, prog);
 
     kprintf("proc: %llu (%s) started from the shell\n",
             proc_id(p), proc_name(p));
-    return proc_object(p);
+    return prog;
 }
 
 /* The interpreter, from user/runner.c -- the one C program in the
@@ -218,13 +231,13 @@ object *runner_launch(object *script)
     process *p = proc_create("script", (const void *)user_runner,
                              console_port);
     if (!p) return NULL;
-    if (!proc_start(p)) return NULL;
+    object *prog = held(p);
+    if (!proc_start(p)) { obj_release(prog); return NULL; }
 
     /* Its words: the first giving, recorded on the program object like
      * every giving, and read-only like every set of orders should be
      * from the inside. The text stays editable from the outside, which
      * is exactly the difference between author and program. */
-    object *prog = proc_object(p);
     obj_set_slot(prog, 0, script, CAP_READ);
     obj_set_slot_name(prog, 0, "its words");
     proc_grant(prog, script, CAP_READ);
@@ -242,13 +255,13 @@ object *code_launch(object *image)
 
     process *p = proc_create_code("code", d, obj_size(image), console_port);
     if (!p) return NULL;
-    if (!proc_start(p)) return NULL;
+    object *prog = held(p);
+    if (!proc_start(p)) { obj_release(prog); return NULL; }
 
     /* Its image: the first giving, recorded on the program object like
      * every giving, and read-only like a set of orders should be from
      * the inside. The bytes stay the person's to change from outside;
      * what runs is what was loaded. */
-    object *prog = proc_object(p);
     obj_set_slot(prog, 0, image, CAP_READ);
     obj_set_slot_name(prog, 0, "its code");
     proc_grant(prog, image, CAP_READ);
@@ -275,9 +288,9 @@ object *work_launch(object *script, object *reply, u64 budget_seconds,
     process *p = proc_create("work", (const void *)user_runner,
                              console_port);
     if (!p) return NULL;
-    if (!proc_start(p)) return NULL;
+    object *prog = held(p);
+    if (!proc_start(p)) { obj_release(prog); return NULL; }
 
-    object *prog = proc_object(p);
     obj_set_slot(prog, 0, script, CAP_READ);
     obj_set_slot_name(prog, 0, "its words");
     proc_grant_word(prog, script, CAP_READ, budget_seconds);
@@ -770,6 +783,26 @@ void system_off(void)
     journal_says("system", "the machine would not sleep");
 }
 
+void system_restart(void)
+{
+    object *roots[2] = { persistent_root, shell_session() };
+    if (persistent_root && blk_present())
+        snap_save(roots, roots[1] ? 2 : 1);
+    kprintf("system: restarting; generation %llu is on the disk\n",
+            snap_generation());
+
+    /* The keyboard controller's reset line, then the chipset's reset
+     * register, and if neither is listened to, an interrupt with no
+     * table to take it: the processor resets itself. */
+    outb(0x64, 0xFE);
+    for (volatile u32 i = 0; i < 1000000; i++) { }
+    outb(0xCF9, 0x06);
+    for (volatile u32 i = 0; i < 1000000; i++) { }
+    struct { u16 limit; u64 base; } __attribute__((packed)) none = { 0, 0 };
+    __asm__ volatile ("lidt %0\n\tint3" :: "m"(none));
+    for (;;) __asm__ volatile ("hlt");
+}
+
 /* Writes the graph out once changes have stopped arriving.
  *
  * There is no save command, so something has to decide when. Waiting
@@ -1090,6 +1123,11 @@ void kmain(eb_boot_info *bi)
 
     kprintf("\n\nErebus %s (x86_64)\n", EREBUS_VERSION);
     kprintf("boot: handover verified, version %u\n", bi->version);
+#ifdef __erebus__
+    /* The compiler the machine carries defines this; the one outside
+     * does not. A kernel that says it was built here, was. */
+    kprintf("boot: this kernel was built by the machine's own tools\n");
+#endif
 
     log_cpu();
 
@@ -1598,6 +1636,7 @@ void kmain(eb_boot_info *bi)
                     }
                     obj_set_slot(place, i, fresh,
                                  obj_slot_rights(place, i));
+                    obj_release(fresh);          /* the slot holds it now */
                     matched = true;
                 }
             }
@@ -1834,6 +1873,19 @@ void kmain(eb_boot_info *bi)
         thread_create("activity", activity_thread, NULL, kernel_domain);
         if (blk_present()) thread_create("persist", persist_thread, NULL,
                                          kernel_domain);
+    }
+
+    /* The kernel is up: the loader's count of starts goes back to
+     * zero. A start the loader had to rescue is said so, and so is
+     * one that follows a start that never got this far. */
+    {
+        u32 was = fat_boot_settle();
+        if (bi->flags & EB_BOOT_FELL_BACK) {
+            kprintf("boot: the installed kernel did not come up twice; the previous one is back as kernel.elf\n");
+            journal_says("system", "the new kernel did not come up; the previous one is back");
+        } else if (was > 1) {
+            journal_says("system", "the machine is up after a start that did not finish");
+        }
     }
 
     dump_ranges(bi);

@@ -2579,17 +2579,21 @@ static bool const_val(u32 i, cval *out)
             return false;
         }
         i64 x = a.v, y = b.v;
+        /* Folded in unsigned arithmetic, so that a constant that
+         * overflows wraps the way the machine's own instruction would
+         * instead of being undefined here; a shift keeps to 63. */
+        bool edge = (y == -1 && x == (i64)0x8000000000000000ULL);
         switch (n->kind) {
-        case ND_ADD: out->v = x + y; break;
-        case ND_SUB: out->v = x - y; break;
-        case ND_MUL: out->v = x * y; break;
-        case ND_DIV: out->v = y ? x / y : 0; break;
-        case ND_MOD: out->v = y ? x % y : 0; break;
+        case ND_ADD: out->v = (i64)((u64)x + (u64)y); break;
+        case ND_SUB: out->v = (i64)((u64)x - (u64)y); break;
+        case ND_MUL: out->v = (i64)((u64)x * (u64)y); break;
+        case ND_DIV: out->v = (y && !edge) ? x / y : (edge ? x : 0); break;
+        case ND_MOD: out->v = (y && !edge) ? x % y : 0; break;
         case ND_AND: out->v = x & y; break;
         case ND_OR:  out->v = x | y; break;
         case ND_XOR: out->v = x ^ y; break;
-        case ND_SHL: out->v = x << y; break;
-        case ND_SHR: out->v = x >> y; break;
+        case ND_SHL: out->v = (i64)((u64)x << ((u64)y & 63)); break;
+        case ND_SHR: out->v = x >> ((u64)y & 63); break;
         case ND_EQ:  out->v = x == y; break;
         case ND_NE:  out->v = x != y; break;
         case ND_LT:  out->v = x < y; break;

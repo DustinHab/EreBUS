@@ -110,7 +110,7 @@ typedef struct {
 } ahci_disk;
 
 static hba_mem  *hba;
-static ahci_disk store_d, aux_d;
+static ahci_disk store_d, aux_d, boot_d;
 static bool present;
 static u32  disk_count;
 static char model[41];
@@ -344,8 +344,23 @@ bool blk_init(void)
         else
             kprintf("blk:  the exchange disk did not answer\n");
     }
+
+    /* The disk the machine booted from, when it is not also the store:
+     * the kernel lives there, and a kernel built here is installed
+     * there. */
+    bool have_zero = false;
+    for (u32 i = 0; i < nfound; i++) if (found[i] == 0) have_zero = true;
+    if (have_zero && store_at != 0) {
+        if (disk_up(&boot_d, &hba->ports[0], 0, false))
+            kprintf("blk:  the boot disk on port 0, %llu sectors\n", boot_d.sectors);
+        else
+            kprintf("blk:  the boot disk did not answer\n");
+    }
     return true;
 }
+
+bool blk_boot_present(void)  { return boot_d.ready; }
+u64  blk_boot_sectors(void)  { return boot_d.sectors; }
 
 bool blk_present(void)      { return present; }
 u64  blk_sectors(void)      { return store_d.sectors; }
@@ -424,6 +439,16 @@ bool blk_aux_read(u64 lba, u32 count, void *dst)
 bool blk_aux_write(u64 lba, u32 count, const void *src)
 {
     return disk_write(&aux_d, lba, count, src);
+}
+
+bool blk_boot_read(u64 lba, u32 count, void *dst)
+{
+    return disk_read(&boot_d, lba, count, dst);
+}
+
+bool blk_boot_write(u64 lba, u32 count, const void *src)
+{
+    return disk_write(&boot_d, lba, count, src);
 }
 
 /* --- self test -------------------------------------------------------- */

@@ -34,6 +34,10 @@ typedef struct {
     eb_u32 _pad;
 } eb_mem_range;
 
+/* The installed kernel did not come up twice running; the loader put
+ * the previous one back and booted that. */
+#define EB_BOOT_FELL_BACK 1u
+
 /* Framebuffer pixel format. Only 32 bits per pixel is supported. */
 #define EB_FB_BGRX8888 0u  /* byte order B,G,R,X -- the common case */
 #define EB_FB_RGBX8888 1u
@@ -58,7 +62,7 @@ typedef struct {
     eb_u32 fb_height;  /* visible height in pixels */
     eb_u32 fb_stride;  /* pixels per scanline -- may exceed fb_width */
     eb_u32 fb_format;  /* EB_FB_* */
-    eb_u32 _pad0;
+    eb_u32 flags;      /* EB_BOOT_* : what the loader had to do on the way */
 
     /* --- memory map -------------------------------------------------- */
     eb_u64 mem_ranges; /* PHYSICAL pointer to eb_mem_range[mem_count] */

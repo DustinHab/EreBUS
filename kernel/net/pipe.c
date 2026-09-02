@@ -1273,7 +1273,8 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
             obj_release(reply);
             return;
         }
-        obj_retain(prog);
+        /* The launcher's hold on the program object is now the job's;
+         * it goes when the job is cleared. */
 
         workj.active = true;
         workj.id = id;

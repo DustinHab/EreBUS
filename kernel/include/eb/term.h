@@ -52,6 +52,14 @@ const char *term_gather(term_session *s, u32 *len);
 typedef void (*term_say_fn)(void *ctx, const char *line);
 bool term_build_list(object *list, const char *name, term_say_fn say, void *ctx);
 bool term_link_list(object *list, const char *name, term_say_fn say, void *ctx);
+
+/* The same build, in a thread of its own, reporting to the journal:
+ * the shell keeps drawing while the compiler works. One build at a
+ * time; false when one is running already, or no thread could be
+ * had. The tools' tables are shared, so compile, assemble and link
+ * wait while a build runs -- term_building says so. */
+bool term_build_start(object *list, const char *name);
+bool term_building(void);
 void term_key(term_session *s, char c);
 void term_rub(term_session *s);
 void term_clear_line(term_session *s);

@@ -114,6 +114,7 @@ KERN_C   := kernel/main.c \
             kernel/lang/big.c \
             kernel/lang/ld.c \
             kernel/lang/gnu.c \
+            kernel/lib/names.c \
             kernel/lang/cc.c \
             kernel/term/term.c \
             kernel/user/runner.c \
@@ -209,10 +210,20 @@ $(BUILD)/kernel/user/pulse.o: kernel/user/pulse.c $(FONT)
 	@$(CC) $(KERN_FLAGS) -fno-stack-protector -fno-jump-tables \
 	       -c kernel/user/pulse.c -o $@
 
-$(KERNEL): $(KERN_OBJ) kernel/arch/x86_64/linker.ld
+# Linked twice: once with an empty name table, to learn where the code
+# lies, and again with the table of those names. The table sits after
+# the data and before the bss, so the second link moves no code.
+$(KERNEL): $(KERN_OBJ) kernel/arch/x86_64/linker.ld tools/mknames.py
+	@echo "  LINK    $@ (first, to learn the names)"
+	@$(PY) tools/mknames.py > $(BUILD)/names0.c
+	@$(CC) $(KERN_FLAGS) -c $(BUILD)/names0.c -o $(BUILD)/names0.o
+	@$(LD) -T kernel/arch/x86_64/linker.ld -nostdlib -z noexecstack \
+	       -o $(BUILD)/kernel.stage1.elf $(KERN_OBJ) $(BUILD)/names0.o
+	@nm -n $(BUILD)/kernel.stage1.elf | $(PY) tools/mknames.py names > $(BUILD)/names.c
+	@$(CC) $(KERN_FLAGS) -c $(BUILD)/names.c -o $(BUILD)/names.o
 	@echo "  LINK    $@"
 	@$(LD) -T kernel/arch/x86_64/linker.ld -nostdlib -z noexecstack \
-	       -o $@ $(KERN_OBJ)
+	       -o $@ $(KERN_OBJ) $(BUILD)/names.o
 	@echo "  SIZE    $$(stat -c%s $@) bytes"
 
 # --- bootable image ---------------------------------------------------

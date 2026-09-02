@@ -33,6 +33,14 @@ u64  blk_aux_sectors(void);
 bool blk_aux_read(u64 lba, u32 count, void *dst);
 bool blk_aux_write(u64 lba, u32 count, const void *src);
 
+/* The boot disk: port zero, when it is a disk of its own and not also
+ * the store. The kernel the machine starts from lies on it, and a
+ * kernel built here is installed there. */
+bool blk_boot_present(void);
+u64  blk_boot_sectors(void);
+bool blk_boot_read(u64 lba, u32 count, void *dst);
+bool blk_boot_write(u64 lba, u32 count, const void *src);
+
 /* Writes a pattern, reads it back, and puts the sector back as it was.
  * Runs on a sector well past anything we use. */
 bool blk_selftest(void);
