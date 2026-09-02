@@ -208,6 +208,12 @@ vmm_protections vmm_active_protections(void) { return active; }
 #define CR4_SMAP (1ULL << 21)
 
 #define CR0_WP   (1ULL << 16)
+#define CR0_MP   (1ULL << 1)
+#define CR0_EM   (1ULL << 2)
+#define CR0_TS   (1ULL << 3)
+
+#define CR4_OSFXSR     (1ULL << 9)
+#define CR4_OSXMMEXCPT (1ULL << 10)
 
 static u64 read_msr(u32 msr)
 {
@@ -253,10 +259,15 @@ static void enable_nx(const cpu_info *cpu)
 
 static void enable_after_switch(const cpu_info *cpu)
 {
-    write_cr0(read_cr0() | CR0_WP);
+    /* The vector unit is switched on for programs -- the compiler's
+     * floating point lives in xmm registers -- and never used by the
+     * kernel itself, which is built without it. Each program's
+     * registers are saved and restored around it by the scheduler,
+     * so nothing leaks between programs and nothing is lost. */
+    write_cr0((read_cr0() | CR0_WP | CR0_MP) & ~(CR0_EM | CR0_TS));
     active.wp = true;
 
-    u64 cr4 = read_cr4();
+    u64 cr4 = read_cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT;
     if (cpu->smep) { cr4 |= CR4_SMEP; active.smep = true; }
     if (cpu->smap) { cr4 |= CR4_SMAP; active.smap = true; }
     if (cpu->umip) { cr4 |= CR4_UMIP; active.umip = true; }

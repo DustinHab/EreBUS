@@ -3,47 +3,59 @@
  *
  * One pass over the text to read it, one walk over each function's
  * tree to say it in the assembler's words. Nothing clever: every
- * value passes through rax, every variable lives in memory, every
- * operator is the handful of instructions it plainly is. What comes
- * out is meant to be read -- it lies beside the source as a text --
- * and the assembler is the only thing that ever encodes a byte.
+ * integer value passes through rax and every floating one through
+ * xmm0, every variable lives in memory, every operator is the
+ * handful of instructions it plainly is. What comes out is meant to
+ * be read -- it lies beside the source as a text -- and the
+ * assembler is the only thing that ever encodes a byte.
  *
- * The language is c, in the shape a person writes it: char, int and
- * long, signed or not; pointers, arrays, structs, typedefs, enums;
- * functions with up to six parameters, and pointers to them; the
- * operators with their precedence; if, while, for, do, switch,
- * break, continue, return; sizeof and casts; #define, #include of a
- * text lying beside this one, #ifdef and its kin. Arithmetic is done
- * in 64 bits and cut to size on the way into a variable.
+ * The language is c, in the shape a person writes it: char, short,
+ * int and long, signed or not; float and double; pointers, arrays,
+ * structs and unions, bit fields, typedefs, enums; functions with up
+ * to six parameters, variadic ones, and pointers to them; the
+ * operators with their precedence; if, while, for, do, switch, goto;
+ * sizeof and casts; initializers with braces and designators; the
+ * preprocessor with function-like macros, #if arithmetic, #include
+ * of a text lying beside this one, and the handful of standard
+ * headers a program leans on. Integer arithmetic is done in 64 bits
+ * and cut to size on the way into a variable.
  *
- * Not here, and said so on the compiler's own page: unions, bit
- * fields, floating point, varargs, function-like macros, #if with
- * arithmetic, goto. The kernel needs some of those; that is the
- * honest distance still to go.
+ * Not here, and said so on the compiler's own page: passing or
+ * returning a struct by value, inline assembly with operands, more
+ * than six arguments to a call.
  */
 #include <eb/cc.h>
 #include <eb/string.h>
 
-#define NAME_MAX    32
-#define STR_POOL    32768
-#define NSTR        256
-#define NTYPES      512
-#define NMEMBERS    1024
-#define NSYMS       2048
+#define NAME_MAX    40
+#define STR_POOL    65536
+#define NSTR        512
+#define NTYPES      1024
+#define NMEMBERS    2048
+#define NSYMS       4096
 #define NNODES      16384
-#define NMACROS     128
-#define MACRO_TEXT  200
-#define NTYPEDEFS   128
-#define NTAGS       64
-#define NSRC        8
-#define NCOND       16
-#define NPARAMS     6
+#define NMACROS     256
+#define MACRO_TEXT  400
+#define MPARAMS     8
+#define NTYPEDEFS   256
+#define NTAGS       128
+#define NSRC        12
+#define NCOND       32
+#define NPARAMS     16                /* a function's parameters at most */
+#define REGARGS     6                 /* of which this many ride in registers */
+#define EXP_POOL    32768
+#define NGLOBALS    384
+#define INIT_MAX    65536
+#define NFIX        512
+#define NDYN        256
+#define NGOTO       64
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
 /* ------------------------------------------------------------------ */
 
-enum { T_VOID, T_CHAR, T_INT, T_LONG, T_PTR, T_ARR, T_STRUCT, T_FUNC };
+enum { T_VOID, T_CHAR, T_SHORT, T_INT, T_LONG, T_FLOAT, T_DOUBLE,
+       T_PTR, T_ARR, T_STRUCT, T_UNION, T_FUNC };
 
 typedef struct type type;
 struct type {
@@ -52,13 +64,20 @@ struct type {
     u32   size, align;
     type *base;                       /* ptr, arr: the element; func: what it returns */
     u64   len;                        /* arr */
-    u32   mfirst, mcount;             /* struct: its members */
+    u32   mfirst, mcount;             /* struct, union: its members */
     u32   nparams;
     type *params[NPARAMS];
+    bool  variadic;
     bool  defined;                    /* struct: the body has been seen */
+    bool  packed;
 };
 
-typedef struct { char name[NAME_MAX]; type *ty; u32 offset; } member;
+typedef struct {
+    char  name[NAME_MAX];
+    type *ty;
+    u32   offset;
+    u8    bit_off, bit_width;         /* a bit field, when bit_width is not zero */
+} member;
 
 /* ------------------------------------------------------------------ */
 /* Symbols                                                             */
@@ -68,10 +87,12 @@ enum { S_LOCAL, S_GLOBAL, S_FUNC, S_ENUM };
 
 typedef struct {
     char  name[NAME_MAX];
+    char  label[NAME_MAX];            /* global: the name it goes by in the assembly */
     type *ty;
     u8    kind;
     i64   val;                        /* local: its offset below rbp; enum: its value */
     bool  defined;                    /* func: a body was seen */
+    bool  hidden;                     /* its scope has closed; the slot stays */
 } sym;
 
 /* ------------------------------------------------------------------ */
@@ -79,14 +100,15 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 enum {
-    ND_NONE, ND_NUM, ND_VAR, ND_STR,
+    ND_NONE, ND_NUM, ND_FNUM, ND_VAR, ND_STR,
     ND_ADD, ND_SUB, ND_MUL, ND_DIV, ND_MOD, ND_AND, ND_OR, ND_XOR,
     ND_SHL, ND_SHR, ND_EQ, ND_NE, ND_LT, ND_LE,
     ND_LAND, ND_LOR, ND_NOT, ND_BITNOT, ND_NEG,
     ND_ASSIGN, ND_COND, ND_ADDR, ND_DEREF, ND_MEMBER, ND_CALL,
-    ND_CAST, ND_INCDEC, ND_SYSCALL, ND_COMMA,
+    ND_CAST, ND_INCDEC, ND_SYSCALL, ND_COMMA, ND_VASTART, ND_VAARG,
     ND_EXPR, ND_RETURN, ND_IF, ND_WHILE, ND_DO, ND_FOR, ND_BLOCK,
-    ND_BREAK, ND_CONTINUE, ND_SWITCH, ND_CASE, ND_DEFAULT
+    ND_BREAK, ND_CONTINUE, ND_SWITCH, ND_CASE, ND_DEFAULT,
+    ND_GOTO, ND_LABEL, ND_ASM, ND_MEMCPY, ND_ZERO
 };
 
 typedef struct {
@@ -97,8 +119,9 @@ typedef struct {
     u32   next;                       /* the next in a list */
     type *ty;
     i64   val;
+    u64   fval;                       /* a double, as its bits */
     u32   sym;                        /* var, call by name */
-    u32   aux;                        /* member, string, a case's chain */
+    u32   aux;                        /* member, string, a case's chain, a label */
     u32   line;
 } node;
 
@@ -106,15 +129,16 @@ typedef struct {
 /* Tokens                                                              */
 /* ------------------------------------------------------------------ */
 
-enum { TK_EOF, TK_NUM, TK_IDENT, TK_PUNCT, TK_STR };
+enum { TK_EOF, TK_NUM, TK_FNUM, TK_IDENT, TK_PUNCT, TK_STR };
 
 typedef struct {
-    u8   kind;
-    i64  val;
-    char text[NAME_MAX];
-    u32  str;                         /* TK_STR: which string */
-    u32  line;
-    char where[NAME_MAX];             /* which text it came from */
+    u8     kind;
+    i64    val;
+    u64    fval;                      /* a double, as its bits */
+    char   text[NAME_MAX];
+    u32    str;                       /* TK_STR: which string */
+    u32    line;
+    char   where[NAME_MAX];           /* which text it came from */
 } token;
 
 typedef struct {
@@ -124,9 +148,29 @@ typedef struct {
     char name[NAME_MAX];
     bool macro;                       /* a macro's words; no lines of its own */
     bool bol;
+    u32  pool_mark;                   /* where the expansion pool stood before */
 } source;
 
-typedef struct { char name[NAME_MAX]; char text[MACRO_TEXT]; } macro;
+typedef struct {
+    char name[NAME_MAX];
+    char text[MACRO_TEXT];
+    bool func;
+    u8   nparams;
+    char params[MPARAMS][NAME_MAX];
+} macro;
+
+/* One #if and its branches. */
+typedef struct { bool parent, active, taken; } cond;
+
+/* ------------------------------------------------------------------ */
+/* Initializers                                                        */
+/* ------------------------------------------------------------------ */
+
+/* An initializer becomes a byte image, a few places where an address
+ * goes instead of bytes, and -- for a local -- a few places computed
+ * at run time. */
+typedef struct { u32 off; char label[NAME_MAX]; i64 addend; } fixup;
+typedef struct { u32 off; type *ty; u32 expr; } dyn_init;
 
 /* ------------------------------------------------------------------ */
 /* The compiler's whole state, static: the kernel has no malloc to    */
@@ -137,9 +181,11 @@ static struct {
     /* reading */
     source src[NSRC];
     u32    nsrc;
+    char   exp_pool[EXP_POOL];
+    u32    exp_top;
     macro  macros[NMACROS];
     u32    nmacros;
-    bool   cond[NCOND];
+    cond   conds[NCOND];
     u32    ncond;
     token  cur, nxt;
     cc_find_fn find;
@@ -158,7 +204,8 @@ static struct {
     u32    ntypedefs;
     struct { char name[NAME_MAX]; type *ty; } tags[NTAGS];
     u32    ntags;
-    type  *t_void, *t_char, *t_uchar, *t_int, *t_uint, *t_long, *t_ulong;
+    type  *t_void, *t_char, *t_uchar, *t_short, *t_ushort, *t_int, *t_uint,
+          *t_long, *t_ulong, *t_float, *t_double, *t_charp;
 
     node   nodes[NNODES];
     u32    nnodes;
@@ -172,11 +219,24 @@ static struct {
     /* the function being read */
     i64    frame;
     type  *ret_ty;
+    type  *fn_ty;
     u32    fn_no;
+    i64    va_area;                   /* offset of the saved registers, variadic */
     u32    brk[32], cont[32];
     u32    nbrk, ncont;
-    u32    sw_case[32];               /* the case chain being gathered */
+    u32    sw_case[32];
     u32    nsw;
+    char   gotos[NGOTO][NAME_MAX];    /* labels named in this function */
+    u32    ngotos;
+    u32    statics;                   /* static locals made so far */
+
+    /* initializers being built */
+    u8     ibuf[INIT_MAX];
+    fixup  fixes[NFIX];
+    u32    nfix;
+    dyn_init dyns[NDYN];
+    u32    ndyn;
+    u32    ninit_consts;              /* hidden constants for local initializers */
 
     /* writing */
     char  *out;
@@ -193,6 +253,105 @@ static void cpy(char *d, const char *s)
     u32 i = 0;
     while (s[i] && i < NAME_MAX - 1) { d[i] = s[i]; i++; }
     d[i] = 0;
+}
+
+static bool same(const char *a, const char *b) { return strcmp(a, b) == 0; }
+
+void global_add(const char *label, struct type *t, bool has_init, bool is_extern);
+
+/* ------------------------------------------------------------------ */
+/* Doubles without a vector unit                                       */
+/* ------------------------------------------------------------------ */
+
+/* The kernel is built with the vector unit off, so the compiler
+ * cannot hold a double as a double; it holds the sixty-four bits of
+ * one and makes them with whole-number arithmetic. A literal is a
+ * significand and a power of ten; both are folded into a normalised
+ * mantissa and a power of two, then rounded into the IEEE shape. */
+typedef u64 fbits;
+
+static fbits sf_pack(bool neg, u64 mant, i32 exp2)
+{
+    u64 sign = neg ? (1ULL << 63) : 0;
+    if (mant == 0) return sign;
+    while (!(mant >> 63)) { mant <<= 1; exp2--; }
+    i32 e = exp2 + 63;
+    u64 m = mant;
+    u64 rem = m & 0x7FF;
+    m >>= 11;
+    if (rem > 0x400 || (rem == 0x400 && (m & 1))) { m++; if (m >> 53) { m >>= 1; e++; } }
+    i32 be = e + 1023;
+    if (be >= 2047) return sign | 0x7FF0000000000000ULL;
+    if (be <= 0) return sign;
+    return sign | ((u64)be << 52) | (m & 0x000FFFFFFFFFFFFFULL);
+}
+
+static void sf_norm(u64 *m, i32 *e)
+{
+    while (*m && !(*m >> 63)) { *m <<= 1; (*e)--; }
+}
+
+static void sf_mul10(u64 *m, i32 *e)
+{
+    unsigned __int128 p = (unsigned __int128)*m * 10;
+    i32 shift = 0;
+    while (p >> 64) { p >>= 1; shift++; }
+    *m = (u64)p;
+    *e += shift;
+    sf_norm(m, e);
+}
+
+static void sf_div10(u64 *m, i32 *e)
+{
+    unsigned __int128 q = ((unsigned __int128)*m << 64) / 10;
+    i32 shift = -64;
+    while (q >> 64) { q >>= 1; shift++; }
+    *m = (u64)q;
+    *e += shift;
+    sf_norm(m, e);
+}
+
+static fbits sf_from_decimal(u64 sig, i32 dexp)
+{
+    if (sig == 0) return 0;
+    u64 m = sig;
+    i32 e = 0;
+    sf_norm(&m, &e);
+    while (dexp > 0) { sf_mul10(&m, &e); dexp--; }
+    while (dexp < 0) { sf_div10(&m, &e); dexp++; }
+    return sf_pack(false, m, e);
+}
+
+static fbits sf_from_int(i64 v)
+{
+    bool neg = v < 0;
+    u64 m = neg ? (u64)(-v) : (u64)v;
+    return sf_pack(neg, m, 0);
+}
+
+static i64 sf_to_int(fbits b)
+{
+    bool neg = (b >> 63) != 0;
+    i32 e = (i32)((b >> 52) & 0x7FF) - 1023;
+    if (e < 0 || ((b >> 52) & 0x7FF) == 0) return 0;
+    u64 m = (b & 0x000FFFFFFFFFFFFFULL) | (1ULL << 52);
+    u64 v = e >= 52 ? (e - 52 >= 12 ? 0 : m << (e - 52)) : m >> (52 - e);
+    return neg ? -(i64)v : (i64)v;
+}
+
+static u32 sf_to_single(fbits b)
+{
+    u32 sign = (u32)(b >> 63) << 31;
+    i32 be = (i32)((b >> 52) & 0x7FF);
+    u64 m = b & 0x000FFFFFFFFFFFFFULL;
+    if (be == 0) return sign;
+    i32 e = be - 1023 + 127;
+    u64 rem = m & 0x1FFFFFFF;
+    u32 f = (u32)(m >> 29);
+    if (rem > 0x10000000 || (rem == 0x10000000 && (f & 1))) { f++; if (f >> 23) { f >>= 1; e++; } }
+    if (e >= 255) return sign | 0x7F800000;
+    if (e <= 0) return sign;
+    return sign | ((u32)e << 23) | (f & 0x7FFFFF);
 }
 
 /* ------------------------------------------------------------------ */
@@ -231,9 +390,15 @@ static void fail_at(u32 line, const char *where, const char *why, const char *wh
     C.err[at] = 0;
 }
 
+static bool in_directive;
+
 static void fail(const char *why, const char *what)
 {
-    fail_at(C.cur.line, C.cur.where, why, what);
+    /* Inside a directive the reader is ahead of the parser: the line
+     * that matters is the one being read, not the last token's. */
+    source *s = in_directive && C.nsrc ? &C.src[C.nsrc - 1] : NULL;
+    if (s) fail_at(s->line, s->name, why, what);
+    else fail_at(C.cur.line, C.cur.where, why, what);
 }
 
 /* ------------------------------------------------------------------ */
@@ -244,8 +409,6 @@ static source *top(void) { return C.nsrc ? &C.src[C.nsrc - 1] : NULL; }
 
 static i32 peekc(u32 ahead)
 {
-    /* Only within the current source: a macro's words end where
-     * they end, and the text that named it goes on after. */
     source *s = top();
     if (!s || s->pos + ahead >= s->len) return -1;
     return s->text[s->pos + ahead];
@@ -254,8 +417,7 @@ static i32 peekc(u32 ahead)
 static i32 getc_(void)
 {
     source *s = top();
-    if (!s) return -1;
-    if (s->pos >= s->len) return -1;
+    if (!s || s->pos >= s->len) return -1;
     u8 c = s->text[s->pos++];
     if (c == '\n' && !s->macro) { s->line++; s->bol = true; }
     else if (c != ' ' && c != '\t' && c != '\r') s->bol = false;
@@ -264,7 +426,7 @@ static i32 getc_(void)
 
 static bool push_source(const u8 *text, u64 len, const char *name, bool is_macro)
 {
-    if (C.nsrc >= NSRC) { fail("includes nest too deep", NULL); return false; }
+    if (C.nsrc >= NSRC) { fail("includes and macros nest too deep", NULL); return false; }
     source *s = &C.src[C.nsrc++];
     s->text = text;
     s->len = len;
@@ -272,10 +434,26 @@ static bool push_source(const u8 *text, u64 len, const char *name, bool is_macro
     s->line = 1;
     s->macro = is_macro;
     s->bol = true;
-    u32 i = 0;
-    while (name[i] && i < NAME_MAX - 1) { s->name[i] = name[i]; i++; }
-    s->name[i] = 0;
+    s->pool_mark = C.exp_top;
+    cpy(s->name, name);
     return true;
+}
+
+static void pop_source(void)
+{
+    if (!C.nsrc) return;
+    C.exp_top = C.src[C.nsrc - 1].pool_mark;
+    C.nsrc--;
+}
+
+/* Room in the expansion pool for a macro's words; freed when the
+ * words have been read, in stack order. */
+static char *exp_alloc(u32 n)
+{
+    if (C.exp_top + n > EXP_POOL) { fail("the macro expansions are too large together", NULL); return NULL; }
+    char *p = C.exp_pool + C.exp_top;
+    C.exp_top += n;
+    return p;
 }
 
 /* ------------------------------------------------------------------ */
@@ -284,24 +462,67 @@ static bool push_source(const u8 *text, u64 len, const char *name, bool is_macro
 
 static bool skipping(void)
 {
-    for (u32 i = 0; i < C.ncond; i++) if (!C.cond[i]) return true;
-    return false;
+    return C.ncond && !C.conds[C.ncond - 1].active;
 }
 
 static macro *macro_find(const char *nm)
 {
     for (u32 i = 0; i < C.nmacros; i++)
-        if (strcmp(C.macros[i].name, nm) == 0) return &C.macros[i];
+        if (same(C.macros[i].name, nm)) return &C.macros[i];
     return NULL;
 }
 
-/* The rest of the current line, trimmed. */
+static macro *macro_define(const char *nm)
+{
+    macro *m = macro_find(nm);
+    if (!m) {
+        if (C.nmacros >= NMACROS) { fail("too many defines", NULL); return NULL; }
+        m = &C.macros[C.nmacros++];
+    }
+    memset(m, 0, sizeof(*m));
+    cpy(m->name, nm);
+    return m;
+}
+
+static void define_text(const char *nm, const char *text)
+{
+    macro *m = macro_define(nm);
+    if (!m) return;
+    u32 k = 0;
+    while (text[k] && k < MACRO_TEXT - 1) { m->text[k] = text[k]; k++; }
+    m->text[k] = 0;
+}
+
+static void define_func(const char *nm, const char *params, const char *text)
+{
+    macro *m = macro_define(nm);
+    if (!m) return;
+    m->func = true;
+    u32 i = 0;
+    while (params[i] && m->nparams < MPARAMS) {
+        u32 k = 0;
+        while (params[i] && params[i] != ',' && k < NAME_MAX - 1) m->params[m->nparams][k++] = params[i++];
+        m->params[m->nparams][k] = 0;
+        m->nparams++;
+        if (params[i] == ',') i++;
+    }
+    u32 k = 0;
+    while (text[k] && k < MACRO_TEXT - 1) { m->text[k] = text[k]; k++; }
+    m->text[k] = 0;
+}
+
+/* The rest of the current line, trimmed. A backslash at the end
+ * joins the next line on. */
 static u32 read_line(char *buf, u32 max)
 {
     u32 n = 0;
     for (;;) {
         i32 c = peekc(0);
-        if (c < 0 || c == '\n') break;
+        if (c < 0) break;
+        if (c == '\n') {
+            if (n && buf[n - 1] == '\\') { n--; getc_(); if (n < max - 1) buf[n++] = ' '; continue; }
+            break;
+        }
         getc_();
         if (n < max - 1) buf[n++] = (char)c;
     }
@@ -310,65 +531,438 @@ static u32 read_line(char *buf, u32 max)
     return n;
 }
 
+static bool is_ident_start(i32 c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+static bool is_ident_char(i32 c)  { return is_ident_start(c) || (c >= '0' && c <= '9'); }
+
+/* --- #if arithmetic ---------------------------------------------- */
+
+typedef struct { u8 kind; i64 val; char text[NAME_MAX]; } ptok;   /* 0 num, 1 ident, 2 punct */
+static ptok ptoks[96];
+static u32 nptok, ptat;
+
+static void ptokenize(const char *s, u32 depth)
+{
+    u32 i = 0;
+    while (s[i] && nptok < 96) {
+        char c = s[i];
+        if (c == ' ' || c == '\t') { i++; continue; }
+        if (is_ident_start(c)) {
+            char nm[NAME_MAX];
+            u32 k = 0;
+            while (is_ident_char(s[i])) { if (k < NAME_MAX - 1) nm[k++] = s[i]; i++; }
+            nm[k] = 0;
+            if (same(nm, "defined")) {
+                u32 j = i;
+                while (s[j] == ' ') j++;
+                bool paren = s[j] == '(';
+                if (paren) { j++; while (s[j] == ' ') j++; }
+                char dn[NAME_MAX];
+                k = 0;
+                while (is_ident_char(s[j])) { if (k < NAME_MAX - 1) dn[k++] = s[j]; j++; }
+                dn[k] = 0;
+                if (paren) { while (s[j] == ' ') j++; if (s[j] == ')') j++; }
+                i = j;
+                ptoks[nptok].kind = 0;
+                ptoks[nptok].val = macro_find(dn) != NULL;
+                nptok++;
+                continue;
+            }
+            (void)depth;
+            ptoks[nptok].kind = 1;
+            cpy(ptoks[nptok].text, nm);
+            nptok++;
+            continue;
+        }
+        if (c >= '0' && c <= '9') {
+            i64 v = 0;
+            if (c == '0' && (s[i + 1] == 'x' || s[i + 1] == 'X')) {
+                i += 2;
+                for (;;) {
+                    char h = s[i];
+                    i32 d;
+                    if (h >= '0' && h <= '9') d = h - '0';
+                    else if (h >= 'a' && h <= 'f') d = h - 'a' + 10;
+                    else if (h >= 'A' && h <= 'F') d = h - 'A' + 10;
+                    else break;
+                    v = v * 16 + d;
+                    i++;
+                }
+            } else {
+                while (s[i] >= '0' && s[i] <= '9') v = v * 10 + (s[i++] - '0');
+            }
+            while (s[i] == 'u' || s[i] == 'U' || s[i] == 'l' || s[i] == 'L') i++;
+            ptoks[nptok].kind = 0;
+            ptoks[nptok].val = v;
+            nptok++;
+            continue;
+        }
+        if (c == '\'') {
+            i64 v = (u8)s[i + 1];
+            if (s[i + 1] == '\\') { v = s[i + 2] == 'n' ? 10 : s[i + 2] == '0' ? 0 : (u8)s[i + 2]; i++; }
+            i += 3;
+            ptoks[nptok].kind = 0;
+            ptoks[nptok].val = v;
+            nptok++;
+            continue;
+        }
+        static const char *const ops[] = { "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", NULL };
+        bool two = false;
+        for (u32 k = 0; ops[k]; k++)
+            if (s[i] == ops[k][0] && s[i + 1] == ops[k][1]) {
+                ptoks[nptok].kind = 2;
+                ptoks[nptok].text[0] = s[i]; ptoks[nptok].text[1] = s[i + 1]; ptoks[nptok].text[2] = 0;
+                nptok++;
+                i += 2;
+                two = true;
+                break;
+            }
+        if (two) continue;
+        ptoks[nptok].kind = 2;
+        ptoks[nptok].text[0] = c; ptoks[nptok].text[1] = 0;
+        nptok++;
+        i++;
+    }
+}
+
+static bool pis(const char *p) { return ptat < nptok && ptoks[ptat].kind == 2 && same(ptoks[ptat].text, p); }
+
+static i64 pexpr(void);
+
+static i64 pprimary(void)
+{
+    if (ptat >= nptok) return 0;
+    if (pis("(")) { ptat++; i64 v = pexpr(); if (pis(")")) ptat++; return v; }
+    if (pis("!")) { ptat++; return !pprimary(); }
+    if (pis("-")) { ptat++; return -pprimary(); }
+    if (pis("~")) { ptat++; return ~pprimary(); }
+    if (pis("+")) { ptat++; return pprimary(); }
+    ptok *t = &ptoks[ptat++];
+    if (t->kind == 0) return t->val;
+    return 0;                                  /* an unknown name is zero */
+}
+
+static i64 pbin(u32 level)
+{
+    static const char *const lv[][4] = {
+        { "||", 0, 0, 0 }, { "&&", 0, 0, 0 }, { "|", 0, 0, 0 }, { "^", 0, 0, 0 }, { "&", 0, 0, 0 },
+        { "==", "!=", 0, 0 }, { "<", "<=", ">", ">=" }, { "<<", ">>", 0, 0 },
+        { "+", "-", 0, 0 }, { "*", "/", "%", 0 } };
+    if (level >= 10) return pprimary();
+    i64 l = pbin(level + 1);
+    for (;;) {
+        const char *op = NULL;
+        for (u32 i = 0; i < 4 && lv[level][i]; i++) if (pis(lv[level][i])) { op = lv[level][i]; break; }
+        if (!op) return l;
+        ptat++;
+        i64 r = pbin(level + 1);
+        if (same(op, "||")) l = l || r; else if (same(op, "&&")) l = l && r;
+        else if (same(op, "|")) l = l | r; else if (same(op, "^")) l = l ^ r;
+        else if (same(op, "&")) l = l & r; else if (same(op, "==")) l = l == r;
+        else if (same(op, "!=")) l = l != r; else if (same(op, "<")) l = l < r;
+        else if (same(op, "<=")) l = l <= r; else if (same(op, ">")) l = l > r;
+        else if (same(op, ">=")) l = l >= r; else if (same(op, "<<")) l = l << r;
+        else if (same(op, ">>")) l = l >> r; else if (same(op, "+")) l = l + r;
+        else if (same(op, "-")) l = l - r; else if (same(op, "*")) l = l * r;
+        else if (same(op, "/")) l = r ? l / r : 0; else if (same(op, "%")) l = r ? l % r : 0;
+    }
+}
+
+static i64 pexpr(void)
+{
+    i64 c = pbin(0);
+    if (pis("?")) {
+        ptat++;
+        i64 a = pexpr();
+        if (pis(":")) ptat++;
+        i64 b = pexpr();
+        return c ? a : b;
+    }
+    return c;
+}
+
+/* Macros in a line of text, expanded in place -- object-like ones by
+ * their words, function-like ones by their words with the arguments
+ * put in -- so that an #if can count with them. "defined" keeps its
+ * operand unexpanded and becomes 1 or 0 here. */
+static u32 pp_put(char *out, u32 o, u32 max, const char *s)
+{
+    while (*s && o < max - 1) out[o++] = *s++;
+    return o;
+}
+
+/* One set of scratch buffers per depth of expansion, static: a
+ * kernel thread's stack is small, and eight kilobytes a level would
+ * walk right off it. */
+static char pp_body[8][4096];
+static char pp_raw[8][4096];
+
+static u32 pp_expand(const char *in, char *out, u32 max, u32 depth)
+{
+    if (depth >= 8) { u32 o = pp_put(out, 0, max, in); out[o] = 0; return o; }
+    char *body = pp_body[depth];
+    char *raw = pp_raw[depth];
+    u32 i = 0, o = 0;
+    while (in[i] && o < max - 1) {
+        char c = in[i];
+        if (!is_ident_start(c)) { out[o++] = c; i++; continue; }
+        char nm[NAME_MAX];
+        u32 k = 0;
+        while (is_ident_char(in[i])) { if (k < NAME_MAX - 1) nm[k++] = in[i]; i++; }
+        nm[k] = 0;
+
+        if (same(nm, "defined")) {
+            u32 j = i;
+            while (in[j] == ' ') j++;
+            bool paren = in[j] == '(';
+            if (paren) { j++; while (in[j] == ' ') j++; }
+            char dn[NAME_MAX];
+            k = 0;
+            while (is_ident_char(in[j])) { if (k < NAME_MAX - 1) dn[k++] = in[j]; j++; }
+            dn[k] = 0;
+            if (paren) { while (in[j] == ' ') j++; if (in[j] == ')') j++; }
+            i = j;
+            o = pp_put(out, o, max, macro_find(dn) ? " 1 " : " 0 ");
+            continue;
+        }
+
+        macro *m = macro_find(nm);
+        if (!m) { o = pp_put(out, o, max, nm); continue; }
+
+        if (!m->func) {
+            pp_expand(m->text, body, 4096, depth + 1);
+            o = pp_put(out, o, max, " ");
+            o = pp_put(out, o, max, body);
+            o = pp_put(out, o, max, " ");
+            continue;
+        }
+
+        /* function-like: only with its parenthesis */
+        u32 j = i;
+        while (in[j] == ' ') j++;
+        if (in[j] != '(') { o = pp_put(out, o, max, nm); continue; }
+        j++;
+        static char args[MPARAMS][MACRO_TEXT];
+        u32 n = 0, ak = 0;
+        i32 dep = 0;
+        args[0][0] = 0;
+        while (in[j]) {
+            char a = in[j];
+            if (a == '(') dep++;
+            if (a == ')') { if (dep == 0) break; dep--; }
+            if (a == ',' && dep == 0) {
+                args[n][ak] = 0;
+                if (n + 1 < MPARAMS) { n++; ak = 0; args[n][0] = 0; }
+                j++;
+                continue;
+            }
+            if (ak < MACRO_TEXT - 1) args[n][ak++] = a;
+            j++;
+        }
+        args[n][ak] = 0;
+        if (in[j] == ')') j++;
+        i = j;
+        u32 got = (n == 0 && args[0][0] == 0) ? 0 : n + 1;
+        for (u32 a = 0; a < got; a++) {
+            u32 s = 0;
+            while (args[a][s] == ' ') s++;
+            u32 e = 0;
+            while (args[a][s + e]) { args[a][e] = args[a][s + e]; e++; }
+            args[a][e] = 0;
+            while (e && args[a][e - 1] == ' ') args[a][--e] = 0;
+        }
+
+        u32 r = 0;
+        const char *t = m->text;
+        u32 ti = 0;
+        while (t[ti] && r < 4096 - 2) {
+            if (t[ti] == '#' && t[ti + 1] == '#') { ti += 2; while (r && raw[r - 1] == ' ') r--; while (t[ti] == ' ') ti++; continue; }
+            bool str = false;
+            if (t[ti] == '#') { str = true; ti++; }
+            if (is_ident_start(t[ti])) {
+                char pn[NAME_MAX];
+                k = 0;
+                while (is_ident_char(t[ti])) { if (k < NAME_MAX - 1) pn[k++] = t[ti]; ti++; }
+                pn[k] = 0;
+                i32 which = -1;
+                for (u32 p = 0; p < m->nparams; p++) if (same(m->params[p], pn)) { which = (i32)p; break; }
+                if (which >= 0 && (u32)which < got) {
+                    if (str) raw[r++] = '"';
+                    r = pp_put(raw, r, 4096, args[which]);
+                    if (str) raw[r++] = '"';
+                } else {
+                    r = pp_put(raw, r, 4096, pn);
+                }
+                continue;
+            }
+            raw[r++] = t[ti++];
+        }
+        raw[r] = 0;
+        pp_expand(raw, body, 4096, depth + 1);
+        o = pp_put(out, o, max, " ");
+        o = pp_put(out, o, max, body);
+        o = pp_put(out, o, max, " ");
+    }
+    out[o] = 0;
+    return o;
+}
+
+static i64 eval_line(const char *s)
+{
+    static char expanded[8192];
+    pp_expand(s, expanded, sizeof(expanded), 0);
+    nptok = 0;
+    ptat = 0;
+    ptokenize(expanded, 0);
+    return pexpr();
+}
+
+/* --- the standard headers this machine carries inside ------------- */
+
+static void builtin_header(const char *name)
+{
+    if (same(name, "stdarg.h")) {
+        define_text("va_list", "__builtin_va_list");
+        define_func("va_start", "ap,last", "__builtin_va_start(ap, last)");
+        define_func("va_arg", "ap,t", "__builtin_va_arg(ap, t)");
+        define_func("va_end", "ap", "__builtin_va_end(ap)");
+        define_func("va_copy", "d,s", "((d) = (s))");
+        return;
+    }
+    if (same(name, "stdbool.h")) {
+        define_text("true", "1");
+        define_text("false", "0");
+        return;
+    }
+    if (same(name, "stddef.h")) {
+        define_text("NULL", "((void *)0)");
+        define_text("size_t", "unsigned long");
+        define_text("offsetof", "__builtin_offsetof");
+        return;
+    }
+    if (same(name, "stdint.h")) {
+        define_text("uint8_t", "unsigned char");
+        define_text("uint16_t", "unsigned short");
+        define_text("uint32_t", "unsigned int");
+        define_text("uint64_t", "unsigned long");
+        define_text("int8_t", "signed char");
+        define_text("int16_t", "short");
+        define_text("int32_t", "int");
+        define_text("int64_t", "long");
+        define_text("uintptr_t", "unsigned long");
+        define_text("intptr_t", "long");
+        define_text("size_t", "unsigned long");
+        return;
+    }
+    fail("no header of that name lives inside this machine:", name);
+}
+
 static void directive(void)
 {
-    char line[MACRO_TEXT + NAME_MAX + 16];
+    char line[MACRO_TEXT + NAME_MAX + 64];
     read_line(line, sizeof(line));
     u32 i = 0;
     while (line[i] == ' ' || line[i] == '\t') i++;
     char word[16];
     u32 w = 0;
-    while (line[i] && line[i] != ' ' && line[i] != '\t' && w < 15) word[w++] = line[i++];
+    while (line[i] && line[i] != ' ' && line[i] != '\t' && line[i] != '(' && w < 15) word[w++] = line[i++];
     word[w] = 0;
     while (line[i] == ' ' || line[i] == '\t') i++;
 
-    char name[NAME_MAX];
-    u32 n = 0;
-    while (line[i] && line[i] != ' ' && line[i] != '\t' && line[i] != '"' && n < NAME_MAX - 1)
-        name[n++] = line[i++];
-    name[n] = 0;
-    while (line[i] == ' ' || line[i] == '\t') i++;
-
-    if (strcmp(word, "ifdef") == 0 || strcmp(word, "ifndef") == 0) {
+    /* Conditions are read even while skipping: they nest. */
+    if (same(word, "if") || same(word, "ifdef") || same(word, "ifndef")) {
         if (C.ncond >= NCOND) { fail("conditions nest too deep", NULL); return; }
-        bool have = macro_find(name) != NULL;
-        C.cond[C.ncond++] = (word[2] == 'n') ? !have : have;
+        bool parent = !skipping();
+        bool v = false;
+        if (parent) {
+            if (same(word, "if")) v = eval_line(line + i) != 0;
+            else {
+                char name[NAME_MAX];
+                u32 n = 0;
+                while (line[i] && line[i] != ' ' && line[i] != '\t' && n < NAME_MAX - 1) name[n++] = line[i++];
+                name[n] = 0;
+                bool have = macro_find(name) != NULL;
+                v = word[2] == 'n' ? !have : have;
+            }
+        }
+        C.conds[C.ncond].parent = parent;
+        C.conds[C.ncond].active = v;
+        C.conds[C.ncond].taken = v;
+        C.ncond++;
         return;
     }
-    if (strcmp(word, "else") == 0) {
-        if (!C.ncond) { fail("#else without #ifdef", NULL); return; }
-        C.cond[C.ncond - 1] = !C.cond[C.ncond - 1];
+    if (same(word, "elif")) {
+        if (!C.ncond) { fail("#elif without #if", NULL); return; }
+        cond *c = &C.conds[C.ncond - 1];
+        if (c->parent && !c->taken && eval_line(line + i) != 0) { c->active = true; c->taken = true; }
+        else c->active = false;
         return;
     }
-    if (strcmp(word, "endif") == 0) {
-        if (!C.ncond) { fail("#endif without #ifdef", NULL); return; }
+    if (same(word, "else")) {
+        if (!C.ncond) { fail("#else without #if", NULL); return; }
+        cond *c = &C.conds[C.ncond - 1];
+        c->active = c->parent && !c->taken;
+        c->taken = true;
+        return;
+    }
+    if (same(word, "endif")) {
+        if (!C.ncond) { fail("#endif without #if", NULL); return; }
         C.ncond--;
         return;
     }
     if (skipping()) return;
 
-    if (strcmp(word, "define") == 0) {
+    if (same(word, "define")) {
+        char name[NAME_MAX];
+        u32 n = 0;
+        while (line[i] && line[i] != ' ' && line[i] != '\t' && line[i] != '(' && n < NAME_MAX - 1) name[n++] = line[i++];
+        name[n] = 0;
         if (!name[0]) { fail("#define what?", NULL); return; }
-        macro *m = macro_find(name);
-        if (!m) {
-            if (C.nmacros >= NMACROS) { fail("too many defines", NULL); return; }
-            m = &C.macros[C.nmacros++];
-            cpy(m->name, name);
+        if (line[i] == '(') {
+            /* function-like: the names between the parentheses */
+            i++;
+            char params[MPARAMS * NAME_MAX];
+            u32 k = 0;
+            while (line[i] && line[i] != ')') {
+                if (line[i] != ' ' && line[i] != '\t' && k < sizeof(params) - 1) params[k++] = line[i];
+                i++;
+            }
+            params[k] = 0;
+            if (line[i] == ')') i++;
+            while (line[i] == ' ' || line[i] == '\t') i++;
+            define_func(name, params, line + i);
+        } else {
+            while (line[i] == ' ' || line[i] == '\t') i++;
+            define_text(name, line + i);
         }
-        u32 k = 0;
-        while (line[i] && k < MACRO_TEXT - 1) m->text[k++] = line[i++];
-        m->text[k] = 0;
         return;
     }
-    if (strcmp(word, "undef") == 0) {
+    if (same(word, "undef")) {
+        char name[NAME_MAX];
+        u32 n = 0;
+        while (line[i] && line[i] != ' ' && n < NAME_MAX - 1) name[n++] = line[i++];
+        name[n] = 0;
         macro *m = macro_find(name);
         if (m) *m = C.macros[--C.nmacros];
         return;
     }
-    if (strcmp(word, "include") == 0) {
-        if (line[i] != '"') { fail("#include wants a name in double quotes", NULL); return; }
+    if (same(word, "include")) {
+        char name[NAME_MAX];
+        u32 n = 0;
+        if (line[i] == '<') {
+            i++;
+            while (line[i] && line[i] != '>' && n < NAME_MAX - 1) name[n++] = line[i++];
+            name[n] = 0;
+            /* The few standard headers live inside; anything else in
+             * angle brackets is looked for beside the source like a
+             * quoted name, which is how a kernel file finds its own. */
+            const u8 *text;
+            u64 len;
+            if (C.find && C.find(C.ctx, name, &text, &len)) { push_source(text, len, name, false); return; }
+            builtin_header(name);
+            return;
+        }
+        if (line[i] != '"') { fail("#include wants a name in quotes or angle brackets", NULL); return; }
         i++;
-        n = 0;
         while (line[i] && line[i] != '"' && n < NAME_MAX - 1) name[n++] = line[i++];
         name[n] = 0;
         const u8 *text;
@@ -380,6 +974,8 @@ static void directive(void)
         push_source(text, len, name, false);
         return;
     }
+    if (same(word, "error")) { fail("#error:", line + i); return; }
+    if (same(word, "pragma") || same(word, "line") || same(word, "warning")) return;
     fail("i do not know the directive", word);
 }
 
@@ -400,7 +996,6 @@ static i32 escape(void)
     case 'n': return '\n';
     case 't': return '\t';
     case 'r': return '\r';
-    case '0': return 0;
     case 'a': return 7;
     case 'b': return 8;
     case 'f': return 12;
@@ -420,11 +1015,93 @@ static i32 escape(void)
         }
         return v;
     }
-    default: return c;
+    default:
+        if (c >= '0' && c <= '7') {
+            i32 v = c - '0';
+            for (u32 k = 0; k < 2 && peekc(0) >= '0' && peekc(0) <= '7'; k++) v = v * 8 + (getc_() - '0');
+            return v;
+        }
+        return c;
     }
 }
 
 static void lex_raw(token *t);
+
+/* Reads a macro call's arguments as raw text, balanced in parens,
+ * split at the commas outside them. */
+static u32 macro_args(char args[MPARAMS][MACRO_TEXT])
+{
+    u32 n = 0, k = 0;
+    i32 depth = 0;
+    args[0][0] = 0;
+    for (;;) {
+        i32 c = getc_();
+        if (c < 0) { fail("a macro's arguments never close", NULL); return 0; }
+        if (c == '(' ) depth++;
+        if (c == ')') { if (depth == 0) break; depth--; }
+        if (c == ',' && depth == 0) {
+            args[n][k] = 0;
+            if (n + 1 >= MPARAMS) { fail("too many macro arguments", NULL); return 0; }
+            n++; k = 0; args[n][0] = 0;
+            continue;
+        }
+        if (c == '\n') c = ' ';
+        if (k < MACRO_TEXT - 1) args[n][k++] = (char)c;
+    }
+    args[n][k] = 0;
+    /* trim */
+    for (u32 a = 0; a <= n; a++) {
+        u32 s = 0;
+        while (args[a][s] == ' ') s++;
+        u32 e = 0;
+        while (args[a][s + e]) { args[a][e] = args[a][s + e]; e++; }
+        args[a][e] = 0;
+        while (e && args[a][e - 1] == ' ') args[a][--e] = 0;
+    }
+    return (n == 0 && args[0][0] == 0) ? 0 : n + 1;
+}
+
+/* Builds a function-like macro's expansion: parameters replaced by
+ * their arguments, #x quoted, ## joined. */
+static bool expand_func(macro *m)
+{
+    static char args[MPARAMS][MACRO_TEXT];
+    u32 got = macro_args(args);
+    if (C.bad) return false;
+    if (got != m->nparams && !(m->nparams == 0 && got == 0)) {
+        fail("wrong number of arguments to the macro", m->name);
+        return false;
+    }
+    char *buf = exp_alloc(4096);
+    if (!buf) return false;
+    u32 o = 0;
+    const char *t = m->text;
+    u32 i = 0;
+    while (t[i] && o < 4090) {
+        if (t[i] == '#' && t[i + 1] == '#') { i += 2; while (o && buf[o - 1] == ' ') o--; while (t[i] == ' ') i++; continue; }
+        bool stringize = false;
+        if (t[i] == '#') { stringize = true; i++; }
+        if (is_ident_start(t[i])) {
+            char nm[NAME_MAX];
+            u32 k = 0;
+            while (is_ident_char(t[i])) { if (k < NAME_MAX - 1) nm[k++] = t[i]; i++; }
+            nm[k] = 0;
+            i32 which = -1;
+            for (u32 p = 0; p < m->nparams; p++) if (same(m->params[p], nm)) { which = (i32)p; break; }
+            if (which >= 0) {
+                if (stringize) buf[o++] = '"';
+                for (u32 q = 0; args[which][q] && o < 4090; q++) buf[o++] = args[which][q];
+                if (stringize) buf[o++] = '"';
+            } else {
+                for (u32 q = 0; nm[q] && o < 4090; q++) buf[o++] = nm[q];
+            }
+            continue;
+        }
+        buf[o++] = t[i++];
+    }
+    buf[o] = 0;
+    return push_source((const u8 *)buf, o, m->name, true);
+}
 
 static void lex_ident_or_macro(token *t, i32 first)
 {
@@ -432,9 +1109,7 @@ static void lex_ident_or_macro(token *t, i32 first)
     t->text[n++] = (char)first;
     for (;;) {
         i32 c = peekc(0);
-        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                  (c >= '0' && c <= '9') || c == '_';
-        if (!ok) break;
+        if (!is_ident_char(c)) break;
         getc_();
         if (n < NAME_MAX - 1) t->text[n++] = (char)c;
     }
@@ -446,7 +1121,17 @@ static void lex_ident_or_macro(token *t, i32 first)
     macro *m = macro_find(t->text);
     if (!m) return;
     for (u32 i = 0; i < C.nsrc; i++)
-        if (C.src[i].macro && strcmp(C.src[i].name, t->text) == 0) return;
+        if (C.src[i].macro && same(C.src[i].name, t->text)) return;
+    if (m->func) {
+        /* Only with a parenthesis right after; otherwise it is a name. */
+        u32 k = 0;
+        while (peekc(k) == ' ' || peekc(k) == '\t' || peekc(k) == '\n') k++;
+        if (peekc(k) != '(') return;
+        for (u32 q = 0; q <= k; q++) getc_();
+        if (!expand_func(m)) return;
+        lex_raw(t);
+        return;
+    }
     u32 ml = 0;
     while (m->text[ml]) ml++;
     if (ml == 0) { lex_raw(t); return; }
@@ -460,7 +1145,7 @@ static void lex_raw(token *t)
         source *s = top();
         if (!s) { t->kind = TK_EOF; return; }
         if (s->pos >= s->len) {
-            C.nsrc--;
+            pop_source();
             continue;
         }
         t->line = s->line;
@@ -473,13 +1158,14 @@ static void lex_raw(token *t)
 
         if (c == '#' && at_bol && !s->macro) {
             getc_();
+            in_directive = true;
             directive();
+            in_directive = false;
             if (C.bad) { t->kind = TK_EOF; return; }
             continue;
         }
 
         if (skipping()) {
-            /* Inside a false #ifdef: only directives are read. */
             read_line(t->text, NAME_MAX);
             continue;
         }
@@ -498,13 +1184,17 @@ static void lex_raw(token *t)
 
         getc_();
 
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+        if (is_ident_start(c)) {
             lex_ident_or_macro(t, c);
             return;
         }
 
-        if (c >= '0' && c <= '9') {
+        if ((c >= '0' && c <= '9') || (c == '.' && peekc(0) >= '0' && peekc(0) <= '9')) {
             i64 v = 0;
+            bool fp = false;
+            u64 sig = 0;                       /* the digits, as one number */
+            i32 dexp = 0;                      /* and the power of ten they carry */
+            u32 digits = 0;
             if (c == '0' && (peekc(0) == 'x' || peekc(0) == 'X')) {
                 getc_();
                 for (;;) {
@@ -518,13 +1208,37 @@ static void lex_raw(token *t)
                     v = v * 16 + d;
                 }
             } else {
-                v = c - '0';
-                while (peekc(0) >= '0' && peekc(0) <= '9') v = v * 10 + (getc_() - '0');
+                if (c != '.') { v = c - '0'; sig = (u64)(c - '0'); digits = 1; }
+                while (peekc(0) >= '0' && peekc(0) <= '9') {
+                    i32 d = getc_() - '0';
+                    v = v * 10 + d;
+                    if (digits < 19) { sig = sig * 10 + (u64)d; digits++; } else dexp++;
+                }
+                if (c == '.' || peekc(0) == '.') {
+                    if (c != '.') getc_();
+                    fp = true;
+                    while (peekc(0) >= '0' && peekc(0) <= '9') {
+                        i32 d = getc_() - '0';
+                        if (digits < 19) { sig = sig * 10 + (u64)d; digits++; dexp--; }
+                    }
+                }
+                if (peekc(0) == 'e' || peekc(0) == 'E') {
+                    fp = true;
+                    getc_();
+                    bool neg = false;
+                    if (peekc(0) == '-') { neg = true; getc_(); } else if (peekc(0) == '+') getc_();
+                    i32 e = 0;
+                    while (peekc(0) >= '0' && peekc(0) <= '9') e = e * 10 + (getc_() - '0');
+                    dexp += neg ? -e : e;
+                }
             }
-            /* Suffixes say nothing here: every number is a long. */
-            while (peekc(0) == 'u' || peekc(0) == 'U' || peekc(0) == 'l' || peekc(0) == 'L') getc_();
-            t->kind = TK_NUM;
-            t->val = v;
+            while (peekc(0) == 'u' || peekc(0) == 'U' || peekc(0) == 'l' || peekc(0) == 'L' ||
+                   peekc(0) == 'f' || peekc(0) == 'F') {
+                if (peekc(0) == 'f' || peekc(0) == 'F') fp = true;
+                getc_();
+            }
+            if (fp) { t->kind = TK_FNUM; t->fval = sf_from_decimal(sig, dexp); }
+            else { t->kind = TK_NUM; t->val = v; }
             return;
         }
 
@@ -556,7 +1270,6 @@ static void lex_raw(token *t)
             return;
         }
 
-        /* Punctuation, longest first. */
         for (u32 i = 0; puncts[i]; i++) {
             const char *p = puncts[i];
             u32 pl = (u32)strlen(p);
@@ -582,15 +1295,9 @@ static void advance(void)
     lex_raw(&C.nxt);
 }
 
-static bool is(const char *p)
-{
-    return C.cur.kind == TK_PUNCT && strcmp(C.cur.text, p) == 0;
-}
-
-static bool is_kw(const char *w)
-{
-    return C.cur.kind == TK_IDENT && strcmp(C.cur.text, w) == 0;
-}
+static bool is(const char *p)     { return C.cur.kind == TK_PUNCT && same(C.cur.text, p); }
+static bool is_kw(const char *w)  { return C.cur.kind == TK_IDENT && same(C.cur.text, w); }
+static bool nxt_is(const char *p) { return C.nxt.kind == TK_PUNCT && same(C.nxt.text, p); }
 
 static bool eat(const char *p)
 {
@@ -602,7 +1309,7 @@ static bool eat(const char *p)
 static void expect(const char *p)
 {
     if (!eat(p)) {
-        char what[NAME_MAX + 8];
+        char what[NAME_MAX + 12];
         u32 n = 0;
         const char *pre = "expected ";
         while (pre[n]) { what[n] = pre[n]; n++; }
@@ -642,28 +1349,45 @@ static type *array_of(type *b, u64 n)
     return t;
 }
 
-static bool is_int(const type *t)
-{
-    return t->kind == T_CHAR || t->kind == T_INT || t->kind == T_LONG;
-}
-
-static bool is_ptr(const type *t)
-{
-    return t->kind == T_PTR || t->kind == T_ARR;
-}
+static bool is_int(const type *t)   { return t->kind >= T_CHAR && t->kind <= T_LONG; }
+static bool is_flt(const type *t)   { return t->kind == T_FLOAT || t->kind == T_DOUBLE; }
+static bool is_num(const type *t)   { return is_int(t) || is_flt(t); }
+static bool is_ptr(const type *t)   { return t->kind == T_PTR || t->kind == T_ARR; }
+static bool is_rec(const type *t)   { return t->kind == T_STRUCT || t->kind == T_UNION; }
 
 static type *typedef_find(const char *nm)
 {
     for (u32 i = 0; i < C.ntypedefs; i++)
-        if (strcmp(C.typedefs[i].name, nm) == 0) return C.typedefs[i].ty;
+        if (same(C.typedefs[i].name, nm)) return C.typedefs[i].ty;
     return NULL;
+}
+
+static void typedef_add(const char *nm, type *t)
+{
+    for (u32 i = 0; i < C.ntypedefs; i++)
+        if (same(C.typedefs[i].name, nm)) { C.typedefs[i].ty = t; return; }
+    if (C.ntypedefs >= NTYPEDEFS) { fail("too many typedefs", NULL); return; }
+    cpy(C.typedefs[C.ntypedefs].name, nm);
+    C.typedefs[C.ntypedefs].ty = t;
+    C.ntypedefs++;
 }
 
 static type *tag_find(const char *nm)
 {
     for (u32 i = 0; i < C.ntags; i++)
-        if (strcmp(C.tags[i].name, nm) == 0) return C.tags[i].ty;
+        if (same(C.tags[i].name, nm)) return C.tags[i].ty;
     return NULL;
+}
+
+/* The wider of two numeric types, the way c promotes. */
+static type *common_type(type *a, type *b)
+{
+    if (is_flt(a) || is_flt(b)) return C.t_double;
+    bool lng = a->kind == T_LONG || b->kind == T_LONG;
+    bool uns = (a->kind == T_LONG && a->uns) || (b->kind == T_LONG && b->uns) ||
+               (!lng && ((a->kind == T_INT && a->uns) || (b->kind == T_INT && b->uns)));
+    if (lng) return uns ? C.t_ulong : C.t_long;
+    return uns ? C.t_uint : C.t_int;
 }
 
 /* ------------------------------------------------------------------ */
@@ -673,7 +1397,7 @@ static type *tag_find(const char *nm)
 static sym *sym_find(const char *nm)
 {
     for (u32 i = C.nsyms; i > 0; i--)
-        if (strcmp(C.syms[i - 1].name, nm) == 0) return &C.syms[i - 1];
+        if (!C.syms[i - 1].hidden && same(C.syms[i - 1].name, nm)) return &C.syms[i - 1];
     return NULL;
 }
 
@@ -683,26 +1407,31 @@ static sym *sym_add(const char *nm, type *ty, u8 kind)
     sym *s = &C.syms[C.nsyms++];
     memset(s, 0, sizeof(*s));
     cpy(s->name, nm);
+    cpy(s->label, nm);
     s->ty = ty;
     s->kind = kind;
     return s;
 }
 
-static void scope_in(void)
-{
-    if (C.nscope < 64) C.scope[C.nscope++] = C.nsyms;
-}
+static void scope_in(void)  { if (C.nscope < 64) C.scope[C.nscope++] = C.nsyms; }
 
+/* Closing a scope hides its names; it does not give their slots
+ * back. The tree refers to names by slot and is typed only after the
+ * whole function is read, so a slot reused inside the function would
+ * quietly mean something else by then. The function gives all its
+ * slots back at once, when its code has been written. */
 static void scope_out(void)
 {
-    if (C.nscope) C.nsyms = C.scope[--C.nscope];
+    if (!C.nscope) return;
+    u32 mark = C.scope[--C.nscope];
+    for (u32 i = mark; i < C.nsyms; i++) C.syms[i].hidden = true;
 }
 
-/* A local's home: below rbp, aligned to what it is. */
 static i64 local_slot(type *ty)
 {
     u32 al = ty->align ? ty->align : 1;
-    C.frame += ty->size;
+    if (al > 16) al = 16;
+    C.frame += ty->size ? ty->size : 1;
     C.frame = (C.frame + al - 1) / al * al;
     return -C.frame;
 }
@@ -746,6 +1475,13 @@ static u32 mk_un(u8 kind, u32 l)
     return i;
 }
 
+static u32 mk_cast(u32 e, type *t)
+{
+    u32 i = mk_un(ND_CAST, e);
+    N(i)->ty = t;
+    return i;
+}
+
 /* ------------------------------------------------------------------ */
 /* Giving every node its type                                          */
 /* ------------------------------------------------------------------ */
@@ -754,6 +1490,7 @@ static void add_type(u32 i);
 
 static u32 scaled(u32 n, u64 by)
 {
+    if (by == 1) return n;
     u32 m = mk_bin(ND_MUL, n, mk_num((i64)by));
     N(m)->ty = C.t_long;
     return m;
@@ -761,93 +1498,132 @@ static u32 scaled(u32 n, u64 by)
 
 static void add_type(u32 i)
 {
-    if (!i) return;
+    if (!i || C.bad) return;
     node *n = N(i);
-    /* A cast knows its type from birth, but its child does not. */
-    if (n->ty && n->kind != ND_CAST) return;
+    /* A statement is typed on the way in, not the way out: the cases
+     * of a switch point at one another, and a walk that only marked
+     * a node when done with it would never be done with them. */
+    if (n->kind >= ND_EXPR) {
+        if (n->ty) return;
+        n->ty = C.t_void;
+    } else if (n->ty && n->kind != ND_CAST) return;
 
     add_type(n->lhs);
     add_type(n->rhs);
     add_type(n->third);
-    for (u32 a = n->next; a; a = N(a)->next) add_type(a);
-    /* aux is a node wherever it is not a string, a member or a label
-     * number: a call's arguments, a block's statements, a for's body,
-     * a switch's cases. */
-    if (n->kind != ND_STR && n->kind != ND_MEMBER &&
-        n->kind != ND_CASE && n->kind != ND_DEFAULT)
+    /* A list is walked by whoever owns it, in a loop, never by each
+     * member recursing into the next: a long block would otherwise
+     * be a deep stack, and a kernel thread's stack is small. */
+    if (n->kind != ND_STR && n->kind != ND_MEMBER && n->kind != ND_CASE &&
+        n->kind != ND_DEFAULT && n->kind != ND_GOTO && n->kind != ND_LABEL &&
+        n->kind != ND_ASM && n->kind != ND_MEMCPY)
         for (u32 a = n->aux; a; a = N(a)->next) add_type(a);
 
     node *l = n->lhs ? N(n->lhs) : NULL;
     node *r = n->rhs ? N(n->rhs) : NULL;
 
     switch (n->kind) {
-    case ND_NUM: n->ty = C.t_long; break;
-    case ND_STR: n->ty = array_of(C.t_char, C.strs[n->aux].len); break;
-    case ND_VAR: n->ty = C.syms[n->sym].ty; break;
+    case ND_NUM:  n->ty = C.t_long; break;
+    case ND_FNUM: n->ty = C.t_double; break;
+    case ND_STR:  n->ty = array_of(C.t_char, C.strs[n->aux].len); break;
+    case ND_VAR:  n->ty = C.syms[n->sym].ty; break;
 
     case ND_ADD:
         if (is_ptr(l->ty) && is_int(r->ty)) {
-            n->rhs = scaled(n->rhs, l->ty->base->size);
+            n->rhs = scaled(n->rhs, l->ty->base->size ? l->ty->base->size : 1);
             n->ty = l->ty->kind == T_ARR ? ptr_to(l->ty->base) : l->ty;
         } else if (is_int(l->ty) && is_ptr(r->ty)) {
-            n->lhs = scaled(n->lhs, r->ty->base->size);
+            n->lhs = scaled(n->lhs, r->ty->base->size ? r->ty->base->size : 1);
             n->ty = r->ty->kind == T_ARR ? ptr_to(r->ty->base) : r->ty;
-        } else if (is_int(l->ty) && is_int(r->ty)) {
-            n->ty = (l->ty->kind == T_LONG || r->ty->kind == T_LONG) ? C.t_long : C.t_int;
-            if (l->ty->uns || r->ty->uns) n->ty = n->ty == C.t_long ? C.t_ulong : C.t_uint;
+        } else if (is_num(l->ty) && is_num(r->ty)) {
+            n->ty = common_type(l->ty, r->ty);
+            if (is_flt(n->ty)) {
+                if (!is_flt(l->ty)) n->lhs = mk_cast(n->lhs, C.t_double);
+                if (!is_flt(r->ty)) n->rhs = mk_cast(n->rhs, C.t_double);
+            }
         } else fail_at(n->line, NULL, "those cannot be added", NULL);
         break;
 
     case ND_SUB:
         if (is_ptr(l->ty) && is_int(r->ty)) {
-            n->rhs = scaled(n->rhs, l->ty->base->size);
+            n->rhs = scaled(n->rhs, l->ty->base->size ? l->ty->base->size : 1);
             n->ty = l->ty->kind == T_ARR ? ptr_to(l->ty->base) : l->ty;
         } else if (is_ptr(l->ty) && is_ptr(r->ty)) {
-            /* The distance, in elements. */
-            u32 d = mk_bin(ND_DIV, i, 0);
-            node *dn = N(d);
             u32 sub = mk_bin(ND_SUB, n->lhs, n->rhs);
             N(sub)->ty = C.t_long;
-            dn->lhs = sub;
-            dn->rhs = mk_num((i64)l->ty->base->size);
-            dn->ty = C.t_long;
-            /* Turn this node into that division. */
             u32 keep = n->next;
-            *n = *dn;
+            u32 line = n->line;
+            u32 sz = l->ty->base->size ? l->ty->base->size : 1;
+            memset(n, 0, sizeof(*n));
+            n->kind = ND_DIV;
+            n->lhs = sub;
+            n->rhs = mk_num((i64)sz);
+            n->ty = C.t_long;
             n->next = keep;
-        } else if (is_int(l->ty) && is_int(r->ty)) {
-            n->ty = (l->ty->kind == T_LONG || r->ty->kind == T_LONG) ? C.t_long : C.t_int;
-            if (l->ty->uns || r->ty->uns) n->ty = n->ty == C.t_long ? C.t_ulong : C.t_uint;
+            n->line = line;
+        } else if (is_num(l->ty) && is_num(r->ty)) {
+            n->ty = common_type(l->ty, r->ty);
+            if (is_flt(n->ty)) {
+                if (!is_flt(l->ty)) n->lhs = mk_cast(n->lhs, C.t_double);
+                if (!is_flt(r->ty)) n->rhs = mk_cast(n->rhs, C.t_double);
+            }
         } else fail_at(n->line, NULL, "those cannot be subtracted", NULL);
         break;
 
-    case ND_MUL: case ND_DIV: case ND_MOD:
-    case ND_AND: case ND_OR: case ND_XOR:
-        if (!is_int(l->ty) || !is_int(r->ty)) { fail_at(n->line, NULL, "that wants numbers on both sides", NULL); break; }
-        n->ty = (l->ty->kind == T_LONG || r->ty->kind == T_LONG) ? C.t_long : C.t_int;
-        if (l->ty->uns || r->ty->uns) n->ty = n->ty == C.t_long ? C.t_ulong : C.t_uint;
+    case ND_MUL: case ND_DIV:
+        if (!is_num(l->ty) || !is_num(r->ty)) { fail_at(n->line, NULL, "that wants numbers on both sides", NULL); break; }
+        n->ty = common_type(l->ty, r->ty);
+        if (is_flt(n->ty)) {
+            if (!is_flt(l->ty)) n->lhs = mk_cast(n->lhs, C.t_double);
+            if (!is_flt(r->ty)) n->rhs = mk_cast(n->rhs, C.t_double);
+        }
+        break;
+
+    case ND_MOD: case ND_AND: case ND_OR: case ND_XOR:
+        if (!is_int(l->ty) || !is_int(r->ty)) { fail_at(n->line, NULL, "that wants whole numbers on both sides", NULL); break; }
+        n->ty = common_type(l->ty, r->ty);
         break;
 
     case ND_SHL: case ND_SHR:
-        n->ty = l->ty;
+        if (!is_int(l->ty)) { fail_at(n->line, NULL, "only a whole number shifts", NULL); break; }
+        n->ty = l->ty->kind == T_LONG ? l->ty : (l->ty->uns ? C.t_uint : C.t_int);
         break;
 
     case ND_EQ: case ND_NE: case ND_LT: case ND_LE:
+        if (is_flt(l->ty) || is_flt(r->ty)) {
+            if (!is_flt(l->ty)) n->lhs = mk_cast(n->lhs, C.t_double);
+            if (!is_flt(r->ty)) n->rhs = mk_cast(n->rhs, C.t_double);
+        }
+        n->ty = C.t_long;
+        break;
+
     case ND_LAND: case ND_LOR: case ND_NOT:
         n->ty = C.t_long;
         break;
 
-    case ND_BITNOT: case ND_NEG:
+    case ND_BITNOT:
         n->ty = l->ty;
         break;
 
+    case ND_NEG:
+        n->ty = is_flt(l->ty) ? C.t_double : l->ty;
+        break;
+
     case ND_ASSIGN:
-        if (l->ty->kind == T_ARR) fail_at(n->line, NULL, "an array is not something to assign to", NULL);
+        if (l->ty->kind == T_ARR)
+            fail_at(n->line, NULL, "an array is not something to assign to:",
+                    l->kind == ND_VAR ? C.syms[l->sym].name : "that");
+        if (is_flt(l->ty) && !is_flt(r->ty) && !n->op) n->rhs = mk_cast(n->rhs, C.t_double);
+        if (!is_flt(l->ty) && is_flt(r->ty) && !n->op && !is_rec(l->ty)) n->rhs = mk_cast(n->rhs, C.t_long);
         n->ty = l->ty;
         break;
 
     case ND_COND:
-        n->ty = r->ty->kind == T_VOID ? C.t_void : r->ty;
+        if (is_flt(r->ty) || is_flt(N(n->third)->ty)) {
+            if (!is_flt(r->ty)) n->rhs = mk_cast(n->rhs, C.t_double);
+            if (!is_flt(N(n->third)->ty)) n->third = mk_cast(n->third, C.t_double);
+            n->ty = C.t_double;
+        } else n->ty = r->ty->kind == T_VOID ? C.t_void : r->ty;
         break;
 
     case ND_COMMA:
@@ -860,8 +1636,7 @@ static void add_type(u32 i)
 
     case ND_DEREF:
         if (!is_ptr(l->ty)) { fail_at(n->line, NULL, "only a pointer can be followed", NULL); break; }
-        if (l->ty->base->kind == T_VOID) { fail_at(n->line, NULL, "a pointer to void leads nowhere in particular", NULL); break; }
-        n->ty = l->ty->base;
+        n->ty = l->ty->base->kind == T_VOID ? C.t_char : l->ty->base;
         break;
 
     case ND_MEMBER:
@@ -874,24 +1649,48 @@ static void add_type(u32 i)
         else if (l) ft = l->ty->kind == T_PTR ? l->ty->base : l->ty;
         if (!ft || ft->kind != T_FUNC) { fail_at(n->line, NULL, "that is not a function", NULL); n->ty = C.t_long; break; }
         n->ty = ft->base;
+        /* Arguments take the parameters' kinds: a whole number to a
+         * double parameter becomes a double, and the other way. */
+        u32 k = 0;
+        for (u32 a = n->aux, prev = 0; a; prev = a, a = N(a)->next, k++) {
+            if (k >= ft->nparams) break;
+            type *want = ft->params[k];
+            node *an = N(a);
+            u32 rep = 0;
+            if (is_flt(want) && !is_flt(an->ty)) rep = mk_cast(a, C.t_double);
+            else if (!is_flt(want) && is_num(want) && is_flt(an->ty)) rep = mk_cast(a, C.t_long);
+            else if (want->kind == T_FLOAT && an->ty->kind == T_DOUBLE) rep = a;
+            if (rep && rep != a) {
+                N(rep)->next = an->next;
+                an->next = 0;
+                if (prev) N(prev)->next = rep; else n->aux = rep;
+                a = rep;
+            }
+        }
         break;
     }
 
     case ND_CAST:
-        break;                        /* set when made */
+        break;
 
     case ND_INCDEC:
         n->ty = l->ty;
         break;
 
-    case ND_SYSCALL:
+    case ND_SYSCALL: case ND_VASTART:
         n->ty = C.t_long;
         break;
+
+    case ND_VAARG:
+        break;                        /* set when made */
 
     default:
         n->ty = C.t_void;
         break;
     }
+    /* A node whose typing failed has said so; what follows must still
+     * find a type there rather than nothing. */
+    if (!n->ty) n->ty = C.t_long;
 }
 
 /* ------------------------------------------------------------------ */
@@ -901,67 +1700,143 @@ static void add_type(u32 i)
 static u32 expr(void);
 static u32 assign(void);
 static i64 const_eval(u32 i);
-static type *declspec(bool *is_typedef);
+static type *declspec(bool *is_typedef, bool *is_extern, bool *is_static);
 static type *declarator(type *base, char *name);
+static void skip_attributes(void);
+static u32 stmt(void);
+
+static bool is_typename_word(const char *w)
+{
+    static const char *const kws[] = {
+        "void", "char", "short", "int", "long", "float", "double",
+        "unsigned", "signed", "struct", "union", "enum", "const",
+        "static", "extern", "volatile", "inline", "register", "restrict",
+        "_Bool", "bool", "typedef", "__attribute__", "__builtin_va_list", NULL };
+    for (u32 i = 0; kws[i]; i++) if (same(w, kws[i])) return true;
+    return typedef_find(w) != NULL;
+}
 
 static bool is_typename(void)
 {
-    if (C.cur.kind != TK_IDENT) return false;
-    static const char *const kws[] = {
-        "void", "char", "int", "long", "short", "unsigned", "signed",
-        "struct", "enum", "const", "static", "extern", "volatile",
-        "_Bool", "bool", "typedef", NULL };
-    for (u32 i = 0; kws[i]; i++) if (strcmp(C.cur.text, kws[i]) == 0) return true;
-    return typedef_find(C.cur.text) != NULL;
+    return C.cur.kind == TK_IDENT && is_typename_word(C.cur.text);
 }
 
-static type *struct_decl(void)
+/* __attribute__((...)): packed matters, the rest is heard and let go. */
+static bool skip_one_attribute(void)
 {
-    /* struct tag { ... }, struct tag, or struct { ... } */
+    bool packed = false;
+    if (!is_kw("__attribute__")) return false;
+    advance();
+    expect("(");
+    expect("(");
+    i32 depth = 2;
+    while (depth > 0 && C.cur.kind != TK_EOF && !C.bad) {
+        if (is_kw("packed") || is_kw("__packed__")) packed = true;
+        if (is("(")) depth++;
+        if (is(")")) depth--;
+        advance();
+    }
+    return packed;
+}
+
+static void skip_attributes(void)
+{
+    while (is_kw("__attribute__")) skip_one_attribute();
+    /* __asm__("name") after a declarator names the symbol elsewhere;
+     * here every name is its own. */
+    if (is_kw("__asm__") || is_kw("asm")) {
+        advance();
+        expect("(");
+        if (C.cur.kind == TK_STR) advance();
+        expect(")");
+    }
+}
+
+static type *record_decl(bool is_union)
+{
+    bool packed = false;
+    while (is_kw("__attribute__")) packed |= skip_one_attribute();
+
     char tag[NAME_MAX] = { 0 };
-    if (C.cur.kind == TK_IDENT && !is("{")) {
+    if (C.cur.kind == TK_IDENT && !is_typename_word(C.cur.text)) {
         cpy(tag, C.cur.text);
         advance();
     }
+    while (is_kw("__attribute__")) packed |= skip_one_attribute();
+
     type *t = tag[0] ? tag_find(tag) : NULL;
     if (!is("{")) {
         if (t) return t;
-        if (!tag[0]) { fail("struct wants a name or a body", NULL); return C.t_long; }
-        /* A tag before its body: a pointer to it may be declared now. */
-        t = new_type(T_STRUCT, 0, 1);
+        if (!tag[0]) { fail(is_union ? "union wants a name or a body" : "struct wants a name or a body", NULL); return C.t_long; }
+        t = new_type(is_union ? T_UNION : T_STRUCT, 0, 1);
         if (C.ntags < NTAGS) { cpy(C.tags[C.ntags].name, tag); C.tags[C.ntags].ty = t; C.ntags++; }
         return t;
     }
     advance();
     if (!t) {
-        t = new_type(T_STRUCT, 0, 1);
+        t = new_type(is_union ? T_UNION : T_STRUCT, 0, 1);
         if (tag[0] && C.ntags < NTAGS) { cpy(C.tags[C.ntags].name, tag); C.tags[C.ntags].ty = t; C.ntags++; }
     }
     if (t->defined) { fail("that struct already has a body", tag); return t; }
+    t->packed = packed;
 
     t->mfirst = C.nmembers;
-    u32 off = 0, al = 1;
+    u32 off = 0, al = 1, bitpos = 0, unit_off = 0, unit_size = 0;
     while (!is("}") && C.cur.kind != TK_EOF && !C.bad) {
-        bool td;
-        type *base = declspec(&td);
+        if (is_kw("_Static_assert")) { stmt(); continue; }
+        bool td, ex, st;
+        type *base = declspec(&td, &ex, &st);
         for (;;) {
             char nm[NAME_MAX];
             type *mt = declarator(base, nm);
+            skip_attributes();
             if (C.bad) return t;
             if (C.nmembers >= NMEMBERS) { fail("too many members", NULL); return t; }
             member *m = &C.members[C.nmembers++];
+            memset(m, 0, sizeof(*m));
             cpy(m->name, nm);
             m->ty = mt;
-            u32 ma = mt->align ? mt->align : 1;
-            off = (off + ma - 1) / ma * ma;
-            m->offset = off;
-            off += mt->size;
+            u32 ma = packed ? 1 : (mt->align ? mt->align : 1);
+
+            if (eat(":")) {
+                /* A bit field: bits within a unit of its type's size,
+                 * started afresh when they would not fit. */
+                i64 w = const_eval(assign());
+                if (w <= 0 || w > 64) { fail("a bit field wants a width from 1 to 64", nm); return t; }
+                if (is_union) { unit_off = 0; bitpos = 0; unit_size = mt->size; }
+                else if (unit_size != mt->size || bitpos + w > unit_size * 8) {
+                    off = (off + ma - 1) / ma * ma;
+                    unit_off = off;
+                    unit_size = mt->size;
+                    bitpos = 0;
+                    off += unit_size;
+                }
+                m->offset = unit_off;
+                m->bit_off = (u8)bitpos;
+                m->bit_width = (u8)w;
+                bitpos += (u32)w;
+                if (is_union && mt->size > off) off = mt->size;
+            } else {
+                unit_size = 0;
+                bitpos = 0;
+                if (is_union) {
+                    m->offset = 0;
+                    if (mt->size > off) off = mt->size;
+                } else {
+                    off = (off + ma - 1) / ma * ma;
+                    m->offset = off;
+                    off += mt->size;
+                }
+            }
             if (ma > al) al = ma;
             if (!eat(",")) break;
         }
         expect(";");
     }
     expect("}");
+    while (is_kw("__attribute__")) packed |= skip_one_attribute();
+    if (packed) al = 1;
+    t->packed = packed;
     t->mcount = C.nmembers - t->mfirst;
     t->align = al;
     t->size = (off + al - 1) / al * al;
@@ -971,7 +1846,7 @@ static type *struct_decl(void)
 
 static type *enum_decl(void)
 {
-    if (C.cur.kind == TK_IDENT && !is("{")) advance();      /* the tag, unused */
+    if (C.cur.kind == TK_IDENT && !is("{")) advance();
     if (!eat("{")) return C.t_int;
     i64 v = 0;
     while (!is("}") && C.cur.kind != TK_EOF && !C.bad) {
@@ -988,62 +1863,76 @@ static type *enum_decl(void)
     return C.t_int;
 }
 
-static type *declspec(bool *is_typedef)
+static type *declspec(bool *is_typedef, bool *is_extern, bool *is_static)
 {
     *is_typedef = false;
-    bool uns = false, sgn = false;
-    i32 base = -1;                    /* T_ */
+    *is_extern = false;
+    *is_static = false;
+    bool uns = false, sgn = false, saw_long = false, saw_short = false;
+    i32 base = -1;
     type *named = NULL;
     for (;;) {
         if (C.cur.kind != TK_IDENT) break;
         const char *w = C.cur.text;
-        if (strcmp(w, "typedef") == 0) { *is_typedef = true; advance(); continue; }
-        if (strcmp(w, "const") == 0 || strcmp(w, "static") == 0 ||
-            strcmp(w, "extern") == 0 || strcmp(w, "volatile") == 0) { advance(); continue; }
-        if (strcmp(w, "unsigned") == 0) { uns = true; advance(); continue; }
-        if (strcmp(w, "signed") == 0)   { sgn = true; advance(); continue; }
-        if (strcmp(w, "void") == 0)  { base = T_VOID; advance(); continue; }
-        if (strcmp(w, "char") == 0)  { base = T_CHAR; advance(); continue; }
-        if (strcmp(w, "_Bool") == 0 || strcmp(w, "bool") == 0) { base = T_CHAR; uns = true; advance(); continue; }
-        if (strcmp(w, "short") == 0) { base = T_INT; advance(); continue; }
-        if (strcmp(w, "int") == 0)   { if (base < 0) base = T_INT; advance(); continue; }
-        if (strcmp(w, "long") == 0)  { base = T_LONG; advance(); continue; }
-        if (strcmp(w, "struct") == 0) { advance(); named = struct_decl(); continue; }
-        if (strcmp(w, "enum") == 0)   { advance(); named = enum_decl(); continue; }
+        if (same(w, "typedef")) { *is_typedef = true; advance(); continue; }
+        if (same(w, "extern"))  { *is_extern = true; advance(); continue; }
+        if (same(w, "static"))  { *is_static = true; advance(); continue; }
+        if (same(w, "const") || same(w, "volatile") || same(w, "inline") ||
+            same(w, "register") || same(w, "restrict") || same(w, "__inline__") ||
+            same(w, "__restrict")) { advance(); continue; }
+        if (same(w, "__attribute__")) { skip_one_attribute(); continue; }
+        if (same(w, "unsigned")) { uns = true; advance(); continue; }
+        if (same(w, "signed"))   { sgn = true; advance(); continue; }
+        if (same(w, "void"))   { base = T_VOID; advance(); continue; }
+        if (same(w, "char"))   { base = T_CHAR; advance(); continue; }
+        if (same(w, "_Bool") || same(w, "bool")) { base = T_CHAR; uns = true; advance(); continue; }
+        if (same(w, "short"))  { saw_short = true; advance(); continue; }
+        if (same(w, "int"))    { if (base < 0) base = T_INT; advance(); continue; }
+        if (same(w, "long"))   { saw_long = true; advance(); continue; }
+        if (same(w, "float"))  { base = T_FLOAT; advance(); continue; }
+        if (same(w, "double")) { base = T_DOUBLE; advance(); continue; }
+        if (same(w, "__builtin_va_list")) { named = C.t_charp; advance(); continue; }
+        if (same(w, "struct")) { advance(); named = record_decl(false); continue; }
+        if (same(w, "union"))  { advance(); named = record_decl(true); continue; }
+        if (same(w, "enum"))   { advance(); named = enum_decl(); continue; }
         type *td = typedef_find(w);
-        if (td && base < 0 && !named) { named = td; advance(); continue; }
+        if (td && base < 0 && !named && !saw_long && !saw_short && !uns && !sgn) { named = td; advance(); continue; }
         break;
     }
-    (void)sgn;
     if (named) return named;
+    if (saw_short) base = T_SHORT;
+    else if (saw_long && base != T_DOUBLE) base = T_LONG;
     if (base < 0) {
         if (uns || sgn) base = T_INT;
         else { fail("a type was expected here, not", C.cur.text); return C.t_long; }
     }
     switch (base) {
-    case T_VOID: return C.t_void;
-    case T_CHAR: return uns ? C.t_uchar : C.t_char;
-    case T_INT:  return uns ? C.t_uint : C.t_int;
-    default:     return uns ? C.t_ulong : C.t_long;
+    case T_VOID:   return C.t_void;
+    case T_CHAR:   return uns ? C.t_uchar : C.t_char;
+    case T_SHORT:  return uns ? C.t_ushort : C.t_short;
+    case T_INT:    return uns ? C.t_uint : C.t_int;
+    case T_FLOAT:  return C.t_float;
+    case T_DOUBLE: return C.t_double;
+    default:       return uns ? C.t_ulong : C.t_long;
     }
 }
 
-/* ( params ) after a name: the function's shape. Names are kept in
- * pnames for a definition that follows. */
 static type *func_suffix(type *ret, char pnames[NPARAMS][NAME_MAX])
 {
     type *f = new_type(T_FUNC, 8, 8);
     f->base = ret;
-    if (is_kw("void") && strcmp(C.nxt.text, ")") == 0 && C.nxt.kind == TK_PUNCT) {
-        advance();
-    }
+    if (is_kw("void") && nxt_is(")")) advance();
     while (!is(")") && C.cur.kind != TK_EOF && !C.bad) {
-        if (f->nparams >= NPARAMS) { fail("six parameters is the most a function takes here", NULL); return f; }
-        bool td;
-        type *pt = declspec(&td);
+        if (eat("...")) { f->variadic = true; break; }
+        if (f->nparams >= NPARAMS) { fail("sixteen parameters is the most a function takes here", NULL); return f; }
+        bool td, ex, st;
+        type *pt = declspec(&td, &ex, &st);
         char nm[NAME_MAX];
         pt = declarator(pt, nm);
+        skip_attributes();
         if (pt->kind == T_ARR) pt = ptr_to(pt->base);
+        if (pt->kind == T_FUNC) pt = ptr_to(pt);
+        if (is_rec(pt)) { fail("a struct is passed by pointer here, not by value", nm); return f; }
         if (pnames) cpy(pnames[f->nparams], nm);
         f->params[f->nparams++] = pt;
         if (!eat(",")) break;
@@ -1055,17 +1944,31 @@ static type *func_suffix(type *ret, char pnames[NPARAMS][NAME_MAX])
 static type *declarator(type *base, char *name)
 {
     name[0] = 0;
-    while (eat("*")) base = ptr_to(base);
+    for (;;) {
+        if (eat("*")) { base = ptr_to(base); continue; }
+        if (is_kw("const") || is_kw("volatile") || is_kw("restrict") || is_kw("__restrict")) { advance(); continue; }
+        break;
+    }
 
-    /* ( * name ) ( params ): a pointer to a function. */
-    if (is("(") && C.nxt.kind == TK_PUNCT && strcmp(C.nxt.text, "*") == 0) {
+    /* ( * name [n] ) ( params ): a pointer to a function, or an array
+     * of them. */
+    if (is("(") && nxt_is("*")) {
         advance();
         advance();
-        if (C.cur.kind == TK_IDENT) { cpy(name, C.cur.text); advance(); }
+        if (C.cur.kind == TK_IDENT && !is_typename()) { cpy(name, C.cur.text); advance(); }
+        u64 dims[4];
+        u32 nd = 0;
+        while (eat("[")) {
+            if (nd >= 4) { fail("too many dimensions", NULL); return base; }
+            dims[nd++] = is("]") ? 0 : (u64)const_eval(assign());
+            expect("]");
+        }
         expect(")");
         expect("(");
         type *f = func_suffix(base, NULL);
-        return ptr_to(f);
+        type *t = ptr_to(f);
+        while (nd) t = array_of(t, dims[--nd]);
+        return t;
     }
 
     if (C.cur.kind == TK_IDENT && !is_typename()) {
@@ -1075,7 +1978,6 @@ static type *declarator(type *base, char *name)
 
     if (eat("(")) return func_suffix(base, NULL);
 
-    /* Arrays, outermost first: int a[2][3] is two of three. */
     u64 dims[8];
     u32 nd = 0;
     while (eat("[")) {
@@ -1088,11 +1990,36 @@ static type *declarator(type *base, char *name)
     return base;
 }
 
+/* A type without a name, for casts and sizeof. */
+static type *abstract_type(void)
+{
+    bool td, ex, st;
+    type *t = declspec(&td, &ex, &st);
+    char nm[NAME_MAX];
+    return declarator(t, nm);
+}
+
 /* ------------------------------------------------------------------ */
 /* Reading expressions                                                 */
 /* ------------------------------------------------------------------ */
 
 static u32 cast_expr(void);
+
+static u32 arg_list(u32 n, u32 most, const char *what)
+{
+    u32 tail = 0, count = 0;
+    while (!is(")") && !C.bad) {
+        u32 a = assign();
+        if (count >= most) { fail(what, NULL); return n; }
+        if (tail) N(tail)->next = a; else N(n)->aux = a;
+        tail = a;
+        count++;
+        if (!eat(",")) break;
+    }
+    expect(")");
+    N(n)->val = count;
+    return n;
+}
 
 static u32 primary(void)
 {
@@ -1106,11 +2033,17 @@ static u32 primary(void)
         advance();
         return n;
     }
+    if (C.cur.kind == TK_FNUM) {
+        u32 n = mk(ND_FNUM);
+        N(n)->fval = C.cur.fval;
+        N(n)->ty = C.t_double;
+        advance();
+        return n;
+    }
     if (C.cur.kind == TK_STR) {
         u32 n = mk(ND_STR);
         N(n)->aux = C.cur.str;
         advance();
-        /* Neighbouring strings join. */
         while (C.cur.kind == TK_STR) {
             u32 a = C.strs[N(n)->aux].at;
             u32 al = C.strs[N(n)->aux].len - 1;
@@ -1131,45 +2064,68 @@ static u32 primary(void)
     }
     if (is_kw("sizeof")) {
         advance();
-        if (is("(") && (C.nxt.kind == TK_IDENT)) {
-            /* Maybe a type, maybe an expression in parentheses. */
-            token save = C.cur;
-            (void)save;
+        if (is("(") && C.nxt.kind == TK_IDENT && is_typename_word(C.nxt.text)) {
             advance();
-            if (is_typename()) {
-                bool td;
-                type *t = declspec(&td);
-                char nm[NAME_MAX];
-                t = declarator(t, nm);
-                expect(")");
-                return mk_num((i64)t->size);
-            }
-            /* An expression: read it as if the paren were still open. */
-            u32 e = expr();
+            type *t = abstract_type();
             expect(")");
-            add_type(e);
-            return mk_num((i64)N(e)->ty->size);
+            return mk_num((i64)t->size);
         }
         u32 e = cast_expr();
         add_type(e);
         return mk_num((i64)N(e)->ty->size);
     }
+    if (is_kw("__builtin_offsetof")) {
+        advance();
+        expect("(");
+        type *t = abstract_type();
+        expect(",");
+        if (C.cur.kind != TK_IDENT || !is_rec(t)) { fail("offsetof wants a struct and a member", C.cur.text); return mk_num(0); }
+        i64 off = -1;
+        for (u32 i = 0; i < t->mcount; i++)
+            if (same(C.members[t->mfirst + i].name, C.cur.text)) off = (i64)C.members[t->mfirst + i].offset;
+        if (off < 0) { fail("the struct has no member called", C.cur.text); return mk_num(0); }
+        advance();
+        expect(")");
+        return mk_num(off);
+    }
     if (is_kw("syscall")) {
         advance();
         expect("(");
-        u32 n = mk(ND_SYSCALL);
-        u32 tail = 0, count = 0;
-        while (!is(")") && !C.bad) {
-            u32 a = assign();
-            if (count >= 6) { fail("syscall takes the number and five arguments at most", NULL); return n; }
-            if (tail) N(tail)->next = a; else N(n)->aux = a;
-            tail = a;
-            count++;
-            if (!eat(",")) break;
-        }
+        return arg_list(mk(ND_SYSCALL), 6, "syscall takes the number and five arguments at most");
+    }
+    if (is_kw("__builtin_va_start")) {
+        advance();
+        expect("(");
+        u32 n = mk(ND_VASTART);
+        N(n)->lhs = assign();
+        if (eat(",")) assign();                    /* the last named parameter: not needed */
         expect(")");
-        N(n)->val = count;
         return n;
+    }
+    if (is_kw("__builtin_va_arg")) {
+        advance();
+        expect("(");
+        u32 n = mk(ND_VAARG);
+        N(n)->lhs = assign();
+        expect(",");
+        N(n)->ty = abstract_type();
+        expect(")");
+        return n;
+    }
+    if (is_kw("__builtin_va_end")) {
+        advance();
+        expect("(");
+        assign();
+        expect(")");
+        return mk_num(0);
+    }
+    if (is_kw("__builtin_return_address") || is_kw("__builtin_expect")) {
+        advance();
+        expect("(");
+        u32 e = assign();
+        while (eat(",")) assign();
+        expect(")");
+        return e;
     }
     if (C.cur.kind == TK_IDENT) {
         sym *s = sym_find(C.cur.text);
@@ -1200,18 +2156,7 @@ static u32 postfix(void)
             node *fn = N(n);
             if (fn->kind == ND_VAR && C.syms[fn->sym].kind == S_FUNC) N(c)->sym = fn->sym;
             else N(c)->lhs = n;
-            u32 tail = 0, count = 0;
-            while (!is(")") && !C.bad) {
-                u32 a = assign();
-                if (count >= NPARAMS) { fail("six arguments is the most a call takes here", NULL); return c; }
-                if (tail) N(tail)->next = a; else N(c)->aux = a;
-                tail = a;
-                count++;
-                if (!eat(",")) break;
-            }
-            expect(")");
-            N(c)->val = count;
-            n = c;
+            n = arg_list(c, NPARAMS, "sixteen arguments is the most a call takes here");
             continue;
         }
         if (is(".") || is("->")) {
@@ -1220,12 +2165,12 @@ static u32 postfix(void)
             if (arrow) n = mk_un(ND_DEREF, n);
             add_type(n);
             type *t = N(n)->ty;
-            if (t->kind != T_STRUCT) { fail("only a struct has members", C.cur.text); return n; }
+            if (!is_rec(t)) { fail("only a struct or union has members", C.cur.text); return n; }
             if (C.cur.kind != TK_IDENT) { fail("a member's name was expected", C.cur.text); return n; }
             i64 found = -1;
             for (u32 i = 0; i < t->mcount; i++)
-                if (strcmp(C.members[t->mfirst + i].name, C.cur.text) == 0) { found = (i64)(t->mfirst + i); break; }
-            if (found < 0) { fail("the struct has no member called", C.cur.text); return n; }
+                if (same(C.members[t->mfirst + i].name, C.cur.text)) { found = (i64)(t->mfirst + i); break; }
+            if (found < 0) { fail("no member is called", C.cur.text); return n; }
             advance();
             u32 m = mk_un(ND_MEMBER, n);
             N(m)->aux = (u32)found;
@@ -1264,35 +2209,18 @@ static u32 unary(void)
 
 static u32 cast_expr(void)
 {
-    if (is("(") && C.nxt.kind == TK_IDENT) {
-        /* A type in parentheses is a cast; a name is not. Only the
-         * next token is known here, so a typedef name or a keyword
-         * decides it. */
-        const char *w = C.nxt.text;
-        bool typeish = typedef_find(w) != NULL;
-        static const char *const kws[] = { "void", "char", "int", "long", "short",
-            "unsigned", "signed", "struct", "enum", "const", "_Bool", "bool", NULL };
-        for (u32 i = 0; kws[i] && !typeish; i++) if (strcmp(w, kws[i]) == 0) typeish = true;
-        if (typeish) {
-            advance();
-            bool td;
-            type *t = declspec(&td);
-            char nm[NAME_MAX];
-            t = declarator(t, nm);
-            expect(")");
-            u32 n = mk_un(ND_CAST, cast_expr());
-            N(n)->ty = t;
-            return n;
-        }
+    if (is("(") && C.nxt.kind == TK_IDENT && is_typename_word(C.nxt.text)) {
+        advance();
+        type *t = abstract_type();
+        expect(")");
+        if (is("{")) fail("a compound literal is not here yet", NULL);
+        return mk_cast(cast_expr(), t);
     }
     return unary();
 }
 
-static u32 binary(u32 level);
-
-/* Precedence, from loose to tight. */
-typedef struct { const char *op; u8 nd; bool swap; } binop;
-static const binop levels[][5] = {
+typedef struct { const char *op; u8 nd; bool swap; } binop_t;
+static const binop_t levels[][5] = {
     { { "||", ND_LOR, false }, { NULL, 0, false } },
     { { "&&", ND_LAND, false }, { NULL, 0, false } },
     { { "|", ND_OR, false }, { NULL, 0, false } },
@@ -1311,7 +2239,7 @@ static u32 binary(u32 level)
     if (level >= NLEVELS) return cast_expr();
     u32 n = binary(level + 1);
     for (;;) {
-        const binop *hit = NULL;
+        const binop_t *hit = NULL;
         for (u32 i = 0; levels[level][i].op; i++)
             if (is(levels[level][i].op)) { hit = &levels[level][i]; break; }
         if (!hit) return n;
@@ -1358,44 +2286,266 @@ static u32 expr(void)
     return n;
 }
 
-/* A number the compiler can work out itself: enum values, array
- * sizes, case labels, what a global starts as. */
+/* ------------------------------------------------------------------ */
+/* Constants                                                           */
+/* ------------------------------------------------------------------ */
+
+typedef struct { i64 v; char label[NAME_MAX]; bool addr; } cval;
+
+/* A value the compiler can work out itself, possibly an address --
+ * a global's, a function's, a string's -- plus a number. */
+static bool const_val(u32 i, cval *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!i || C.bad) return false;
+    node *n = N(i);
+    cval a, b;
+    switch (n->kind) {
+    case ND_NUM: out->v = n->val; return true;
+    case ND_FNUM: out->v = sf_to_int(n->fval); return true;
+    case ND_STR: {
+        u32 at = 0;
+        const char *pre = ".Ls";
+        while (pre[at]) { out->label[at] = pre[at]; at++; }
+        u32 v = n->aux;
+        char d[12];
+        u32 nd = 0;
+        if (v == 0) d[nd++] = '0';
+        while (v) { d[nd++] = (char)('0' + v % 10); v /= 10; }
+        while (nd) out->label[at++] = d[--nd];
+        out->label[at] = 0;
+        out->addr = true;
+        return true;
+    }
+    case ND_VAR: {
+        sym *s = &C.syms[n->sym];
+        if (s->kind == S_FUNC) { out->label[0] = 'f'; out->label[1] = '_'; cpy(out->label + 2, s->label); out->addr = true; return true; }
+        if (s->kind == S_GLOBAL && s->ty->kind == T_ARR) { out->label[0] = 'v'; out->label[1] = '_'; cpy(out->label + 2, s->label); out->addr = true; return true; }
+        return false;
+    }
+    case ND_ADDR: {
+        node *l = N(n->lhs);
+        if (l->kind == ND_VAR && C.syms[l->sym].kind == S_GLOBAL) {
+            out->label[0] = 'v'; out->label[1] = '_'; cpy(out->label + 2, C.syms[l->sym].label); out->addr = true; return true;
+        }
+        if (l->kind == ND_VAR && C.syms[l->sym].kind == S_FUNC) {
+            out->label[0] = 'f'; out->label[1] = '_'; cpy(out->label + 2, C.syms[l->sym].label); out->addr = true; return true;
+        }
+        if (l->kind == ND_MEMBER && const_val(l->lhs, &a) && a.addr) { *out = a; out->v += C.members[l->aux].offset; return true; }
+        if (l->kind == ND_DEREF && const_val(l->lhs, &a)) { *out = a; return true; }
+        return false;
+    }
+    case ND_MEMBER:
+        return false;
+    case ND_NEG: if (!const_val(n->lhs, &a) || a.addr) return false; out->v = -a.v; return true;
+    case ND_BITNOT: if (!const_val(n->lhs, &a) || a.addr) return false; out->v = ~a.v; return true;
+    case ND_NOT: if (!const_val(n->lhs, &a) || a.addr) return false; out->v = !a.v; return true;
+    case ND_CAST: if (!const_val(n->lhs, &a)) return false; *out = a;
+        if (!a.addr && n->ty && is_int(n->ty) && n->ty->size < 8) {
+            u64 m = (1ULL << (n->ty->size * 8)) - 1;
+            out->v = (i64)((u64)a.v & m);
+            if (!n->ty->uns && (out->v >> (n->ty->size * 8 - 1)) & 1) out->v -= (i64)(m + 1);
+        }
+        return true;
+    case ND_COND: if (!const_val(n->lhs, &a) || a.addr) return false;
+        return const_val(a.v ? n->rhs : n->third, out);
+    case ND_ADD: case ND_SUB: case ND_MUL: case ND_DIV: case ND_MOD:
+    case ND_AND: case ND_OR: case ND_XOR: case ND_SHL: case ND_SHR:
+    case ND_EQ: case ND_NE: case ND_LT: case ND_LE: case ND_LAND: case ND_LOR: {
+        if (!const_val(n->lhs, &a) || !const_val(n->rhs, &b)) return false;
+        if (a.addr || b.addr) {
+            /* an address plus or minus a number stays an address */
+            if (n->kind == ND_ADD && a.addr && !b.addr) { *out = a; out->v += b.v; return true; }
+            if (n->kind == ND_ADD && b.addr && !a.addr) { *out = b; out->v += a.v; return true; }
+            if (n->kind == ND_SUB && a.addr && !b.addr) { *out = a; out->v -= b.v; return true; }
+            return false;
+        }
+        i64 x = a.v, y = b.v;
+        switch (n->kind) {
+        case ND_ADD: out->v = x + y; break;
+        case ND_SUB: out->v = x - y; break;
+        case ND_MUL: out->v = x * y; break;
+        case ND_DIV: out->v = y ? x / y : 0; break;
+        case ND_MOD: out->v = y ? x % y : 0; break;
+        case ND_AND: out->v = x & y; break;
+        case ND_OR:  out->v = x | y; break;
+        case ND_XOR: out->v = x ^ y; break;
+        case ND_SHL: out->v = x << y; break;
+        case ND_SHR: out->v = x >> y; break;
+        case ND_EQ:  out->v = x == y; break;
+        case ND_NE:  out->v = x != y; break;
+        case ND_LT:  out->v = x < y; break;
+        case ND_LE:  out->v = x <= y; break;
+        case ND_LAND: out->v = x && y; break;
+        default:     out->v = x || y; break;
+        }
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
 static i64 const_eval(u32 i)
 {
-    if (!i || C.bad) return 0;
-    node *n = N(i);
-    switch (n->kind) {
-    case ND_NUM: return n->val;
-    case ND_NEG: return -const_eval(n->lhs);
-    case ND_BITNOT: return ~const_eval(n->lhs);
-    case ND_NOT: return !const_eval(n->lhs);
-    case ND_CAST: return const_eval(n->lhs);
-    case ND_ADD: return const_eval(n->lhs) + const_eval(n->rhs);
-    case ND_SUB: return const_eval(n->lhs) - const_eval(n->rhs);
-    case ND_MUL: return const_eval(n->lhs) * const_eval(n->rhs);
-    case ND_DIV: { i64 d = const_eval(n->rhs); return d ? const_eval(n->lhs) / d : 0; }
-    case ND_MOD: { i64 d = const_eval(n->rhs); return d ? const_eval(n->lhs) % d : 0; }
-    case ND_AND: return const_eval(n->lhs) & const_eval(n->rhs);
-    case ND_OR:  return const_eval(n->lhs) | const_eval(n->rhs);
-    case ND_XOR: return const_eval(n->lhs) ^ const_eval(n->rhs);
-    case ND_SHL: return const_eval(n->lhs) << const_eval(n->rhs);
-    case ND_SHR: return const_eval(n->lhs) >> const_eval(n->rhs);
-    case ND_EQ:  return const_eval(n->lhs) == const_eval(n->rhs);
-    case ND_NE:  return const_eval(n->lhs) != const_eval(n->rhs);
-    case ND_LT:  return const_eval(n->lhs) < const_eval(n->rhs);
-    case ND_LE:  return const_eval(n->lhs) <= const_eval(n->rhs);
-    case ND_COND: return const_eval(n->lhs) ? const_eval(n->rhs) : const_eval(n->third);
-    default:
-        fail_at(n->line, NULL, "that has to be a number the compiler can work out", NULL);
+    cval c;
+    if (!const_val(i, &c) || c.addr) {
+        if (!C.bad) fail_at(N(i)->line, NULL, "that has to be a number the compiler can work out", NULL);
         return 0;
     }
+    return c.v;
+}
+
+/* ------------------------------------------------------------------ */
+/* Initializers                                                        */
+/* ------------------------------------------------------------------ */
+
+static void ibuf_put(u32 off, u64 v, u32 size)
+{
+    if (off + size > INIT_MAX) return;
+    for (u32 i = 0; i < size; i++) C.ibuf[off + i] = (u8)(v >> (i * 8));
+}
+
+/* A constant double, as its bits: a literal, its negation, a whole
+ * number, or a cast of one. */
+static bool const_fbits(u32 i, fbits *out)
+{
+    node *n = N(i);
+    switch (n->kind) {
+    case ND_FNUM: *out = n->fval; return true;
+    case ND_NUM:  *out = sf_from_int(n->val); return true;
+    case ND_NEG:  if (!const_fbits(n->lhs, out)) return false; *out ^= 1ULL << 63; return true;
+    case ND_CAST: return const_fbits(n->lhs, out);
+    default: {
+        cval c;
+        if (!const_val(i, &c) || c.addr) return false;
+        *out = sf_from_int(c.v);
+        return true;
+    }
+    }
+}
+
+static void init_scalar(type *t, u32 off, u32 e, bool allow_dyn)
+{
+    if (off + t->size > INIT_MAX) { fail("the initializer is too large", NULL); return; }
+    add_type(e);
+    if (C.bad) return;
+    if (is_flt(t)) {
+        fbits b;
+        if (const_fbits(e, &b)) {
+            if (t->kind == T_FLOAT) ibuf_put(off, sf_to_single(b), 4);
+            else ibuf_put(off, b, 8);
+            return;
+        }
+    }
+    cval c;
+    if (const_val(e, &c)) {
+        if (c.addr) {
+            if (C.nfix >= NFIX) { fail("too many addresses in initializers", NULL); return; }
+            C.fixes[C.nfix].off = off;
+            cpy(C.fixes[C.nfix].label, c.label);
+            C.fixes[C.nfix].addend = c.v;
+            C.nfix++;
+            return;
+        }
+        ibuf_put(off, (u64)c.v, t->size);
+        return;
+    }
+    if (!allow_dyn) { fail_at(N(e)->line, NULL, "a global starts as something the compiler can work out", NULL); return; }
+    if (C.ndyn >= NDYN) { fail("too many computed initializers", NULL); return; }
+    C.dyns[C.ndyn].off = off;
+    C.dyns[C.ndyn].ty = t;
+    C.dyns[C.ndyn].expr = e;
+    C.ndyn++;
+}
+
+static void initializer(type *t, u32 off, bool allow_dyn);
+
+/* { a, b, .name = c, [3] = d, ... } for an array or a record; a bare
+ * string for a char array. */
+static void initializer(type *t, u32 off, bool allow_dyn)
+{
+    if (t->kind == T_ARR && C.cur.kind == TK_STR && t->base->kind == T_CHAR) {
+        u32 s = C.cur.str;
+        advance();
+        if (t->len == 0) { t->len = C.strs[s].len; t->size = (u32)t->len; }
+        for (u32 k = 0; k < C.strs[s].len && k < t->len && off + k < INIT_MAX; k++)
+            C.ibuf[off + k] = C.spool[C.strs[s].at + k];
+        return;
+    }
+    if (!is("{")) {
+        if (t->kind == T_ARR || is_rec(t)) {
+            /* a record from an expression: only a whole-record copy */
+            if (is_rec(t) && allow_dyn) {
+                u32 e = assign();
+                if (C.ndyn >= NDYN) { fail("too many computed initializers", NULL); return; }
+                C.dyns[C.ndyn].off = off; C.dyns[C.ndyn].ty = t; C.dyns[C.ndyn].expr = e; C.ndyn++;
+                return;
+            }
+            fail("an array or struct starts with braces", NULL);
+            return;
+        }
+        init_scalar(t, off, assign(), allow_dyn);
+        return;
+    }
+    advance();                                     /* { */
+    if (t->kind == T_ARR) {
+        u64 idx = 0, high = 0;
+        while (!is("}") && C.cur.kind != TK_EOF && !C.bad) {
+            if (eat("[")) { idx = (u64)const_eval(assign()); expect("]"); expect("="); }
+            if (t->len && idx >= t->len) { fail("more values than the array has room for", NULL); return; }
+            if (t->base->size && off + idx * t->base->size + t->base->size > INIT_MAX) { fail("the initializer is too large", NULL); return; }
+            initializer(t->base, (u32)(off + idx * t->base->size), allow_dyn);
+            idx++;
+            if (idx > high) high = idx;
+            if (!eat(",")) break;
+        }
+        expect("}");
+        if (t->len == 0) { t->len = high; t->size = (u32)(high * t->base->size); }
+        return;
+    }
+    if (is_rec(t)) {
+        u32 mi = 0;
+        while (!is("}") && C.cur.kind != TK_EOF && !C.bad) {
+            if (eat(".")) {
+                if (C.cur.kind != TK_IDENT) { fail("a member's name was expected", C.cur.text); return; }
+                i64 found = -1;
+                for (u32 i = 0; i < t->mcount; i++)
+                    if (same(C.members[t->mfirst + i].name, C.cur.text)) { found = (i64)i; break; }
+                if (found < 0) { fail("no member is called", C.cur.text); return; }
+                advance();
+                expect("=");
+                mi = (u32)found;
+            }
+            if (mi >= t->mcount) { fail("more values than the struct has members", NULL); return; }
+            member *m = &C.members[t->mfirst + mi];
+            if (m->bit_width) {
+                i64 v = const_eval(assign());
+                u64 mask = m->bit_width == 64 ? ~0ULL : ((1ULL << m->bit_width) - 1);
+                u64 have = 0;
+                for (u32 k = 0; k < m->ty->size; k++) have |= (u64)C.ibuf[off + m->offset + k] << (k * 8);
+                have &= ~(mask << m->bit_off);
+                have |= ((u64)v & mask) << m->bit_off;
+                ibuf_put(off + m->offset, have, m->ty->size);
+            } else {
+                initializer(m->ty, off + m->offset, allow_dyn);
+            }
+            mi++;
+            if (t->kind == T_UNION) { while (!is("}") && !C.bad) advance(); break; }
+            if (!eat(",")) break;
+        }
+        expect("}");
+        return;
+    }
+    /* { scalar } */
+    init_scalar(t, off, assign(), allow_dyn);
+    while (eat(",")) { if (is("}")) break; assign(); }
+    expect("}");
 }
 
 /* ------------------------------------------------------------------ */
 /* Reading statements                                                  */
 /* ------------------------------------------------------------------ */
-
-static u32 stmt(void);
 
 static u32 block(void)
 {
@@ -1413,45 +2563,112 @@ static u32 block(void)
     return b;
 }
 
-/* A local declaration: room below rbp, and an assignment for what
- * it starts as. Several declarators become a block of them. */
+static void block_append(u32 b, u32 *tail, u32 s)
+{
+    if (!s) return;
+    if (*tail) N(*tail)->next = s; else N(b)->aux = s;
+    *tail = s;
+}
+
+/* The hidden constant a local initializer copies from. */
+static u32 init_const_emit_later(u32 size);
+
+typedef struct { u32 no; u32 size; u8 *bytes; fixup fixes[32]; u32 nfix; } init_const;
+static init_const iconsts[64];
+static u8 iconst_pool[65536];
+static u32 iconst_used;
+
+static u32 init_const_emit_later(u32 size)
+{
+    if (C.ninit_consts >= 64 || iconst_used + size > sizeof(iconst_pool)) { fail("too many local initializers", NULL); return 0; }
+    init_const *ic = &iconsts[C.ninit_consts];
+    ic->no = C.ninit_consts;
+    ic->size = size;
+    ic->bytes = iconst_pool + iconst_used;
+    memcpy(ic->bytes, C.ibuf, size);
+    ic->nfix = C.nfix > 32 ? 32 : C.nfix;
+    memcpy(ic->fixes, C.fixes, sizeof(fixup) * ic->nfix);
+    iconst_used += size;
+    return C.ninit_consts++;
+}
+
 static u32 local_decl(void)
 {
-    bool td;
-    type *base = declspec(&td);
+    bool td, ex, st;
+    type *base = declspec(&td, &ex, &st);
     u32 b = mk(ND_BLOCK);
     u32 tail = 0;
     for (;;) {
         char nm[NAME_MAX];
         type *t = declarator(base, nm);
+        skip_attributes();
         if (C.bad) return b;
         if (td) {
-            if (C.ntypedefs < NTYPEDEFS) { cpy(C.typedefs[C.ntypedefs].name, nm); C.typedefs[C.ntypedefs].ty = t; C.ntypedefs++; }
+            typedef_add(nm, t);
+        } else if (nm[0] && st) {
+            /* A static local is a global with a private name. */
+            char label[NAME_MAX];
+            u32 k = 0;
+            while (nm[k] && k < NAME_MAX - 8) { label[k] = nm[k]; k++; }
+            label[k++] = '.';
+            u32 v = ++C.statics;
+            char d[12];
+            u32 nd = 0;
+            if (v == 0) d[nd++] = '0';
+            while (v) { d[nd++] = (char)('0' + v % 10); v /= 10; }
+            while (nd && k < NAME_MAX - 1) label[k++] = d[--nd];
+            label[k] = 0;
+            sym *s = sym_add(nm, t, S_GLOBAL);
+            cpy(s->label, label);
+            memset(C.ibuf, 0, t->size > INIT_MAX ? INIT_MAX : t->size + 8);
+            C.nfix = 0;
+            C.ndyn = 0;
+            bool has = false;
+            if (eat("=")) { initializer(t, 0, false); has = true; }
+            global_add(label, t, has, false);
         } else if (nm[0]) {
             if (t->kind == T_VOID) { fail("a variable cannot be void", nm); return b; }
+            if (t->kind == T_FUNC) { sym_add(nm, t, S_FUNC); if (!eat(",")) break; continue; }
             sym *s = sym_add(nm, t, S_LOCAL);
             if (eat("=")) {
-                if (t->kind == T_ARR && C.cur.kind == TK_STR && t->base->kind == T_CHAR) {
-                    /* char name[] = "..." : the letters, one by one. */
-                    u32 sidx = C.cur.str;
-                    advance();
-                    if (t->len == 0) { t->len = C.strs[sidx].len; t->size = (u32)t->len; }
+                if (is("{") || (t->kind == T_ARR && C.cur.kind == TK_STR)) {
+                    memset(C.ibuf, 0, t->size > INIT_MAX ? INIT_MAX : t->size + 8);
+                    C.nfix = 0;
+                    C.ndyn = 0;
+                    initializer(t, 0, true);
+                    if (C.bad) return b;
                     s->val = local_slot(t);
-                    for (u32 k = 0; k < C.strs[sidx].len && k < t->len; k++) {
-                        u32 v = mk(ND_VAR); N(v)->sym = (u32)(s - C.syms);
-                        u32 el = mk_un(ND_DEREF, mk_bin(ND_ADD, v, mk_num(k)));
-                        u32 as = mk_bin(ND_ASSIGN, el, mk_num(C.spool[C.strs[sidx].at + k]));
-                        u32 st = mk_un(ND_EXPR, as);
-                        if (tail) N(tail)->next = st; else N(b)->aux = st;
-                        tail = st;
+                    u32 si = (u32)(s - C.syms);
+                    /* copy the constant part, then compute the rest */
+                    bool any = false;
+                    for (u32 k = 0; k < t->size && !any; k++) if (C.ibuf[k]) any = true;
+                    u32 v = mk(ND_VAR); N(v)->sym = si;
+                    if (any || C.nfix) {
+                        u32 ic = init_const_emit_later(t->size);
+                        u32 cp = mk_un(ND_MEMCPY, v);
+                        N(cp)->aux = ic;
+                        N(cp)->val = t->size;
+                        block_append(b, &tail, cp);
+                    } else {
+                        u32 z = mk_un(ND_ZERO, v);
+                        N(z)->val = t->size;
+                        block_append(b, &tail, z);
+                    }
+                    for (u32 k = 0; k < C.ndyn; k++) {
+                        u32 v2 = mk(ND_VAR); N(v2)->sym = si;
+                        u32 addr = mk_un(ND_ADDR, v2);
+                        u32 pc = mk_cast(addr, ptr_to(C.t_char));
+                        u32 at = mk_bin(ND_ADD, pc, mk_num(C.dyns[k].off));
+                        u32 tp = mk_cast(at, ptr_to(C.dyns[k].ty));
+                        u32 el = mk_un(ND_DEREF, tp);
+                        u32 as = mk_bin(ND_ASSIGN, el, C.dyns[k].expr);
+                        block_append(b, &tail, mk_un(ND_EXPR, as));
                     }
                 } else {
                     s->val = local_slot(t);
                     u32 v = mk(ND_VAR); N(v)->sym = (u32)(s - C.syms);
                     u32 as = mk_bin(ND_ASSIGN, v, assign());
-                    u32 st = mk_un(ND_EXPR, as);
-                    if (tail) N(tail)->next = st; else N(b)->aux = st;
-                    tail = st;
+                    block_append(b, &tail, mk_un(ND_EXPR, as));
                 }
             } else {
                 if (t->kind == T_ARR && t->len == 0) { fail("an array without a size needs a value", nm); return b; }
@@ -1469,6 +2686,24 @@ static u32 stmt(void)
     if (eat(";")) return 0;
     if (eat("{")) return block();
 
+    if (is_kw("_Static_assert")) {
+        advance();
+        expect("(");
+        i64 v = const_eval(assign());
+        char msg[NAME_MAX] = "";
+        if (eat(",")) {
+            if (C.cur.kind == TK_STR) {
+                u32 k = 0;
+                while (k < NAME_MAX - 1 && C.spool[C.strs[C.cur.str].at + k]) { msg[k] = (char)C.spool[C.strs[C.cur.str].at + k]; k++; }
+                msg[k] = 0;
+                advance();
+            }
+        }
+        expect(")");
+        expect(";");
+        if (!v) fail("the static assertion does not hold:", msg);
+        return 0;
+    }
     if (is_kw("return")) {
         advance();
         u32 n = mk(ND_RETURN);
@@ -1526,6 +2761,21 @@ static u32 stmt(void)
     }
     if (is_kw("break"))    { advance(); expect(";"); return mk(ND_BREAK); }
     if (is_kw("continue")) { advance(); expect(";"); return mk(ND_CONTINUE); }
+    if (is_kw("goto")) {
+        advance();
+        if (C.cur.kind != TK_IDENT) { fail("goto where?", C.cur.text); return 0; }
+        u32 n = mk(ND_GOTO);
+        u32 g = 0;
+        for (; g < C.ngotos; g++) if (same(C.gotos[g], C.cur.text)) break;
+        if (g == C.ngotos) {
+            if (C.ngotos >= NGOTO) { fail("too many labels", NULL); return 0; }
+            cpy(C.gotos[C.ngotos++], C.cur.text);
+        }
+        N(n)->aux = g;
+        advance();
+        expect(";");
+        return n;
+    }
     if (is_kw("switch")) {
         advance();
         expect("(");
@@ -1535,7 +2785,7 @@ static u32 stmt(void)
         if (C.nsw >= 32) { fail("switches nest too deep", NULL); return n; }
         C.sw_case[C.nsw++] = 0;
         N(n)->rhs = stmt();
-        N(n)->aux = C.sw_case[--C.nsw];          /* the chain of cases */
+        N(n)->aux = C.sw_case[--C.nsw];
         return n;
     }
     if (is_kw("case") || is_kw("default")) {
@@ -1545,9 +2795,37 @@ static u32 stmt(void)
         if (!dflt) N(n)->val = const_eval(assign());
         expect(":");
         if (!C.nsw) { fail("case outside a switch", NULL); return n; }
-        N(n)->third = C.sw_case[C.nsw - 1];      /* chain through the switch */
+        N(n)->third = C.sw_case[C.nsw - 1];
         C.sw_case[C.nsw - 1] = n;
-        N(n)->aux = C.label++;                   /* its label, chosen now */
+        N(n)->aux = C.label++;
+        N(n)->rhs = is("}") ? 0 : stmt();
+        return n;
+    }
+    if (is_kw("asm") || is_kw("__asm__")) {
+        advance();
+        if (is_kw("volatile") || is_kw("__volatile__")) advance();
+        expect("(");
+        if (C.cur.kind != TK_STR) { fail("asm wants its text in quotes", C.cur.text); return 0; }
+        u32 n = mk(ND_ASM);
+        N(n)->aux = C.cur.str;
+        advance();
+        if (is(":")) { fail("inline assembly with operands is not here; write the function in the assembler instead", NULL); return 0; }
+        expect(")");
+        expect(";");
+        return n;
+    }
+    /* label: */
+    if (C.cur.kind == TK_IDENT && nxt_is(":") && !is_typename()) {
+        u32 n = mk(ND_LABEL);
+        u32 g = 0;
+        for (; g < C.ngotos; g++) if (same(C.gotos[g], C.cur.text)) break;
+        if (g == C.ngotos) {
+            if (C.ngotos >= NGOTO) { fail("too many labels", NULL); return 0; }
+            cpy(C.gotos[C.ngotos++], C.cur.text);
+        }
+        N(n)->aux = g;
+        advance();
+        advance();
         N(n)->rhs = is("}") ? 0 : stmt();
         return n;
     }
@@ -1600,23 +2878,29 @@ static void o(const char *fmt, ...)
     __builtin_va_end(ap);
 }
 
-static const char *const arg64[NPARAMS] = { "rdi", "rsi", "rdx", "rcx", "r8", "r9" };
-static const char *const arg32[NPARAMS] = { "edi", "esi", "edx", "ecx", "r8d", "r9d" };
-static const char *const arg8[NPARAMS]  = { "dil", "sil", "dl", "cl", "r8b", "r9b" };
+static const char *const arg64[REGARGS] = { "rdi", "rsi", "rdx", "rcx", "r8", "r9" };
+static const char *const arg32[REGARGS] = { "edi", "esi", "edx", "ecx", "r8d", "r9d" };
+static const char *const arg16[REGARGS] = { "di", "si", "dx", "cx", "r8w", "r9w" };
+static const char *const arg8[REGARGS]  = { "dil", "sil", "dl", "cl", "r8b", "r9b" };
+static const char *const argx[REGARGS]  = { "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5" };
 
 static void gen_expr(u32 i);
 static void gen_stmt(u32 i);
 
-/* The address of an lvalue into rax. */
 static void gen_addr(u32 i)
 {
     node *n = N(i);
     switch (n->kind) {
     case ND_VAR: {
         sym *s = &C.syms[n->sym];
-        if (s->kind == S_LOCAL) o("    lea rax, [rbp - %d]\n", -s->val);
-        else if (s->kind == S_FUNC) o("    lea rax, [f_%s]\n", s->name);
-        else o("    lea rax, [v_%s]\n", s->name);
+        if (s->kind == S_LOCAL) {
+            /* Below rbp for the function's own; above it for the
+             * arguments the caller left on the stack. */
+            if (s->val < 0) o("    lea rax, [rbp - %d]\n", -s->val);
+            else o("    lea rax, [rbp + %d]\n", s->val);
+        }
+        else if (s->kind == S_FUNC) o("    lea rax, [f_%s]\n", s->label);
+        else o("    lea rax, [v_%s]\n", s->label);
         return;
     }
     case ND_STR:
@@ -1633,47 +2917,131 @@ static void gen_addr(u32 i)
         gen_expr(n->lhs);
         gen_addr(n->rhs);
         return;
+    case ND_CAST:
+        gen_addr(n->lhs);
+        return;
     default:
         fail_at(n->line, NULL, "that is not something with an address", NULL);
     }
 }
 
-/* What is at the address in rax, into rax -- unless it is an array,
- * a struct or a function, whose address is the value. */
+/* What is at the address in rax, into rax (or xmm0 for a double). */
 static void load(type *t)
 {
-    if (t->kind == T_ARR || t->kind == T_STRUCT || t->kind == T_FUNC) return;
+    if (t->kind == T_ARR || is_rec(t) || t->kind == T_FUNC) return;
+    if (t->kind == T_DOUBLE) { o("    movsd xmm0, [rax]\n"); return; }
+    if (t->kind == T_FLOAT)  { o("    movss xmm0, dword [rax]\n    cvtss2sd xmm0, xmm0\n"); return; }
     if (t->size == 1) o(t->uns ? "    movzx rax, byte [rax]\n" : "    movsx rax, byte [rax]\n");
+    else if (t->size == 2) o(t->uns ? "    movzx rax, word [rax]\n" : "    movsx rax, word [rax]\n");
     else if (t->size == 4) o(t->uns ? "    mov eax, dword [rax]\n" : "    movsxd rax, dword [rax]\n");
     else o("    mov rax, [rax]\n");
 }
 
-/* rax into the address in rdi. */
+/* rax (or xmm0) into the address in rdi. */
 static void store(type *t)
 {
-    if (t->kind == T_STRUCT) {
+    if (is_rec(t)) {
         u32 off = 0;
         while (off + 8 <= t->size) { o("    mov rcx, [rax + %d]\n    mov [rdi + %d], rcx\n", (i64)off, (i64)off); off += 8; }
         while (off < t->size) { o("    mov cl, byte [rax + %d]\n    mov byte [rdi + %d], cl\n", (i64)off, (i64)off); off++; }
         return;
     }
+    if (t->kind == T_DOUBLE) { o("    movsd [rdi], xmm0\n"); return; }
+    if (t->kind == T_FLOAT)  { o("    cvtsd2ss xmm1, xmm0\n    movss dword [rdi], xmm1\n"); return; }
     if (t->size == 1) o("    mov byte [rdi], al\n");
+    else if (t->size == 2) o("    mov word [rdi], ax\n");
     else if (t->size == 4) o("    mov dword [rdi], eax\n");
     else o("    mov [rdi], rax\n");
 }
 
-/* rax, cut to a type's width and widened again. */
+/* A bit field's value out of its unit (address in rax), into rax. */
+static void load_bits(member *m)
+{
+    type *u = m->ty;
+    if (u->size == 1) o("    movzx rax, byte [rax]\n");
+    else if (u->size == 2) o("    movzx rax, word [rax]\n");
+    else if (u->size == 4) o("    mov eax, dword [rax]\n");
+    else o("    mov rax, [rax]\n");
+    u32 left = 64 - m->bit_off - m->bit_width;
+    if (left) o("    shl rax, %d\n", (i64)left);
+    o(u->uns ? "    shr rax, %d\n" : "    sar rax, %d\n", (i64)(64 - m->bit_width));
+}
+
+/* rax into a bit field whose unit's address is in rdi. */
+static void store_bits(member *m)
+{
+    type *u = m->ty;
+    u64 mask = m->bit_width == 64 ? ~0ULL : ((1ULL << m->bit_width) - 1);
+    o("    mov rcx, %d\n    and rax, rcx\n", (i64)mask);
+    if (m->bit_off) o("    shl rax, %d\n", (i64)m->bit_off);
+    o("    mov r9, rax\n");
+    if (u->size == 1) o("    movzx rax, byte [rdi]\n");
+    else if (u->size == 2) o("    movzx rax, word [rdi]\n");
+    else if (u->size == 4) o("    mov eax, dword [rdi]\n");
+    else o("    mov rax, [rdi]\n");
+    o("    mov rcx, %d\n    not rcx\n    and rax, rcx\n    or rax, r9\n", (i64)(mask << m->bit_off));
+    if (u->size == 1) o("    mov byte [rdi], al\n");
+    else if (u->size == 2) o("    mov word [rdi], ax\n");
+    else if (u->size == 4) o("    mov dword [rdi], eax\n");
+    else o("    mov [rdi], rax\n");
+}
+
+static member *bitfield_of(u32 i)
+{
+    node *n = N(i);
+    if (n->kind != ND_MEMBER) return NULL;
+    member *m = &C.members[n->aux];
+    return m->bit_width ? m : NULL;
+}
+
+/* rax or xmm0, from one type to another. */
 static void cast_to(type *from, type *to)
 {
-    if (to->kind == T_VOID || to->kind == T_STRUCT) return;
+    if (to->kind == T_VOID || is_rec(to) || to->kind == T_FUNC || to->kind == T_ARR) return;
+    bool ff = is_flt(from), tf = is_flt(to);
+    if (ff && !tf) {
+        o("    cvttsd2si rax, xmm0\n");
+        from = C.t_long;
+    } else if (!ff && tf) {
+        if (from->kind == T_LONG && from->uns) {
+            /* an unsigned long above the sign bit: halve, convert, double */
+            o("    test rax, rax\n    js %l\n    cvtsi2sd xmm0, rax\n    jmp %l\n%l:\n    mov rcx, rax\n    shr rcx, 1\n    and rax, 1\n    or rcx, rax\n    cvtsi2sd xmm0, rcx\n    addsd xmm0, xmm0\n%l:\n",
+              C.label, C.label + 1, C.label, C.label + 1);
+            C.label += 2;
+        } else {
+            o("    cvtsi2sd xmm0, rax\n");
+        }
+        return;
+    } else if (ff && tf) {
+        return;                       /* double and float both travel as double */
+    }
     if (to->size == 1) o(to->uns ? "    movzx rax, al\n" : "    movsx rax, al\n");
+    else if (to->size == 2) o(to->uns ? "    movzx rax, ax\n" : "    movsx rax, ax\n");
     else if (to->size == 4) o(to->uns ? "    mov eax, eax\n" : "    movsxd rax, eax\n");
-    (void)from;
+}
+
+/* rax (or xmm0) as a truth value in rax. */
+static void to_bool(type *t)
+{
+    if (is_flt(t)) o("    xorpd xmm1, xmm1\n    ucomisd xmm0, xmm1\n    setne al\n    movzx rax, al\n");
 }
 
 static void emit_binop(u8 kind, type *t)
 {
     bool uns = t && t->uns;
+    if (t && is_flt(t)) {
+        switch (kind) {
+        case ND_ADD: o("    addsd xmm0, xmm1\n"); return;
+        case ND_SUB: o("    subsd xmm0, xmm1\n"); return;
+        case ND_MUL: o("    mulsd xmm0, xmm1\n"); return;
+        case ND_DIV: o("    divsd xmm0, xmm1\n"); return;
+        case ND_EQ:  o("    ucomisd xmm0, xmm1\n    sete al\n    movzx rax, al\n"); return;
+        case ND_NE:  o("    ucomisd xmm0, xmm1\n    setne al\n    movzx rax, al\n"); return;
+        case ND_LT:  o("    ucomisd xmm1, xmm0\n    seta al\n    movzx rax, al\n"); return;
+        case ND_LE:  o("    ucomisd xmm1, xmm0\n    setae al\n    movzx rax, al\n"); return;
+        default: return;
+        }
+    }
     switch (kind) {
     case ND_ADD: o("    add rax, rdi\n"); break;
     case ND_SUB: o("    sub rax, rdi\n"); break;
@@ -1699,13 +3067,44 @@ static void emit_binop(u8 kind, type *t)
     }
 }
 
-static void gen_args(u32 first, u32 count, const char *const *regs)
+/* Pushes a value: an integer from rax, a double from xmm0. */
+static void push_val(type *t)
 {
-    for (u32 a = first; a; a = N(a)->next) {
+    if (is_flt(t)) o("    sub rsp, 8\n    movsd [rsp], xmm0\n");
+    else o("    push rax\n");
+}
+
+/* The arguments, computed last to first and pushed, then the first
+ * six pulled into their registers -- whole numbers to rdi, rsi, ...,
+ * doubles to xmm0, xmm1, ..., each kind counted on its own -- and
+ * the rest left where they lie, in order, for the callee to find
+ * above its frame. A variadic callee gets its doubles as bit
+ * patterns in the whole-number registers, so that va_arg can read
+ * them all from one place. Answers how many bytes the caller must
+ * take back off the stack afterwards. */
+static u32 gen_args(u32 first, u32 count, const char *const *regs, bool variadic)
+{
+    u32 list[NPARAMS];
+    u32 n = 0;
+    for (u32 a = first; a && n < NPARAMS; a = N(a)->next) list[n++] = a;
+    (void)count;
+
+    u8 kinds[NPARAMS];
+    for (u32 k = n; k > 0; k--) {
+        u32 a = list[k - 1];
         gen_expr(a);
-        o("    push rax\n");
+        bool f = is_flt(N(a)->ty);
+        if (f && (variadic || k - 1 >= REGARGS)) { o("    movq rax, xmm0\n"); f = false; }
+        kinds[k - 1] = f;
+        push_val(f ? C.t_double : C.t_long);
     }
-    for (u32 k = count; k > 0; k--) o("    pop %s\n", regs[k - 1]);
+    u32 gi = 0, xi = 0;
+    u32 reg_n = n < REGARGS ? n : REGARGS;
+    for (u32 k = 0; k < reg_n; k++) {
+        if (kinds[k]) o("    movsd %s, [rsp]\n    add rsp, 8\n", argx[xi++]);
+        else o("    pop %s\n", regs[gi++]);
+    }
+    return n > REGARGS ? (n - REGARGS) * 8 : 0;
 }
 
 static void gen_expr(u32 i)
@@ -1715,6 +3114,9 @@ static void gen_expr(u32 i)
     switch (n->kind) {
     case ND_NUM:
         o("    mov rax, %d\n", n->val);
+        return;
+    case ND_FNUM:
+        o("    mov rax, %d\n    movq xmm0, rax\n", (i64)n->fval);
         return;
     case ND_VAR:
         gen_addr(i);
@@ -1730,13 +3132,16 @@ static void gen_expr(u32 i)
     case ND_ADDR:
         gen_addr(n->lhs);
         return;
-    case ND_MEMBER:
+    case ND_MEMBER: {
+        member *m = bitfield_of(i);
         gen_addr(i);
-        load(n->ty);
+        if (m) load_bits(m); else load(n->ty);
         return;
+    }
     case ND_NEG:
         gen_expr(n->lhs);
-        o("    neg rax\n");
+        if (is_flt(N(n->lhs)->ty)) o("    mov rax, %d\n    movq xmm1, rax\n    xorpd xmm0, xmm1\n", (i64)0x8000000000000000ULL);
+        else o("    neg rax\n");
         return;
     case ND_BITNOT:
         gen_expr(n->lhs);
@@ -1744,6 +3149,7 @@ static void gen_expr(u32 i)
         return;
     case ND_NOT:
         gen_expr(n->lhs);
+        to_bool(N(n->lhs)->ty);
         o("    test rax, rax\n    sete al\n    movzx rax, al\n");
         return;
     case ND_CAST:
@@ -1755,27 +3161,32 @@ static void gen_expr(u32 i)
         gen_expr(n->rhs);
         return;
     case ND_LAND: {
-        u32 l = C.label++;
+        u32 l = C.label;
+        C.label += 2;
         gen_expr(n->lhs);
+        to_bool(N(n->lhs)->ty);
         o("    test rax, rax\n    je %l\n", l);
         gen_expr(n->rhs);
+        to_bool(N(n->rhs)->ty);
         o("    test rax, rax\n    je %l\n    mov rax, 1\n    jmp %l\n%l:\n    mov rax, 0\n%l:\n", l, l + 1, l, l + 1);
-        C.label++;
         return;
     }
     case ND_LOR: {
-        u32 l = C.label++;
+        u32 l = C.label;
+        C.label += 2;
         gen_expr(n->lhs);
+        to_bool(N(n->lhs)->ty);
         o("    test rax, rax\n    jne %l\n", l);
         gen_expr(n->rhs);
+        to_bool(N(n->rhs)->ty);
         o("    test rax, rax\n    jne %l\n    mov rax, 0\n    jmp %l\n%l:\n    mov rax, 1\n%l:\n", l, l + 1, l, l + 1);
-        C.label++;
         return;
     }
     case ND_COND: {
         u32 l = C.label;
         C.label += 2;
         gen_expr(n->lhs);
+        to_bool(N(n->lhs)->ty);
         o("    test rax, rax\n    je %l\n", l);
         gen_expr(n->rhs);
         o("    jmp %l\n%l:\n", l + 1, l);
@@ -1785,68 +3196,109 @@ static void gen_expr(u32 i)
     }
     case ND_ASSIGN: {
         type *t = N(n->lhs)->ty;
+        member *m = bitfield_of(n->lhs);
         gen_addr(n->lhs);
         o("    push rax\n");
         gen_expr(n->rhs);
         if (n->op) {
-            o("    mov rdi, rax\n    pop rax\n    mov r8, rax\n");
-            load(t);
-            /* A pointer moves by its element. */
-            if (is_ptr(t) && (n->op == ND_ADD || n->op == ND_SUB))
-                o("    imul rdi, %d\n", (i64)t->base->size);
-            emit_binop(n->op, t);
-            o("    mov rdi, r8\n");
+            if (is_flt(t)) {
+                o("    movsd xmm1, xmm0\n    pop rax\n    mov r8, rax\n");
+                load(t);
+                emit_binop(n->op, t);
+                o("    mov rdi, r8\n");
+            } else {
+                if (is_flt(N(n->rhs)->ty)) o("    cvttsd2si rax, xmm0\n");
+                o("    mov rdi, rax\n    pop rax\n    mov r8, rax\n");
+                if (m) load_bits(m); else load(t);
+                if (is_ptr(t) && (n->op == ND_ADD || n->op == ND_SUB))
+                    o("    imul rdi, %d\n", (i64)(t->base->size ? t->base->size : 1));
+                emit_binop(n->op, t);
+                o("    mov rdi, r8\n");
+            }
         } else {
             o("    pop rdi\n");
         }
-        cast_to(N(n->rhs)->ty, t);
-        store(t);
+        if (!n->op) cast_to(N(n->rhs)->ty, t);
+        else cast_to(t, t);
+        if (m) store_bits(m); else store(t);
         return;
     }
     case ND_INCDEC: {
         type *t = N(n->lhs)->ty;
+        member *m = bitfield_of(n->lhs);
         i64 step = n->val;
-        if (is_ptr(t)) step *= (i64)t->base->size;
+        if (is_ptr(t)) step *= (i64)(t->base->size ? t->base->size : 1);
         gen_addr(n->lhs);
         o("    mov rdi, rax\n");
-        load(t);
+        if (m) load_bits(m); else load(t);
+        if (is_flt(t)) {
+            if (n->post) o("    movsd xmm2, xmm0\n");
+            o("    mov rax, %d\n    movq xmm1, rax\n    addsd xmm0, xmm1\n", (i64)sf_from_int(step));
+            store(t);
+            if (n->post) o("    movsd xmm0, xmm2\n");
+            return;
+        }
         if (n->post) o("    mov r8, rax\n");
         o("    add rax, %d\n", step);
         o("    push rdi\n");
         cast_to(t, t);
         o("    pop rdi\n");
-        store(t);
+        if (m) store_bits(m); else store(t);
         if (n->post) o("    mov rax, r8\n");
         return;
     }
     case ND_CALL: {
+        type *ft = n->sym ? C.syms[n->sym].ty
+                          : (N(n->lhs)->ty->kind == T_PTR ? N(n->lhs)->ty->base : N(n->lhs)->ty);
         if (n->lhs) { gen_expr(n->lhs); o("    push rax\n"); }
-        gen_args(n->aux, (u32)n->val, arg64);
-        if (n->lhs) o("    pop rax\n    call rax\n");
-        else o("    call f_%s\n", C.syms[n->sym].name);
-        cast_to(n->ty, n->ty);
+        if (ft->variadic && n->val > REGARGS) { fail_at(n->line, NULL, "six arguments is the most a variadic call takes here", NULL); return; }
+        u32 extra = gen_args(n->aux, (u32)n->val, arg64, ft->variadic);
+        if (n->lhs) o("    mov rax, [rsp + %d]\n    call rax\n", (i64)extra);
+        else o("    call f_%s\n", C.syms[n->sym].label);
+        if (extra) o("    add rsp, %d\n", (i64)extra);
+        if (n->lhs) o("    add rsp, 8\n");
+        if (!is_flt(n->ty)) cast_to(n->ty, n->ty);
         return;
     }
     case ND_SYSCALL: {
         static const char *const sregs[6] = { "rax", "rdi", "rsi", "rdx", "r10", "r8" };
-        gen_args(n->aux, (u32)n->val, sregs);
+        gen_args(n->aux, (u32)n->val, sregs, true);
         o("    syscall\n");
+        return;
+    }
+    case ND_VASTART: {
+        /* ap = the saved register after the last named one */
+        gen_addr(n->lhs);
+        o("    lea rcx, [rbp - %d]\n    mov [rax], rcx\n",
+          -(C.va_area + (i64)C.fn_ty->nparams * 8));
+        return;
+    }
+    case ND_VAARG: {
+        gen_addr(n->lhs);
+        o("    mov rdi, rax\n    mov rax, [rdi]\n    add qword [rdi], 8\n");
+        if (is_flt(n->ty)) o("    movsd xmm0, [rax]\n");
+        else load(n->ty);
         return;
     }
     default:
         break;
     }
 
-    /* The binary ones: left in rax, right in rdi. */
+    /* The binary ones: left in rax/xmm0, right in rdi/xmm1. */
+    type *lt = N(n->lhs)->ty;
+    bool flt = is_flt(lt) || is_flt(N(n->rhs)->ty);
     gen_expr(n->lhs);
-    o("    push rax\n");
+    push_val(lt);
     gen_expr(n->rhs);
-    o("    mov rdi, rax\n    pop rax\n");
-    type *ot = N(n->lhs)->ty;
-    if (n->kind == ND_EQ || n->kind == ND_NE || n->kind == ND_LT || n->kind == ND_LE)
-        emit_binop(n->kind, (ot->uns || N(n->rhs)->ty->uns || is_ptr(ot)) ? C.t_ulong : C.t_long);
-    else
+    if (flt) o("    movsd xmm1, xmm0\n    movsd xmm0, [rsp]\n    add rsp, 8\n");
+    else o("    mov rdi, rax\n    pop rax\n");
+    if (n->kind == ND_EQ || n->kind == ND_NE || n->kind == ND_LT || n->kind == ND_LE) {
+        type *rt = N(n->rhs)->ty;
+        emit_binop(n->kind, flt ? C.t_double
+                            : (lt->uns || rt->uns || is_ptr(lt) || is_ptr(rt)) ? C.t_ulong : C.t_long);
+    } else {
         emit_binop(n->kind, n->ty);
+    }
 }
 
 static void gen_stmt(u32 i)
@@ -1863,7 +3315,8 @@ static void gen_stmt(u32 i)
     case ND_RETURN:
         if (n->lhs) {
             gen_expr(n->lhs);
-            cast_to(N(n->lhs)->ty, C.ret_ty);
+            if (is_rec(C.ret_ty)) fail_at(n->line, NULL, "a struct is returned by pointer here, not by value", NULL);
+            else cast_to(N(n->lhs)->ty, C.ret_ty);
         }
         o("    jmp .Lret%d\n", (i64)C.fn_no);
         return;
@@ -1871,6 +3324,7 @@ static void gen_stmt(u32 i)
         u32 l = C.label;
         C.label += 2;
         gen_expr(n->lhs);
+        to_bool(N(n->lhs)->ty);
         o("    test rax, rax\n    je %l\n", l);
         gen_stmt(n->rhs);
         o("    jmp %l\n%l:\n", l + 1, l);
@@ -1885,6 +3339,7 @@ static void gen_stmt(u32 i)
         C.cont[C.ncont++] = l;
         o("%l:\n", l);
         gen_expr(n->lhs);
+        to_bool(N(n->lhs)->ty);
         o("    test rax, rax\n    je %l\n", l + 1);
         gen_stmt(n->rhs);
         o("    jmp %l\n%l:\n", l, l + 1);
@@ -1900,6 +3355,7 @@ static void gen_stmt(u32 i)
         gen_stmt(n->rhs);
         o("%l:\n", l + 1);
         gen_expr(n->lhs);
+        to_bool(N(n->lhs)->ty);
         o("    test rax, rax\n    jne %l\n%l:\n", l, l + 2);
         C.nbrk--; C.ncont--;
         return;
@@ -1911,7 +3367,7 @@ static void gen_stmt(u32 i)
         C.cont[C.ncont++] = l + 1;
         gen_stmt(n->lhs);
         o("%l:\n", l);
-        if (n->rhs) { gen_expr(n->rhs); o("    test rax, rax\n    je %l\n", l + 2); }
+        if (n->rhs) { gen_expr(n->rhs); to_bool(N(n->rhs)->ty); o("    test rax, rax\n    je %l\n", l + 2); }
         gen_stmt(n->aux);
         o("%l:\n", l + 1);
         gen_expr(n->third);
@@ -1927,6 +3383,23 @@ static void gen_stmt(u32 i)
         if (!C.ncont) { fail_at(n->line, NULL, "continue outside a loop", NULL); return; }
         o("    jmp %l\n", C.cont[C.ncont - 1]);
         return;
+    case ND_GOTO:
+        o("    jmp .Lg%d_%s\n", (i64)C.fn_no, C.gotos[n->aux]);
+        return;
+    case ND_LABEL:
+        o(".Lg%d_%s:\n", (i64)C.fn_no, C.gotos[n->aux]);
+        gen_stmt(n->rhs);
+        return;
+    case ND_ASM: {
+        const u8 *s = C.spool + C.strs[n->aux].at;
+        o("    ");
+        for (u32 k = 0; s[k]; k++) {
+            if (s[k] == '\n') o("\n    ");
+            else o_char((char)s[k]);
+        }
+        o("\n");
+        return;
+    }
     case ND_SWITCH: {
         u32 end = C.label++;
         C.brk[C.nbrk++] = end;
@@ -1934,7 +3407,7 @@ static void gen_stmt(u32 i)
         u32 dflt = 0;
         for (u32 c = n->aux; c; c = N(c)->third) {
             if (N(c)->kind == ND_DEFAULT) { dflt = c; continue; }
-            o("    cmp rax, %d\n    je %l\n", N(c)->val, N(c)->aux);
+            o("    mov rcx, %d\n    cmp rax, rcx\n    je %l\n", N(c)->val, N(c)->aux);
         }
         if (dflt) o("    jmp %l\n", N(dflt)->aux);
         else o("    jmp %l\n", end);
@@ -1948,6 +3421,20 @@ static void gen_stmt(u32 i)
         o("%l:\n", n->aux);
         gen_stmt(n->rhs);
         return;
+    case ND_MEMCPY: {
+        u32 l = C.label++;
+        gen_addr(n->lhs);
+        o("    mov rdi, rax\n    lea rsi, [.Li%d]\n    mov rcx, %d\n%l:\n    mov al, byte [rsi]\n    mov byte [rdi], al\n    inc rsi\n    inc rdi\n    dec rcx\n    jne %l\n",
+          (i64)n->aux, (i64)n->val, l, l);
+        return;
+    }
+    case ND_ZERO: {
+        u32 l = C.label++;
+        gen_addr(n->lhs);
+        o("    mov rdi, rax\n    mov rcx, %d\n%l:\n    mov byte [rdi], 0\n    inc rdi\n    dec rcx\n    jne %l\n",
+          (i64)n->val, l, l);
+        return;
+    }
     default:
         gen_expr(i);
         return;
@@ -1959,35 +3446,71 @@ static void gen_stmt(u32 i)
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    char  name[NAME_MAX];
+    char  label[NAME_MAX];
     type *ty;
     bool  has_init;
-    i64   init;
-    u32   str;                        /* char array from a string, or NSTR */
+    bool  is_extern;
+    u8   *bytes;
+    fixup fixes[16];
+    u32   nfix;
 } global;
 
-static global globals[256];
+static global globals[NGLOBALS];
 static u32 nglobals;
+static u8 gpool[262144];
+static u32 gpool_used;
+
+void global_add(const char *label, type *t, bool has_init, bool is_extern);
+
+void global_add(const char *label, type *t, bool has_init, bool is_extern)
+{
+    if (nglobals >= NGLOBALS) { fail("too many globals", NULL); return; }
+    global *g = &globals[nglobals];
+    memset(g, 0, sizeof(*g));
+    cpy(g->label, label);
+    g->ty = t;
+    g->has_init = has_init;
+    g->is_extern = is_extern;
+    if (has_init) {
+        if (gpool_used + t->size > sizeof(gpool)) { fail("the globals are too large together", NULL); return; }
+        g->bytes = gpool + gpool_used;
+        memcpy(g->bytes, C.ibuf, t->size);
+        gpool_used += t->size;
+        g->nfix = C.nfix > 16 ? 16 : C.nfix;
+        memcpy(g->fixes, C.fixes, sizeof(fixup) * g->nfix);
+    }
+    nglobals++;
+}
 
 static void function(type *ft, const char *name, char pnames[NPARAMS][NAME_MAX])
 {
     sym *fs = sym_find(name);
     if (fs && fs->kind == S_FUNC && fs->defined) { fail("that function already has a body", name); return; }
-    if (!fs) fs = sym_add(name, ft, S_FUNC);
+    if (!fs || fs->kind != S_FUNC) fs = sym_add(name, ft, S_FUNC);
     fs->ty = ft;
     fs->defined = true;
 
     C.nnodes = 1;
     C.frame = 0;
     C.ret_ty = ft->base;
+    C.fn_ty = ft;
     C.fn_no++;
     C.nbrk = C.ncont = C.nsw = 0;
+    C.ngotos = 0;
+    C.va_area = 0;
+    u32 fn_mark = C.nsyms;
 
     scope_in();
     sym *params[NPARAMS];
+    if (ft->variadic) {
+        /* Room for all six registers, in order, so va_arg can walk. */
+        C.frame = 48;
+        C.va_area = -48;
+    }
     for (u32 p = 0; p < ft->nparams; p++) {
-        params[p] = sym_add(pnames[p], ft->params[p], S_LOCAL);
-        params[p]->val = local_slot(ft->params[p]);
+        params[p] = sym_add(pnames[p][0] ? pnames[p] : "?", ft->params[p], S_LOCAL);
+        if (p >= REGARGS) params[p]->val = 16 + (i64)(p - REGARGS) * 8;   /* left by the caller */
+        else params[p]->val = ft->variadic ? (C.va_area + (i64)p * 8) : local_slot(ft->params[p]);
     }
     expect("{");
     u32 body = block();
@@ -1999,84 +3522,118 @@ static void function(type *ft, const char *name, char pnames[NPARAMS][NAME_MAX])
     u32 frame = (u32)((C.frame + 15) / 16 * 16);
     o("\nf_%s:\n    push rbp\n    mov rbp, rsp\n", name);
     if (frame) o("    sub rsp, %d\n", (i64)frame);
-    for (u32 p = 0; p < ft->nparams; p++) {
-        type *pt = ft->params[p];
-        if (pt->size == 1) o("    mov byte [rbp - %d], %s\n", -params[p]->val, arg8[p]);
-        else if (pt->size == 4) o("    mov dword [rbp - %d], %s\n", -params[p]->val, arg32[p]);
-        else o("    mov [rbp - %d], %s\n", -params[p]->val, arg64[p]);
+    if (ft->variadic) {
+        for (u32 p = 0; p < REGARGS; p++)
+            o("    mov [rbp - %d], %s\n", -(C.va_area + (i64)p * 8), arg64[p]);
+    } else {
+        u32 gi = 0, xi = 0;
+        for (u32 p = 0; p < ft->nparams && p < REGARGS; p++) {
+            type *pt = ft->params[p];
+            i64 off = -params[p]->val;
+            if (pt->kind == T_DOUBLE) o("    movsd [rbp - %d], %s\n", off, argx[xi++]);
+            else if (pt->kind == T_FLOAT) o("    cvtsd2ss %s, %s\n    movss dword [rbp - %d], %s\n", argx[xi], argx[xi], off, argx[xi]), xi++;
+            else if (pt->size == 1) o("    mov byte [rbp - %d], %s\n", off, arg8[gi++]);
+            else if (pt->size == 2) o("    mov word [rbp - %d], %s\n", off, arg16[gi++]);
+            else if (pt->size == 4) o("    mov dword [rbp - %d], %s\n", off, arg32[gi++]);
+            else o("    mov [rbp - %d], %s\n", off, arg64[gi++]);
+        }
     }
     gen_stmt(body);
     o(".Lret%d:\n    mov rsp, rbp\n    pop rbp\n    ret\n", (i64)C.fn_no);
+    C.nsyms = fn_mark;                /* the function's names, given back at once */
 }
 
 static void toplevel(void)
 {
-    bool td;
-    type *base = declspec(&td);
+    if (is_kw("_Static_assert")) { stmt(); return; }
+    if (eat(";")) return;
+    bool td, ex, st;
+    type *base = declspec(&td, &ex, &st);
     if (C.bad) return;
-    if (eat(";")) return;                          /* struct s { ... }; alone */
+    if (eat(";")) return;
 
     for (;;) {
         char nm[NAME_MAX];
         char pnames[NPARAMS][NAME_MAX];
         memset(pnames, 0, sizeof(pnames));
 
-        /* A function's declarator keeps its parameter names, which a
-         * plain declarator throws away. */
+        type *b = base;
+        for (;;) {
+            if (eat("*")) { b = ptr_to(b); continue; }
+            if (is_kw("const") || is_kw("volatile") || is_kw("restrict")) { advance(); continue; }
+            break;
+        }
         type *t;
-        if (C.cur.kind == TK_IDENT && !is_typename() && C.nxt.kind == TK_PUNCT &&
-            strcmp(C.nxt.text, "(") == 0 && !td) {
-            type *b = base;
+        if (C.cur.kind == TK_IDENT && !is_typename() && nxt_is("(") && !td) {
             cpy(nm, C.cur.text);
             advance();
             advance();
             t = func_suffix(b, pnames);
         } else {
-            type *b = base;
-            while (is("*")) { advance(); b = ptr_to(b); }
-            if (C.cur.kind == TK_IDENT && !is_typename() && C.nxt.kind == TK_PUNCT &&
-                strcmp(C.nxt.text, "(") == 0 && !td) {
-                cpy(nm, C.cur.text);
-                advance();
-                advance();
-                t = func_suffix(b, pnames);
-            } else {
-                t = declarator(b, nm);
-            }
+            t = declarator(b, nm);
         }
+        skip_attributes();
         if (C.bad) return;
 
         if (td) {
-            if (C.ntypedefs < NTYPEDEFS) { cpy(C.typedefs[C.ntypedefs].name, nm); C.typedefs[C.ntypedefs].ty = t; C.ntypedefs++; }
+            typedef_add(nm, t);
         } else if (t->kind == T_FUNC) {
             if (is("{")) { function(t, nm, pnames); return; }
             sym *fs = sym_find(nm);
-            if (!fs) fs = sym_add(nm, t, S_FUNC);
+            if (!fs || fs->kind != S_FUNC) sym_add(nm, t, S_FUNC);
         } else if (nm[0]) {
-            if (nglobals >= 256) { fail("too many globals", NULL); return; }
-            global *g = &globals[nglobals];
-            memset(g, 0, sizeof(*g));
-            cpy(g->name, nm);
-            g->ty = t;
-            g->str = NSTR;
-            if (eat("=")) {
-                if (t->kind == T_ARR && C.cur.kind == TK_STR && t->base->kind == T_CHAR) {
-                    g->str = C.cur.str;
-                    if (t->len == 0) { t->len = C.strs[g->str].len; t->size = (u32)t->len; }
-                    advance();
-                } else {
+            sym *old = sym_find(nm);
+            if (old && old->kind == S_GLOBAL) {
+                /* declared again: fine, as long as nothing else starts it */
+                if (eat("=")) { fail("that global already exists", nm); return; }
+            } else {
+                sym *s = sym_add(nm, t, S_GLOBAL);
+                memset(C.ibuf, 0, t->size > INIT_MAX ? INIT_MAX : t->size + 8);
+                C.nfix = 0;
+                C.ndyn = 0;
+                bool has = false;
+                if (eat("=")) {
                     C.nnodes = 1;
-                    g->has_init = true;
-                    g->init = const_eval(assign());
+                    initializer(t, 0, false);
+                    has = true;
+                    if (t->kind == T_ARR && t->len == 0) { fail("an array without a size needs values", nm); return; }
                 }
+                if (t->kind == T_ARR && t->len == 0 && !ex) { fail("an array without a size needs values", nm); return; }
+                s->ty = t;
+                global_add(s->label, t, has, ex && !has);
             }
-            if (t->kind == T_ARR && t->len == 0) { fail("an array without a size needs a value", nm); return; }
-            sym_add(nm, t, S_GLOBAL);
-            nglobals++;
         }
         if (!eat(",")) break;
     }
     expect(";");
+}
+
+/* Bytes and addresses of one image, as db and dq lines. */
+static void emit_image(const u8 *bytes, u32 size, const fixup *fixes, u32 nfix)
+{
+    u32 at = 0;
+    while (at < size) {
+        const fixup *f = NULL;
+        for (u32 k = 0; k < nfix; k++) if (fixes[k].off == at) { f = &fixes[k]; break; }
+        if (f) {
+            o("    dq %s", f->label);
+            if (f->addend) o(" + %d", f->addend);
+            o("\n");
+            at += 8;
+            continue;
+        }
+        u32 run = 0;
+        while (at + run < size && run < 16) {
+            bool fixed = false;
+            for (u32 k = 0; k < nfix; k++) if (fixes[k].off == at + run) fixed = true;
+            if (fixed) break;
+            run++;
+        }
+        o("    db");
+        for (u32 k = 0; k < run; k++) o("%s %d", k ? "," : "", (i64)bytes[at + k]);
+        o("\n");
+        at += run;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -2087,6 +3644,8 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
 {
     memset(&C, 0, sizeof(C));
     nglobals = 0;
+    gpool_used = 0;
+    iconst_used = 0;
     C.find = find;
     C.ctx = ctx;
     C.out = out;
@@ -2097,29 +3656,34 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
     C.nnodes = 1;
     C.label = 1;
 
-    C.t_void  = new_type(T_VOID, 1, 1);
-    C.t_char  = new_type(T_CHAR, 1, 1);
-    C.t_uchar = new_type(T_CHAR, 1, 1); C.t_uchar->uns = true;
-    C.t_int   = new_type(T_INT, 4, 4);
-    C.t_uint  = new_type(T_INT, 4, 4);  C.t_uint->uns = true;
-    C.t_long  = new_type(T_LONG, 8, 8);
-    C.t_ulong = new_type(T_LONG, 8, 8); C.t_ulong->uns = true;
+    C.t_void   = new_type(T_VOID, 1, 1);
+    C.t_char   = new_type(T_CHAR, 1, 1);
+    C.t_uchar  = new_type(T_CHAR, 1, 1);  C.t_uchar->uns = true;
+    C.t_short  = new_type(T_SHORT, 2, 2);
+    C.t_ushort = new_type(T_SHORT, 2, 2); C.t_ushort->uns = true;
+    C.t_int    = new_type(T_INT, 4, 4);
+    C.t_uint   = new_type(T_INT, 4, 4);   C.t_uint->uns = true;
+    C.t_long   = new_type(T_LONG, 8, 8);
+    C.t_ulong  = new_type(T_LONG, 8, 8);  C.t_ulong->uns = true;
+    C.t_float  = new_type(T_FLOAT, 4, 4);
+    C.t_double = new_type(T_DOUBLE, 8, 8);
+    C.t_charp  = ptr_to(C.t_char);
 
-    /* Index zero means "no name" in a node, so no name may live there. */
-    sym_add("", C.t_void, S_ENUM);
+    sym_add("", C.t_void, S_ENUM);            /* index zero means no name */
+    define_text("__erebus__", "1");
+    define_text("__x86_64__", "1");
 
     if (!push_source(src, len, src_name ? src_name : "the text", false)) return -1;
     lex_raw(&C.nxt);
     advance();
 
-    /* The way in: the two handles a program starts holding become
-     * main's two arguments, and main's answer is the exit code. */
     o("; made by the compiler; the source lies beside this\n");
     o("section code\n");
     o("    mov rbp, rsp\n    call f_main\n    mov rdi, rax\n    mov rax, 0\n    syscall\n");
 
     while (C.cur.kind != TK_EOF && !C.bad) toplevel();
     if (C.bad) return -1;
+    if (C.ncond) { fail_at(0, src_name, "an #if never met its #endif", NULL); return -1; }
 
     sym *m = sym_find("main");
     if (!m || m->kind != S_FUNC || !m->defined) { fail_at(0, src_name, "there is no main", NULL); return -1; }
@@ -2127,20 +3691,17 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
     o("\nsection data\n");
     for (u32 i = 0; i < nglobals; i++) {
         global *g = &globals[i];
-        o("    align %d\n", (i64)(g->ty->align ? g->ty->align : 1));
-        o("v_%s:", g->name);
-        if (g->str < NSTR) {
-            o(" db");
-            for (u32 k = 0; k < g->ty->len; k++)
-                o("%s %d", k ? "," : "", (i64)(k < C.strs[g->str].len ? C.spool[C.strs[g->str].at + k] : 0));
-            o("\n");
-        } else if (g->has_init) {
-            if (g->ty->size == 1) o(" db %d\n", g->init & 0xFF);
-            else if (g->ty->size == 4) o(" dd %d\n", g->init & 0xFFFFFFFF);
-            else o(" dq %d\n", g->init);
-        } else {
-            o(" res %d\n", (i64)(g->ty->size ? g->ty->size : 1));
-        }
+        if (g->is_extern) continue;
+        u32 al = g->ty->align ? g->ty->align : 1;
+        if (al > 16) al = 16;
+        o("    align %d\n", (i64)al);
+        o("v_%s:\n", g->label);
+        if (g->has_init) emit_image(g->bytes, g->ty->size, g->fixes, g->nfix);
+        else o("    res %d\n", (i64)(g->ty->size ? g->ty->size : 1));
+    }
+    for (u32 i = 0; i < C.ninit_consts; i++) {
+        o("    align 8\n.Li%d:\n", (i64)iconsts[i].no);
+        emit_image(iconsts[i].bytes, iconsts[i].size, iconsts[i].fixes, iconsts[i].nfix);
     }
     for (u32 i = 0; i < C.nstrs; i++) {
         o(".Ls%d: db", (i64)i);

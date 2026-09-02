@@ -149,7 +149,7 @@ IMAGE  := $(BUILD)/esp.img
 # own copies, so a running VM and a test run never write the same file.
 STORE  := $(BUILD)/teststore.img
 
-.PHONY: all run shot fault wx stack trace-stack desktop trace-input persist agent relay sweep \
+.PHONY: all run shot fault wx stack trace-stack desktop trace-input persist agent relay sweep cchost \
         look debug clean info
 all: $(IMAGE)
 
@@ -464,6 +464,18 @@ relay: $(IMAGE) $(BUILD)/test-vars.fd
 # sweep runs with interrupts off and that duration should be a printed
 # fact, not a guess. Objects are cleaned away on both sides exactly as
 # in "fault", and for the same reason.
+# The machine's compiler and assembler as a host program: the same
+# two files, so a text can be tried in a second before it is tried
+# on the machine. Nothing runs here; the image is the machine's.
+cchost: $(BUILD)/cchost
+$(BUILD)/cchost: tools/cchost.c kernel/lang/cc.c kernel/lang/asm.c \
+                 kernel/include/eb/cc.h kernel/include/eb/asm.h
+	@mkdir -p $(BUILD)
+	@echo "  HOST    $@"
+	@clang -O1 -g -std=c11 -Wall -Wno-unused-function \
+	    -Wno-incompatible-library-redeclaration -I$(ROOT)/kernel/include \
+	    -o $@ tools/cchost.c kernel/lang/cc.c kernel/lang/asm.c
+
 sweep:
 	@rm -rf $(BUILD)/kernel $(KERNEL) $(IMAGE)
 	@$(MAKE) --no-print-directory EXTRA=-DEREBUS_STRESS_COLLECT $(IMAGE)

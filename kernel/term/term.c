@@ -740,7 +740,9 @@ static bool find_beside(void *ctx, const char *name, const u8 **text, u64 *len)
         object *t = obj_get_slot(holder, i);
         if (!t || obj_type(t) != TYPE_TEXT) continue;
         const char *nm = shown_name(holder, i);
-        if (strcmp(nm, name) != 0) continue;
+        u32 j = 0;
+        while (nm[j] && name[j] && low(nm[j]) == low(name[j])) j++;
+        if (nm[j] || name[j]) continue;
         *text = (const u8 *)obj_data(t);
         *len = text_len(*text, obj_size(t));
         return true;

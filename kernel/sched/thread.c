@@ -61,6 +61,13 @@ struct thread {
     u64          kstack_top;   /* where an interrupt from ring 3 lands */
     u64          ran_ns;       /* how long it has actually held the cpu */
 
+    /* A ring-3 thread's vector registers, kept across switches: the
+     * 512-byte fxsave image, 16-aligned inside a slightly larger
+     * allocation. Kernel threads have none; the kernel never touches
+     * those registers. */
+    u8          *fx_raw;
+    u8          *fx;
+
     /* Called after the thread is truly gone -- off the run queue, off
      * its stack -- by whoever reaps it. This is where a process hangs
      * its own teardown, which cannot run any earlier: the exiting
@@ -79,7 +86,20 @@ extern char stack_top_symbol[] __asm__("stack_top");
 
 void thread_set_pml4(thread *t, phys_addr pml4)
 {
-    if (t && t->magic == THREAD_MAGIC) t->pml4 = pml4;
+    if (!t || t->magic != THREAD_MAGIC) return;
+    t->pml4 = pml4;
+
+    /* A program gets a clean vector state to start from: everything
+     * zero, the control words at their defaults -- all exceptions
+     * masked, as a program that never asked for them expects. */
+    if (pml4 && !t->fx) {
+        t->fx_raw = (u8 *)kzalloc(512 + 16);
+        if (t->fx_raw) {
+            t->fx = (u8 *)(((u64)t->fx_raw + 15) & ~15ULL);
+            t->fx[0] = 0x7F; t->fx[1] = 0x03;          /* fcw */
+            t->fx[24] = 0x80; t->fx[25] = 0x1F;        /* mxcsr */
+        }
+    }
 }
 
 static thread *current;
@@ -283,6 +303,13 @@ static void switch_to_next(void)
     tss_set_kernel_stack(to->kstack_top);
     percpu_set_kernel_stack(to->kstack_top);
 
+    /* The vector registers follow the program too. Saved from the one
+     * leaving while it still owns them, restored for the one arriving
+     * before it runs; the kernel between them never uses the unit, so
+     * doing both here, eagerly, is correct and simple. */
+    if (from->fx) __asm__ volatile ("fxsave (%0)" :: "r"(from->fx) : "memory");
+    if (to->fx)   __asm__ volatile ("fxrstor (%0)" :: "r"(to->fx) : "memory");
+
     switch_stack(&from->rsp, to->rsp);
     /* Execution resumes here when somebody switches back to us. */
 }
@@ -408,6 +435,7 @@ static void reap_finished(void)
             release_slot(t->slot);
         }
 
+        if (t->fx_raw) kfree(t->fx_raw);
         t->magic = 0;
         kfree(t);
     }

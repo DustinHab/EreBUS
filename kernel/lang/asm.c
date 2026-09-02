@@ -24,7 +24,7 @@
 #include <eb/asm.h>
 #include <eb/string.h>
 
-#define LABELS_MAX 256
+#define LABELS_MAX 4096               /* a compiled program names a great many places */
 #define NAME_MAX   32
 #define CODE_MAX   (256 * 1024)
 #define DATA_MAX   (256 * 1024)
@@ -122,6 +122,20 @@ static void emit64(as *a, u64 v)
     for (u32 i = 0; i < 8; i++) emit8(a, (u8)(v >> (i * 8)));
 }
 
+static void emit16(as *a, u16 v)
+{
+    emit8(a, (u8)v);
+    emit8(a, (u8)(v >> 8));
+}
+
+/* An immediate of the operation's width: a word for 16-bit
+ * operations, a doubleword otherwise (sign-extended to 64). */
+static void emit_imm(as *a, u8 size, i64 v)
+{
+    if (size == 16) emit16(a, (u16)v);
+    else emit32(a, (u32)v);
+}
+
 /* Patches a doubleword already emitted, for the rip-relative
  * displacements that depend on how long the instruction turns out. */
 static void patch32(as *a, u64 at_addr, u32 v)
@@ -213,16 +227,28 @@ static const char *const regs64[16] = {
 static const char *const regs32[16] = {
     "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi",
     "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d" };
+static const char *const regs16[16] = {
+    "ax", "cx", "dx", "bx", "sp", "bp", "si", "di",
+    "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w" };
 static const char *const regs8[16] = {
     "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil",
     "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b" };
+static const char *const regsx[16] = {
+    "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+    "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15" };
+
+/* Size 128 marks a vector register; it takes no part in the width
+ * of an integer operation. */
+#define XMM 128
 
 static bool reg_named(const char *s, u32 n, u8 *num, u8 *size)
 {
     for (u32 i = 0; i < 16; i++) {
         if (strlen(regs64[i]) == n && memcmp(regs64[i], s, n) == 0) { *num = (u8)i; *size = 64; return true; }
         if (strlen(regs32[i]) == n && memcmp(regs32[i], s, n) == 0) { *num = (u8)i; *size = 32; return true; }
+        if (strlen(regs16[i]) == n && memcmp(regs16[i], s, n) == 0) { *num = (u8)i; *size = 16; return true; }
         if (strlen(regs8[i])  == n && memcmp(regs8[i],  s, n) == 0) { *num = (u8)i; *size = 8;  return true; }
+        if (strlen(regsx[i])  == n && memcmp(regsx[i],  s, n) == 0) { *num = (u8)i; *size = XMM; return true; }
     }
     return false;
 }
@@ -282,6 +308,7 @@ static bool parse_operand(as *a, const char *s, u32 n, operand *o)
     /* A stated width, then brackets. */
     u8 size = 0;
     if (n - i > 5 && memcmp(s + i, "byte ", 5) == 0)  { size = 8;  i = skip_sp(s, n, i + 5); }
+    else if (n - i > 5 && memcmp(s + i, "word ", 5) == 0)  { size = 16; i = skip_sp(s, n, i + 5); }
     else if (n - i > 6 && memcmp(s + i, "dword ", 6) == 0) { size = 32; i = skip_sp(s, n, i + 6); }
     else if (n - i > 6 && memcmp(s + i, "qword ", 6) == 0) { size = 64; i = skip_sp(s, n, i + 6); }
 
@@ -391,6 +418,7 @@ static void modrm_rr(as *a, u8 regfield, u8 rm)
 static void rm_reg(as *a, u8 op8, u8 op, const operand *rm, const operand *r, u8 size)
 {
     u8 base = rm->kind == OP_MEM ? (rm->base < 0 ? 0 : (u8)rm->base) : rm->reg;
+    if (size == 16) emit8(a, 0x66);
     rex(a, size == 64, r->reg, 0, base,
         byte_needs_rex(r, size) || byte_needs_rex(rm, size));
     emit8(a, size == 8 ? op8 : op);
@@ -403,10 +431,72 @@ static void rm_reg(as *a, u8 op8, u8 op, const operand *rm, const operand *r, u8
 static void rm_digit(as *a, u8 op8, u8 op, u8 digit, const operand *rm, u8 size, u32 imm_bytes)
 {
     u8 base = rm->kind == OP_MEM ? (rm->base < 0 ? 0 : (u8)rm->base) : rm->reg;
+    if (size == 16) emit8(a, 0x66);
     rex(a, size == 64, 0, 0, base, byte_needs_rex(rm, size));
     emit8(a, size == 8 ? op8 : op);
     if (rm->kind == OP_MEM) mem_tail(a, digit, rm, imm_bytes);
     else modrm_rr(a, digit, rm->reg);
+}
+
+/* The vector forms: a mandatory prefix, then REX, then 0F and the
+ * opcode. Only the scalar double and single operations a compiler
+ * needs; the x in xmm is the whole of the vector unit used here. */
+static void sse_op(as *a, u8 prefix, u8 op, bool w, const operand *reg, const operand *rm)
+{
+    u8 base = rm->kind == OP_MEM ? (rm->base < 0 ? 0 : (u8)rm->base) : rm->reg;
+    if (prefix) emit8(a, prefix);
+    rex(a, w, reg->reg, 0, base, false);
+    emit8(a, 0x0F);
+    emit8(a, op);
+    if (rm->kind == OP_MEM) mem_tail(a, reg->reg, rm, 0);
+    else modrm_rr(a, reg->reg, rm->reg);
+}
+
+static bool word_is(const char *s, u32 n, const char *w);
+
+static bool is_xmm(const operand *o) { return o->kind == OP_REG && o->size == XMM; }
+static bool is_r64(const operand *o) { return o->kind == OP_REG && o->size == 64; }
+
+/* Answers true when the mnemonic was one of the vector words. */
+static bool do_sse(as *a, const char *mn, u32 ml, operand *d, operand *s)
+{
+    struct { const char *nm; u8 prefix, op; } two[] = {
+        { "addsd", 0xF2, 0x58 }, { "subsd", 0xF2, 0x5C }, { "mulsd", 0xF2, 0x59 },
+        { "divsd", 0xF2, 0x5E }, { "sqrtsd", 0xF2, 0x51 }, { "ucomisd", 0x66, 0x2E },
+        { "addss", 0xF3, 0x58 }, { "subss", 0xF3, 0x5C }, { "mulss", 0xF3, 0x59 },
+        { "divss", 0xF3, 0x5E }, { "ucomiss", 0x00, 0x2E },
+        { "cvtss2sd", 0xF3, 0x5A }, { "cvtsd2ss", 0xF2, 0x5A },
+        { "xorpd", 0x66, 0x57 }, { "xorps", 0x00, 0x57 } };
+    for (u32 k = 0; k < sizeof(two) / sizeof(two[0]); k++) {
+        if (!word_is(mn, ml, two[k].nm)) continue;
+        if (!is_xmm(d) || !(is_xmm(s) || s->kind == OP_MEM)) { fail(a, "that wants an xmm register, then an xmm register or memory", NULL); return true; }
+        sse_op(a, two[k].prefix, two[k].op, false, d, s);
+        return true;
+    }
+    if (word_is(mn, ml, "movsd") || word_is(mn, ml, "movss")) {
+        u8 p = mn[3] == 's' && mn[4] == 'd' ? 0xF2 : 0xF3;
+        if (is_xmm(d) && (is_xmm(s) || s->kind == OP_MEM)) { sse_op(a, p, 0x10, false, d, s); return true; }
+        if (d->kind == OP_MEM && is_xmm(s)) { sse_op(a, p, 0x11, false, s, d); return true; }
+        fail(a, "movsd moves between an xmm register and memory or another xmm", NULL);
+        return true;
+    }
+    if (word_is(mn, ml, "cvtsi2sd") || word_is(mn, ml, "cvtsi2ss")) {
+        if (!is_xmm(d) || !(is_r64(s) || (s->kind == OP_MEM && s->size == 64))) { fail(a, "cvtsi2sd wants an xmm register, then a 64-bit register", NULL); return true; }
+        sse_op(a, mn[7] == 'd' ? 0xF2 : 0xF3, 0x2A, true, d, s);
+        return true;
+    }
+    if (word_is(mn, ml, "cvttsd2si") || word_is(mn, ml, "cvttss2si")) {
+        if (!is_r64(d) || !(is_xmm(s) || s->kind == OP_MEM)) { fail(a, "cvttsd2si wants a 64-bit register, then an xmm register", NULL); return true; }
+        sse_op(a, mn[5] == 'd' ? 0xF2 : 0xF3, 0x2C, true, d, s);
+        return true;
+    }
+    if (word_is(mn, ml, "movq")) {
+        if (is_xmm(d) && is_r64(s)) { sse_op(a, 0x66, 0x6E, true, d, s); return true; }
+        if (is_r64(d) && is_xmm(s)) { sse_op(a, 0x66, 0x7E, true, s, d); return true; }
+        fail(a, "movq moves between an xmm register and a 64-bit register", NULL);
+        return true;
+    }
+    return false;
 }
 
 static u8 width_of(as *a, const operand *x, const operand *y)
@@ -450,8 +540,8 @@ static void arith(as *a, u8 group, operand *d, operand *s)
             emit8(a, (u8)(i8)v);
         } else {
             if (!fits32(v)) { fail(a, "the number does not fit", NULL); return; }
-            rm_digit(a, 0x81, 0x81, group, d, size, 4);
-            emit32(a, (u32)v);
+            rm_digit(a, 0x81, 0x81, group, d, size, size == 16 ? 2 : 4);
+            emit_imm(a, size, v);
         }
         return;
     }
@@ -478,6 +568,15 @@ static void do_mov(as *a, operand *d, operand *s)
             rex(a, false, 0, 0, d->reg, false);
             emit8(a, (u8)(0xB8 + (d->reg & 7)));
             emit32(a, (u32)v);
+        } else if (d->size == 16) {
+            if (v < -32768 || v > 65535) { fail(a, "the number does not fit a word", NULL); return; }
+            emit8(a, 0x66);
+            rex(a, false, 0, 0, d->reg, false);
+            emit8(a, (u8)(0xB8 + (d->reg & 7)));
+            emit16(a, (u16)v);
+        } else if (d->size == XMM) {
+            fail(a, "an xmm register takes no number; movq it from a register", NULL);
+            return;
         } else {
             if (v < -128 || v > 255) { fail(a, "the number does not fit a byte", NULL); return; }
             rex(a, false, 0, 0, d->reg, byte_needs_rex(d, 8));
@@ -496,11 +595,12 @@ static void do_mov(as *a, operand *d, operand *s)
             emit8(a, (u8)v);
         } else {
             if (!fits32(v)) { fail(a, "the number does not fit; load it into a register first", NULL); return; }
-            rm_digit(a, 0xC7, 0xC7, 0, d, size, 4);
-            emit32(a, (u32)v);
+            rm_digit(a, 0xC7, 0xC7, 0, d, size, size == 16 ? 2 : 4);
+            emit_imm(a, size, v);
         }
         return;
     }
+    if (s->kind == OP_REG && s->size == XMM) { fail(a, "use movsd or movq for an xmm register", NULL); return; }
     if (s->kind == OP_REG && (d->kind == OP_REG || d->kind == OP_MEM)) {
         u8 size = s->size;
         if (d->kind == OP_REG && d->size != size) { fail(a, "the registers differ in width", NULL); return; }
@@ -514,40 +614,35 @@ static void do_mov(as *a, operand *d, operand *s)
     fail(a, "those operands do not go together", NULL);
 }
 
-static void do_movzx(as *a, operand *d, operand *s)
+/* movzx and movsx widen a byte or a word into a wider register,
+ * without or with its sign. The source's width comes from the byte
+ * or word register named, or from the width said before brackets. */
+static void do_movzx(as *a, operand *d, operand *s, bool sign)
 {
-    if (d->kind != OP_REG || d->size == 8) { fail(a, "movzx wants a wider register first", NULL); return; }
-    bool ok = (s->kind == OP_REG && s->size == 8) || (s->kind == OP_MEM && s->size == 8);
-    if (!ok) { fail(a, "movzx takes a byte: a byte register, or byte [..]", NULL); return; }
+    if (d->kind != OP_REG || d->size == 8 || d->size == XMM) { fail(a, "that wants a wider register first", NULL); return; }
+    u8 sw = s->kind == OP_REG ? s->size : s->size;
+    if (!(sw == 8 || sw == 16) || !(s->kind == OP_REG || s->kind == OP_MEM)) {
+        fail(a, "that takes a byte or a word: a byte or word register, or byte/word [..]", NULL);
+        return;
+    }
     u8 base = s->kind == OP_MEM ? (s->base < 0 ? 0 : (u8)s->base) : s->reg;
-    rex(a, d->size == 64, d->reg, 0, base, byte_needs_rex(s, 8));
+    rex(a, d->size == 64, d->reg, 0, base, byte_needs_rex(s, sw));
     emit8(a, 0x0F);
-    emit8(a, 0xB6);
+    emit8(a, (u8)((sign ? 0xBE : 0xB6) + (sw == 16 ? 1 : 0)));
     if (s->kind == OP_MEM) mem_tail(a, d->reg, s, 0);
     else modrm_rr(a, d->reg, s->reg);
 }
 
-/* movsx widens a byte with its sign, movsxd a doubleword: what a
- * compiler needs to load a char or an int into a full register. */
-static void do_movsx(as *a, operand *d, operand *s, bool dword)
+/* movsxd widens a doubleword with its sign: an int into a full
+ * register. */
+static void do_movsxd(as *a, operand *d, operand *s)
 {
-    if (d->kind != OP_REG || d->size != 64) {
-        fail(a, dword ? "movsxd wants a 64-bit register first"
-                      : "movsx wants a 64-bit register first", NULL);
-        return;
-    }
-    u8 want = dword ? 32 : 8;
-    bool ok = (s->kind == OP_REG && s->size == want) ||
-              (s->kind == OP_MEM && s->size == want);
-    if (!ok) {
-        fail(a, dword ? "movsxd takes a doubleword: a 32-bit register, or dword [..]"
-                      : "movsx takes a byte: a byte register, or byte [..]", NULL);
-        return;
-    }
+    if (d->kind != OP_REG || d->size != 64) { fail(a, "movsxd wants a 64-bit register first", NULL); return; }
+    bool ok = (s->kind == OP_REG && s->size == 32) || (s->kind == OP_MEM && s->size == 32);
+    if (!ok) { fail(a, "movsxd takes a doubleword: a 32-bit register, or dword [..]", NULL); return; }
     u8 base = s->kind == OP_MEM ? (s->base < 0 ? 0 : (u8)s->base) : s->reg;
-    rex(a, true, d->reg, 0, base, byte_needs_rex(s, 8));
-    if (dword) emit8(a, 0x63);
-    else { emit8(a, 0x0F); emit8(a, 0xBE); }
+    rex(a, true, d->reg, 0, base, false);
+    emit8(a, 0x63);
     if (s->kind == OP_MEM) mem_tail(a, d->reg, s, 0);
     else modrm_rr(a, d->reg, s->reg);
 }
@@ -577,7 +672,7 @@ static void do_test(as *a, operand *d, operand *s)
     if (s->kind == OP_REG) { rm_reg(a, 0x84, 0x85, d, s, size); return; }
     if (s->kind == OP_IMM) {
         if (size == 8) { rm_digit(a, 0xF6, 0xF6, 0, d, 8, 1); emit8(a, (u8)s->disp); }
-        else { rm_digit(a, 0xF7, 0xF7, 0, d, size, 4); emit32(a, (u32)s->disp); }
+        else { rm_digit(a, 0xF7, 0xF7, 0, d, size, size == 16 ? 2 : 4); emit_imm(a, size, s->disp); }
         return;
     }
     fail(a, "test takes a register or a number second", NULL);
@@ -767,9 +862,10 @@ static void assemble_line(as *a, const char *s, u32 n)
 
     if (nops == 2) {
         if (word_is(mn, ml, "mov"))   { do_mov(a, &d, &sr); return; }
-        if (word_is(mn, ml, "movzx")) { do_movzx(a, &d, &sr); return; }
-        if (word_is(mn, ml, "movsx")) { do_movsx(a, &d, &sr, false); return; }
-        if (word_is(mn, ml, "movsxd")){ do_movsx(a, &d, &sr, true); return; }
+        if (word_is(mn, ml, "movzx")) { do_movzx(a, &d, &sr, false); return; }
+        if (word_is(mn, ml, "movsx")) { do_movzx(a, &d, &sr, true); return; }
+        if (word_is(mn, ml, "movsxd")){ do_movsxd(a, &d, &sr); return; }
+        if (do_sse(a, mn, ml, &d, &sr)) return;
         if (word_is(mn, ml, "lea"))   { do_lea(a, &d, &sr); return; }
         if (word_is(mn, ml, "add"))   { arith(a, 0, &d, &sr); return; }
         if (word_is(mn, ml, "or"))    { arith(a, 1, &d, &sr); return; }

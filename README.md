@@ -638,23 +638,37 @@ built binary.
   own; until one exists, the kernel is built outside and everything
   above it can be built inside.
 * **The compiler.** C lives in the system now, in the shape a person
-  writes it: char, int and long, signed or not; pointers, arrays,
-  structs, typedefs, enums; functions with up to six parameters and
-  pointers to them; the operators with their precedence; if, while,
-  for, do, switch, break, continue, return; sizeof and casts;
-  #define, #include of a text lying beside the source, #ifdef and
-  its kin. "compile" on a text lays the assembly it became beside
-  it -- to be read, which is the difference between a tool and a
-  trick -- and the image beside that, through the same assembler.
-  No library comes with it: main is called with the two handles a
-  program starts holding, and syscall(nr, ...) is the door to the
-  kernel. The page "the compiler" is the contract and a program at
-  once; compiled and run, it says hello and the sum it worked out.
-  Honest edges, on the page as well: arithmetic is done in 64 bits
-  and cut to size on the way into a variable; no unions, bit fields,
-  floating point, varargs, function-like macros, #if with arithmetic
-  or goto yet. The kernel needs some of those, so the kernel is still
-  built outside -- but the distance is now a list, not a wall.
+  writes it: char, short, int and long, signed or not; float and
+  double; pointers, arrays, structs and unions, bit fields, packed
+  records, typedefs, enums; functions with up to sixteen parameters
+  (six in registers, the rest on the stack), variadic ones with
+  va_arg, and pointers to them; the operators with their precedence;
+  if, while, for, do, switch, goto; sizeof and casts; initializers
+  with braces and designators; static locals; _Static_assert; a
+  preprocessor with function-like macros, #if and #elif arithmetic,
+  defined(), #include of a text lying beside the source, and
+  <stdarg.h>, <stdbool.h>, <stdint.h>, <stddef.h> carried inside.
+  "compile" on a text lays the assembly it became beside it -- to be
+  read, which is the difference between a tool and a trick -- and
+  the image beside that, through the same assembler. No library
+  comes with it: main is called with the two handles a program
+  starts holding, and syscall(nr, ...) is the door to the kernel.
+  Floating point meant a kernel change: the vector unit is on for
+  programs now, each program's registers saved and restored around
+  it by the scheduler, and never used by the kernel itself, which is
+  built without it -- the compiler holds a double's bits and makes
+  them with whole-number arithmetic. The page "the compiler" is the
+  contract and a program at once. Proven twice over: a program of
+  sixteen checks, one per feature, compiled and run on the machine
+  with every check answering ok; and the same compiler, built for the
+  host from the same two files (make cchost), compiling the kernel's
+  own base64.c, string.c, sha256.c and x25519.c into images. Honest
+  edges, on the page as well: a struct is passed and returned by
+  pointer, never by value; a variadic call takes six arguments at
+  most; and inline assembly with operands is not here -- the kernel's
+  port i/o and register moves are exactly that, in the other
+  assembler's dialect, so the kernel is still built outside. The
+  distance is one item now.
 * **The door.** The terminal reached over the network, by real ssh,
   so the client anyone already has can knock: version 2,
   curve25519-sha256 for the exchange, ssh-ed25519 for the host's

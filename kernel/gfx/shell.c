@@ -411,7 +411,10 @@ static bool find_beside_in(void *ctx, const char *name, const u8 **text, u64 *le
         if (!t || obj_type(t) != TYPE_TEXT) continue;
         const char *nm = obj_slot_name(holder, i);
         if (!nm) nm = obj_name(t);
-        if (!nm || strcmp(nm, name) != 0) continue;
+        if (!nm) continue;
+        u32 j = 0;
+        while (nm[j] && name[j] && to_lower(nm[j]) == to_lower(name[j])) j++;
+        if (nm[j] || name[j]) continue;
         *text = (const u8 *)obj_data(t);
         *len = text_len(*text, obj_size(t));
         return true;
