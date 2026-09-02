@@ -858,6 +858,8 @@ ring 3 with a stack selector of ring 0, because the emulator forces the
 ring bits on and an AMD processor does not, and the first interrupt's
 iretq refused to return to it. The syscall setup now carries the ring
 bits in the base it hands the processor. `QEMU_EXTRA="-accel kvm" sh
-tools/selfbuild.sh` boots a kernel that way when the host allows it;
-everything the machine's own tests run still runs on the emulator, so
-a finding like this has to be gone looking for.
+tools/selfbuild.sh` boots a kernel that way when the host allows it,
+and build/kvm-battery.sh runs the whole regression battery on the
+processor by putting a stand-in for qemu that adds KVM ahead in the
+path -- no test script knows the difference. With the sysret fix in,
+every test of the battery passes there as on the emulator.

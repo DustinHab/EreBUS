@@ -4680,6 +4680,13 @@ static void toplevel(void)
                     if (t->kind == T_ARR && t->len == 0) { fail("an array without a size needs values", nm); return; }
                     old->ty = t;
                     global_fill(g, t);
+                } else if (!ex) {
+                    /* "extern int x;" in a header and "int x;" in the
+                     * text: the second is the definition, without
+                     * values -- c calls it tentative -- and lays the
+                     * global down in the bss like any other. */
+                    global *g = global_find(old->label);
+                    if (g && g->is_extern) { g->is_extern = false; g->is_static = st; g->ty = t; old->ty = t; }
                 }
             } else {
                 sym *s = sym_add(nm, t, S_GLOBAL);

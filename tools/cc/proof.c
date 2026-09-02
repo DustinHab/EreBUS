@@ -146,6 +146,10 @@ static long many(long a, long b, long c, long d, long e, triple_t t, long f)
 
 static long tiny(tiny_t t) { return t.k; }
 
+/* declared first as a header would, defined afterwards without values */
+extern long tentative;
+long tentative;
+
 long main(long console, long inbox)
 {
     console_handle = console;
@@ -261,6 +265,10 @@ again:
 
     /* 23: by value among many arguments, past the sixth, and a one-byte one */
     check(23, many(1, 1, 1, 1, 1, tr, 1) == 129 && tiny((tiny_t){ 7 }) == 7);
+
+    /* 24: a tentative definition is a definition */
+    tentative = 24;
+    check(24, tentative == 24);
 
     if (bad_count == 0) say("all checks ok");
     else say("some checks bad");
