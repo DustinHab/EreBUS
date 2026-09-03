@@ -35,7 +35,12 @@ COMMON="-machine q35 -m 512M -cpu max \
 
 echo "--- first boot: from the stick, settling on the blank disk ---"
 {
-    sleep 30
+    # The machine asks during start-up whether it should take the disk.
+    # This test is about doing it from the terminal instead, so the
+    # offer is declined and the words are typed out.
+    sleep 22
+    keys esc
+    sleep 12
     keys tab tab tab tab tab pause
     keys d i s k s ret pause pause
     keys s e t t l e spc o n spc d i s k spc 1 ret pause pause

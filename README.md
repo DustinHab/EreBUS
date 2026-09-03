@@ -844,11 +844,23 @@ built binary.
   protocol with its interrupt endpoint polled by a thread. Reports
   become the bytes a PS/2 keyboard would have sent and go into the
   same queues, so the shell never learns which wire a key came down;
-  held keys repeat the way a keyboard's own electronics used to. Not
-  driven, and said so at boot: what hangs off an external hub, USB
-  disks, anything isochronous. tools/usbtest.sh boots with the
+  held keys repeat the way a keyboard's own electronics used to.
+
+  A device is not asked what class it is and taken at its word: a
+  receiver carrying a keyboard and a mouse calls itself class zero,
+  meaning the answer is further in, so every interface is walked and
+  each one that types or points gets an endpoint of its own on the
+  same slot. Hubs are driven rather than merely named -- their ports
+  powered, watched, reset, and what is behind them enumerated with the
+  route the controller needs to reach it, which is where most of what
+  a person touches actually hangs. tools/usbtest.sh boots with the
   i8042 switched off and QEMU's usb keyboard and mouse on an xHCI
-  controller, and types the terminal's day's work through them.
+  controller, and types the terminal's day's work through them;
+  tools/usbhub.sh does the same with both of them behind a hub and
+  nothing at all on the machine's own ports. Not driven, and said so:
+  USB disks and anything isochronous. Written but not yet proven
+  against a real one: two inputs on a single device, because no
+  emulated device offers that shape.
 * **M10, the disk half — done.** tools/mkusb.sh makes build/stick.img:
   a GPT disk with an EFI system partition carrying the loader and the
   kernel, and a partition of the store's kind -- a type GUID of this
@@ -885,6 +897,22 @@ built binary.
   on sata, settles on it through the terminal, and boots the disk
   alone; tools/settlefree.sh settles in the free space beside a
   partition full of random bytes and compares those bytes afterwards.
+
+  The words are the whole mechanism, but somebody starting the system
+  for the first time does not know them, so the machine asks. Where
+  there is nowhere to keep anything, at least one disk, and a keyboard
+  to answer on, start-up stops once and shows what is on the bus:
+  a number takes that disk, escape carries on without a memory, and
+  nothing is written until the word `yes` is typed out after being
+  told exactly what will be lost. A machine nobody is sitting at
+  never sees the question -- no keyboard, or nobody answering for two
+  minutes, and it boots straight through. The disk at the first port
+  is no longer refused on the grounds of being first: a machine
+  running from a stick has somebody else's system there, and that is
+  the disk a person most often means. tools/installtest.sh boots the
+  stick beside a disk that already carries a partition table and data,
+  answers the question the way a person would, and boots the disk
+  alone afterwards.
 * Certificate verification — turning the seal from privacy into
   identity: RSA/ECDSA signatures and a root store
 * Work at scale, further — several desk jobs advancing at once, a
@@ -970,6 +998,39 @@ else is left exactly as found, read and written by nobody here, and
 the machine comes up without a memory and says so at boot.
 tools/foreigndisk.sh boots with a disk that carries a partition table
 and data, and compares it byte for byte afterwards.
+
+## A note on real machines
+
+The first boot on real hardware -- an X99 board, a Broadwell-E, a
+UEFI firmware from 2015 -- reached the desktop. Three things about a
+real machine that emulation had never shown are worth writing down,
+because each of them was invisible until then and obvious afterwards.
+
+**The framebuffer is not memory.** It sits across a bus, uncached, and
+a read from it is a round trip. The console scrolled by moving pixels
+inside it, which reads every one of them, and each line of the boot log
+cost nearly three seconds; the log took seven minutes to finish. Two
+changes: the page tables now ask for write-combining on that mapping,
+so neighbouring stores are gathered into whole lines instead of being
+sent one at a time, and the back buffer -- which had been switched on
+at the end of start-up, long after the log had paid for itself -- is
+switched on at the first moment there is an allocator to ask. What it
+starts from is no longer read back off the screen either: the fill
+colour and how far the drawing got are remembered, so enabling it is a
+fill and a few lines rather than a screenful of bus round trips.
+
+**Ports without power report nothing.** A controller that says it
+controls its own port power leaves the ports off after a reset, and
+every socket then looks empty. They are powered now before anything is
+looked at, and the ports that have something on them are named in the
+log with their speed, so a machine that finds no keyboard says whether
+that is because nothing was plugged in or because nothing was asked.
+
+**Sockets can belong to a controller that is switched off.** Some
+chipsets can route their slower sockets to either of two controllers
+and leave the decision in four registers. Where the firmware pointed
+them at a controller the machine no longer has, those sockets are dead.
+The driver now claims everything the mask says it may claim.
 
 ## A note on real processors
 

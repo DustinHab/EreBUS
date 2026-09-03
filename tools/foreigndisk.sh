@@ -18,7 +18,13 @@ before=$(md5sum < $BUILD/foreign.img)
 cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/test-vars.fd
 
 {
-    sleep 30
+    # With no store the machine asks during start-up whether it should
+    # take a disk. Declining is part of what is being tested here: the
+    # offer must be refusable, and refusing it must leave the disk
+    # exactly as it was and still bring the machine up.
+    sleep 22
+    echo "sendkey esc"
+    sleep 20
     echo quit
 } | qemu-system-x86_64 -machine q35 -m 512M -cpu max \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
@@ -33,10 +39,11 @@ cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/test-vars.fd
 
 after=$(md5sum < $BUILD/foreign.img)
 echo "--- what the machine said ---"
-grep -a 'blk:\|snap:\|shell: starting' $BUILD/foreign-serial.log | cut -c1-110
+grep -a 'blk:\|snap:\|disk: \|shell: starting' $BUILD/foreign-serial.log | cut -c1-110
 echo "--- the checks ---"
 ok=1
 if grep -aq 'not ours' $BUILD/foreign-serial.log; then echo "the disk was refused"; else echo "FAILED: the disk was not refused"; ok=0; fi
+if grep -aq 'a disk can be given to it now' $BUILD/foreign-serial.log; then echo "the machine offered it, and took escape for an answer"; else echo "FAILED: no offer was made"; ok=0; fi
 if [ "$before" = "$after" ]; then echo "the disk is byte for byte as it was"; else echo "FAILED: the disk was written to"; ok=0; fi
 if grep -aq 'shell: starting' $BUILD/foreign-serial.log; then echo "the machine came up without it"; else echo "FAILED: the machine did not come up"; ok=0; fi
 [ $ok = 1 ] && echo "a foreign disk is safe here" || echo "a foreign disk is NOT safe here"

@@ -41,7 +41,12 @@ COMMON="-machine q35 -m 512M -cpu max \
 
 echo "--- first boot: settling in the free space ---"
 {
-    sleep 30
+    # Decline the offer made during start-up: this test is about
+    # keeping the partitions that are already there, which is what the
+    # words do and what taking the disk whole would not.
+    sleep 22
+    keys esc
+    sleep 12
     keys tab tab tab tab tab pause
     keys s e t t l e spc i n spc t h e spc f r e e spc s p a c e spc o f spc d i s k spc 1 ret pause pause
     keys y e s ret

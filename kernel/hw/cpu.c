@@ -67,6 +67,7 @@ void cpu_detect(cpu_info *o)
         o->pae        = (d >> 6)  & 1;
         o->apic       = (d >> 9)  & 1;
         o->pge        = (d >> 13) & 1;
+        o->pat        = (d >> 16) & 1;
         o->x2apic     = (c >> 21) & 1;
         o->rdrand     = (c >> 30) & 1;
         o->hypervisor = (c >> 31) & 1;

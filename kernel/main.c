@@ -40,6 +40,7 @@
 #include <eb/pmm.h>
 #include <eb/ps2.h>
 #include <eb/xhci.h>
+#include <eb/install.h>
 #include <eb/serial.h>
 #include <eb/shell.h>
 #include <eb/snapshot.h>
@@ -846,9 +847,20 @@ static void persist_thread(void *arg)
      * before the count begins. What the boot itself changed -- files
      * taken in from the exchange disk -- is counted as pending, so the
      * first quiet moment writes it down; a boot that changed nothing
-     * writes nothing. */
+     * writes nothing.
+     *
+     * A store with nothing in it yet is pending on its own account, and
+     * has to be, because counting cannot decide it. The rest of the
+     * boot is still running while this line does its counting, and
+     * whether the journal's first entry lands before or after it is a
+     * matter of who was scheduled when -- so on the run where it landed
+     * first, the count said nothing had changed and an empty disk
+     * stayed empty until somebody typed. Asking the disk whether it
+     * holds anything is not a race. It also cannot write every boot:
+     * once there is a generation there, there is one. */
     u64 seen = shell_changes() + obj_touches();
     u64 written = taken_at_boot ? seen - 1 : seen;
+    bool nothing_kept_yet = !snap_present();
     u64 quiet_since = time_ns();
 
     for (;;) {
@@ -860,9 +872,10 @@ static void persist_thread(void *arg)
         if (now != seen) {
             seen = now;
             quiet_since = time_ns();
-        } else if (seen != written &&
+        } else if ((seen != written || nothing_kept_yet) &&
                    time_ns() - quiet_since > settings_save_quiet_ns()) {
             object *roots[2] = { persistent_root, shell_session() };
+            nothing_kept_yet = false;
             if (snap_save(roots, roots[1] ? 2 : 1)) {
                 written = seen;
                 kprintf("snap: generation %llu written, %u objects, %llu bytes\n",
@@ -1250,6 +1263,7 @@ void kmain(eb_boot_info *bi)
     if (p.smep) kprintf(" smep");
     if (p.smap) kprintf(" smap");
     if (p.umip) kprintf(" umip");
+    if (p.wc)   kprintf(" write-combining");
     if (!p.nx && !p.smep && !p.smap) kprintf(" none");
     kprintf("\n");
 
@@ -1272,6 +1286,27 @@ void kmain(eb_boot_info *bi)
     kprintf("pmm:  reclaimed ");
     print_size((pmm_free_frames() - before_reclaim) * PAGE_SIZE);
     kprintf(" of loader page tables\n");
+
+    /* The screen gets its back buffer here, at the first moment there is
+     * an allocator to ask -- not at the end of start-up where it used to
+     * be.
+     *
+     * Everything printed from now on scrolls, and scrolling a console
+     * drawn straight onto the screen means reading the framebuffer back:
+     * a bus round trip per pixel, seconds per line on real hardware. The
+     * log had been paying that for its whole length. Drawn into memory
+     * instead, the same scroll is a memory move and one write across. */
+    u64 back_bytes = fb_backbuffer_bytes();
+    phys_addr back = pmm_alloc_contig(PAGE_UP(back_bytes) / PAGE_SIZE);
+    if (back != PMM_NO_FRAME) {
+        fb_enable_backbuffer(phys_to_virt(back));
+        kprintf("fb0:  double buffered, ");
+        print_size(back_bytes);
+        kprintf(" back buffer\n");
+    } else {
+        kprintf("fb0:  not enough contiguous memory for a back buffer; "
+                "the console draws straight onto the screen\n");
+    }
 
     /* --- objects and capabilities ---------------------------------- */
 
@@ -1508,16 +1543,10 @@ void kmain(eb_boot_info *bi)
      * without a PS/2 controller has its keys this way. */
     xhci_init();
 
-    u64 back_bytes = fb_backbuffer_bytes();
-    phys_addr back = pmm_alloc_contig(PAGE_UP(back_bytes) / PAGE_SIZE);
-    if (back != PMM_NO_FRAME) {
-        fb_enable_backbuffer(phys_to_virt(back));
-        kprintf("fb0:  double buffered, ");
-        print_size(back_bytes);
-        kprintf(" back buffer\n");
-    } else {
-        kprintf("fb0:  not enough contiguous memory for a back buffer\n");
-    }
+    /* With the disks known and a keyboard to answer on, the one
+     * question a machine started for the first time actually needs
+     * asked: is one of these disks for it? */
+    install_offer();
 
     /* One object, and three windows onto it.
      *

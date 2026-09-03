@@ -23,6 +23,22 @@
 #define PAGE_KERNEL_DATA (PTE_PRESENT | PTE_WRITE | PTE_NX)     /* rw- */
 #define PAGE_KERNEL_MMIO (PTE_PRESENT | PTE_WRITE | PTE_NX | PTE_PCD)
 
+/* Write-combining, for memory that is really a display.
+ *
+ * A framebuffer sits across a bus. Left as ordinary memory it is
+ * uncached in practice, and then every four-byte store is its own
+ * transaction and every load is a round trip to the card -- microseconds
+ * apart, which turns scrolling a console into seconds of work. Write-
+ * combining lets the processor gather neighbouring stores into whole
+ * cache lines before sending them, which is exactly the shape of every
+ * write a framebuffer ever gets.
+ *
+ * The bit that says so is PWT, and it means write-combining only
+ * because vmm_init writes that meaning into the processor's PAT. Where
+ * there is no PAT the same bit still means write-through, which is
+ * harmless, so nothing has to check first. */
+#define PAGE_KERNEL_WC   (PTE_PRESENT | PTE_WRITE | PTE_NX | PTE_PWT)
+
 /* Builds the kernel's own page tables, switches to them, and turns on
  * the hardware protections the processor offers. Replaces the coarse
  * tables the loader left behind, and drops the identity mapping with
@@ -56,6 +72,7 @@ typedef struct {
     bool smep;
     bool smap;
     bool umip;
+    bool wc;      /* the page table may ask for write-combining */
 } vmm_protections;
 
 vmm_protections vmm_active_protections(void);

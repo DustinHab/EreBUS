@@ -30,9 +30,24 @@ static struct {
  * copying some untouched pixels, which is cheap and never incorrect. */
 static struct { i32 x0, y0, x1, y1; bool any; } dirty;
 
+/* How far down the screen anything has actually been drawn since the
+ * last full clear, and what colour that clear used.
+ *
+ * This exists for one moment only: the switch to a back buffer. The
+ * back buffer has to start out holding what is already on screen, and
+ * the obvious way to arrange that -- read the screen -- is the single
+ * most expensive thing a kernel can ask of a framebuffer. Knowing the
+ * colour underneath and how far the drawing got turns that read into a
+ * fill plus a few lines. */
+static struct { color fill; bool known; i32 bottom; } painted;
+
+static inline u32 to_native(color c);
+
 void fb_damage(i32 x, i32 y, i32 w, i32 h)
 {
-    if (!fb.buffered || w <= 0 || h <= 0) return;
+    if (w <= 0 || h <= 0) return;
+    if (y + h > painted.bottom) painted.bottom = y + h;
+    if (!fb.buffered) return;
 
     if (!dirty.any) {
         dirty.x0 = x; dirty.y0 = y;
@@ -101,8 +116,27 @@ void fb_enable_backbuffer(void *memory)
     const u32 *front = fb.front;
 
     /* Start from what is already on screen, so enabling this does not
-     * blank whatever has been logged so far. */
-    for (u32 i = 0; i < fb.stride * fb.height; i++) back[i] = front[i];
+     * blank whatever has been logged so far.
+     *
+     * Reading the framebuffer is what this whole mechanism exists to
+     * avoid, so read as little of it as the truth allows: where the
+     * screen was cleared to a known colour and the drawing since then
+     * reached only partway down, filling and copying that much is
+     * exactly equivalent and costs a fraction. */
+    u32 rows = fb.height;
+    if (painted.known) {
+        i32 b = painted.bottom;
+        if (b < 0) b = 0;
+        if (b > (i32)fb.height) b = (i32)fb.height;
+        u32 native = to_native(painted.fill);
+        for (u32 i = 0; i < fb.stride * fb.height; i++) back[i] = native;
+        rows = (u32)b;
+    }
+    for (u32 y = 0; y < rows; y++) {
+        const u32 *src = front + (u64)y * fb.stride;
+        u32 *dst = back + (u64)y * fb.stride;
+        for (u32 x = 0; x < fb.width; x++) dst[x] = src[x];
+    }
 
     fb.base = back;
     fb.buffered = true;
@@ -165,6 +199,11 @@ void fb_frame(i32 x, i32 y, i32 w, i32 h, i32 t, color c)
 void fb_clear(color c)
 {
     fb_rect(0, 0, (i32)fb.width, (i32)fb.height, c);
+    /* After this the whole screen is one colour, so nothing above needs
+     * remembering and the record starts again from the top. */
+    painted.fill = c;
+    painted.known = true;
+    painted.bottom = 0;
 }
 
 void fb_gradient(i32 x, i32 y, i32 w, i32 h, color top, color bottom)

@@ -111,6 +111,7 @@ KERN_C   := kernel/main.c \
             kernel/fs/fat.c \
             kernel/fs/gpt.c \
             kernel/fs/settle.c \
+            kernel/fs/install.c \
             kernel/net/pipe.c \
             kernel/net/net.c \
             kernel/net/sha512.c \

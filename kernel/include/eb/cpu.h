@@ -19,6 +19,7 @@ typedef struct {
     bool pge;              /* global pages                              */
     bool pse1g;            /* 1 GiB pages                               */
     bool nx;               /* pages can be marked non-executable        */
+    bool pat;              /* the page table may name the caching rule  */
 
     /* For hardening */
     bool smep;             /* kernel cannot execute user code           */

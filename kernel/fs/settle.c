@@ -180,8 +180,11 @@ static void say_disk_line(settle_say_fn say, void *ctx, u32 d)
     at = put_size(line, at, sizeof(line), blk_disk_sectors(d) * 512);
     at = put_str(line, at, sizeof(line), "  port ");
     at = put_num(line, at, sizeof(line), blk_disk_port(d));
-    if (blk_boot_disk() == (i32)d) at = put_str(line, at, sizeof(line), "  (the machine runs from it)");
-    if (blk_store_disk() == (i32)d) at = put_str(line, at, sizeof(line), "  (holds the store)");
+    /* Not "the machine runs from it": a machine booted from a stick has
+     * somebody else's system at the first port, and saying otherwise
+     * would be putting a guess where a fact belongs. */
+    if (blk_boot_disk() == (i32)d) at = put_str(line, at, sizeof(line), "  (first on the bus)");
+    if (blk_store_disk() == (i32)d) at = put_str(line, at, sizeof(line), "  (holds the store the machine runs with)");
     say(ctx, line);
 }
 
@@ -304,7 +307,16 @@ void settle_plan(const char *what, settle_say_fn say, void *ctx)
         at = put_str(line, at, sizeof(line), ") would become the store.  what it holds is lost.");
         say(ctx, line);
     } else {
-        if (blk_boot_disk() == (i32)d) { say(ctx, "that is the disk the machine runs from; it cannot be taken while it runs."); return; }
+        /* The one disk that cannot be taken is the one the graph is
+         * being kept on right now -- taking that would empty the very
+         * thing being written to.
+         *
+         * The disk at the first port is not that disk merely by being
+         * first. A machine running from a stick has somebody else's
+         * system at the first port, and refusing to install onto it
+         * because of where it sits would be refusing on a fact that is
+         * not true. What protects it is the same thing that protects
+         * every other disk: being told what is on it, and being asked. */
         if (blk_store_disk() == (i32)d) { say(ctx, "that disk holds the store the machine runs with."); return; }
         const u8 *l, *k;
         u64 ls, ks;

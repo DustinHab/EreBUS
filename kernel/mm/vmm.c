@@ -211,6 +211,10 @@ vmm_protections vmm_active_protections(void) { return active; }
 #define CR0_MP   (1ULL << 1)
 #define CR0_EM   (1ULL << 2)
 #define CR0_TS   (1ULL << 3)
+#define CR0_NW   (1ULL << 29)
+#define CR0_CD   (1ULL << 30)
+
+#define PAT_MSR  0x277u
 
 #define CR4_OSFXSR     (1ULL << 9)
 #define CR4_OSXMMEXCPT (1ULL << 10)
@@ -246,6 +250,42 @@ static u64 read_cr4(void)
 static void write_cr4(u64 v)
 {
     __asm__ volatile ("movq %0, %%cr4" :: "r"(v) : "memory");
+}
+
+/* Teaches the processor what PTE_PWT means.
+ *
+ * The page attribute table is eight slots, and a page's three cache
+ * bits pick one of them. Out of reset slot 1 -- the one PWT alone
+ * selects -- says write-through, which nothing here wants. Rewriting it
+ * to write-combining gives every mapping a way to ask for that with a
+ * single bit that works the same on 4 KiB and 2 MiB pages, because the
+ * slot number stays below four either way and the bit that differs
+ * between the two page sizes stays clear.
+ *
+ * The other seven slots keep their reset meanings, so every mapping
+ * that does not set PWT is unaffected, and there are none that do until
+ * this returns.
+ *
+ * Changing the table while caches hold lines described by the old
+ * meanings is the one hazard, so the processor is taken through the
+ * sequence the manual asks for: caches off, written back and emptied,
+ * table changed, then caches on again. This runs once, before the
+ * kernel's own tables are live. */
+static void enable_pat(const cpu_info *cpu)
+{
+    if (!cpu->pat) return;
+
+    /* WB, WC, UC-, UC, and the same four again. */
+    const u64 table = 0x0007010600070106ULL;
+
+    u64 cr0 = read_cr0();
+    write_cr0((cr0 | CR0_CD) & ~CR0_NW);
+    __asm__ volatile ("wbinvd" ::: "memory");
+    write_msr(PAT_MSR, table);
+    __asm__ volatile ("wbinvd" ::: "memory");
+    write_cr0(cr0);
+
+    active.wc = true;
 }
 
 /* NX has to be enabled before any table entry carries bit 63, or the
@@ -305,6 +345,7 @@ void vmm_init(const eb_boot_info *bi)
     cpu_info cpu;
     cpu_detect(&cpu);
     enable_nx(&cpu);
+    enable_pat(&cpu);
 
     phys_addr root = pmm_alloc();
     if (root == PMM_NO_FRAME)
@@ -342,13 +383,19 @@ void vmm_init(const eb_boot_info *bi)
     if (!ok) panic("could not map the kernel image");
 
     /* The framebuffer is a device window, usually far above installed
-     * memory, so the direct map above does not reach it. */
+     * memory, so the direct map above does not reach it.
+     *
+     * Write-combining, not ordinary memory: see PAGE_KERNEL_WC. On a
+     * machine that only ever ran under emulation this looks like a
+     * detail, because there the framebuffer is plain memory and every
+     * mapping is as fast as any other. On real hardware it is the
+     * difference between a console that scrolls and one that crawls. */
     if (bi->fb_base && bi->fb_size) {
         phys_addr fb = bi->fb_base & ~(SIZE_2M - 1);
         u64 fb_size = (bi->fb_base + bi->fb_size - fb + SIZE_2M - 1)
                       & ~(SIZE_2M - 1);
         if (!vmm_map(root, EB_PHYSMAP_BASE + fb, fb, fb_size,
-                     PAGE_KERNEL_DATA))
+                     active.wc ? PAGE_KERNEL_WC : PAGE_KERNEL_DATA))
             panic("could not map the framebuffer");
     }
 
