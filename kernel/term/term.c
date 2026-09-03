@@ -32,6 +32,7 @@
 #include <eb/ld.h>
 #include <eb/lang.h>
 #include <eb/fat.h>
+#include <eb/settle.h>
 #include <eb/fmt.h>
 #include <eb/time.h>
 #include <eb/thread.h>
@@ -1546,6 +1547,11 @@ static void cmd_help(term_session *s)
     t_say(s, "  write out <list> the list's texts and bytes, onto the exchange disk");
     t_say(s, "  install <name>   make that kernel the one the next start runs");
     t_say(s, "  restart          start the machine again");
+    t_say(s, "  disks            the disks on the bus, and what is on them");
+    t_say(s, "  settle on disk N                     make that disk this machine's: boot volume and store");
+    t_say(s, "  settle in partition P of disk N      make that partition the store");
+    t_say(s, "  settle in the free space of disk N   make a store in the room left, touching nothing else");
+    t_say(s, "  yes              go ahead with what 'settle' offered");
     t_say(s, "  give <name> to <program>   hand it a reference");
     t_say(s, "  end <name>       end a running program");
     t_end(s);
@@ -1565,6 +1571,13 @@ static void cmd_help(term_session *s)
 /* ------------------------------------------------------------------ */
 /* One line in                                                         */
 /* ------------------------------------------------------------------ */
+
+/* The settling words answer through this: one line at a time, into
+ * the session that asked. */
+static void say_to(void *ctx, const char *line)
+{
+    t_say((term_session *)ctx, line);
+}
 
 void term_line(term_session *s, const char *line)
 {
@@ -1590,6 +1603,9 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "take in", &rest)) cmd_take_in(s, rest);
     else if (word_starts(line, "install", &rest)) cmd_install(s, rest);
     else if (word_starts(line, "restart", NULL))  cmd_restart(s);
+    else if (word_starts(line, "disks", NULL))    settle_disks(say_to, s);
+    else if (word_starts(line, "settle", &rest))  settle_plan(rest, say_to, s);
+    else if (word_starts(line, "yes", NULL))      settle_yes(say_to, s);
     else if (word_starts(line, "write", &rest))   cmd_write(s, rest);
     else if (word_starts(line, "make", &rest))    cmd_make(s, rest);
     else if (word_starts(line, "copy", &rest))    cmd_copy(s, rest);

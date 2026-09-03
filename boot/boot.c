@@ -237,7 +237,7 @@ static UINTN read_tries(EFI_FILE_PROTOCOL *root)
  * entry point. Claims the target range with AllocateAddress -- the
  * kernel is linked to a fixed address. */
 static UINT64 load_elf(VOID *img, UINTN img_size,
-                       UINT64 *out_base, UINT64 *out_span)
+                       UINT64 *out_base, UINT64 *out_span, VOID **out_img)
 {
     Elf64_Ehdr *eh = (Elf64_Ehdr *)img;
 
@@ -304,6 +304,7 @@ static UINT64 load_elf(VOID *img, UINTN img_size,
 
     *out_base = base;
     *out_span = span;
+    *out_img = img;                  /* where the file lies now, moves and all */
     return eh->e_entry;
 }
 
@@ -517,9 +518,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     UINTN elf_size = 0;
     VOID *elf = read_file(root, u"\\erebus\\kernel.elf", &elf_size);
 
+    /* The loader's own file too, and the kernel's as read: both are
+     * handed over whole, so a kernel settling on a fresh disk can lay
+     * them down there. Loader data stays out of the kernel's hands,
+     * so neither buffer is freed. */
+    UINTN self_size = 0;
+    VOID *self = read_file_opt(root, u"\\EFI\\BOOT\\BOOTX64.EFI", &self_size);
+
     UINT64 kbase = 0, kspan = 0;
-    UINT64 entry = load_elf(elf, elf_size, &kbase, &kspan);
-    BS->FreePool(elf);
+    VOID *elf_kept = elf;
+    UINT64 entry = load_elf(elf, elf_size, &kbase, &kspan, &elf_kept);
 
     UINT64 rsdp = find_rsdp();
 
@@ -543,6 +551,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     bi->physmap_base     = EB_PHYSMAP_BASE;
     bi->pagetab_base     = (eb_u64)pagetab;
     bi->pagetab_size     = PAGETAB_BYTES;
+    bi->loader_file      = (eb_u64)(UINTN)self;
+    bi->loader_file_size = self ? (eb_u64)self_size : 0;
+    bi->kernel_file      = (eb_u64)(UINTN)elf_kept;
+    bi->kernel_file_size = (eb_u64)elf_size;
 
     /* Buffer for the raw EFI map. Ask for the size, then allocate with
      * headroom -- allocating changes the map again. */

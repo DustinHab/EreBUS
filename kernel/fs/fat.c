@@ -27,7 +27,7 @@
 
 typedef struct {
     bool ready;
-    bool boot;              /* the boot disk, or else the exchange disk */
+    u32  disk;              /* which disk on the bus */
     u64  base;              /* lba where the volume begins */
     u32  spc;               /* sectors per cluster */
     u32  fat_start;         /* lba of the first fat */
@@ -56,12 +56,12 @@ static u8 sec[512];
 
 static bool vread(fat_vol *v, u64 lba, u32 n, void *b)
 {
-    return v->boot ? blk_boot_read(lba, n, b) : blk_aux_read(lba, n, b);
+    return blk_disk_read(v->disk, lba, n, b);
 }
 
 static bool vwrite(fat_vol *v, u64 lba, u32 n, const void *b)
 {
-    return v->boot ? blk_boot_write(lba, n, b) : blk_aux_write(lba, n, b);
+    return blk_disk_write(v->disk, lba, n, b);
 }
 
 /* --- the volume ------------------------------------------------------ */
@@ -103,13 +103,13 @@ static bool vol_open(fat_vol *v, u64 base)
 
 /* The volume begins at sector zero, or behind an mbr's first
  * partition -- both shapes exist in the world. */
-static bool mount_on(fat_vol *v, bool boot, const char *what)
+static bool mount_on(fat_vol *v, i32 disk, const char *what)
 {
     v->ready = false;
-    v->boot = boot;
     v->fatsec_valid = false;
     v->fatsec_dirty = false;
-    if (boot ? !blk_boot_present() : !blk_aux_present()) return false;
+    if (disk < 0) return false;
+    v->disk = (u32)disk;
 
     if (vol_open(v, 0)) goto up;
     if (vread(v, 0, 1, sec) && sec[510] == 0x55 && sec[511] == 0xAA) {
@@ -126,12 +126,12 @@ up:
     return true;
 }
 
-bool fat_mount(void)        { return mount_on(&xchg, false, "exchange disk"); }
+bool fat_mount(void)        { return mount_on(&xchg, blk_aux_disk(), "exchange disk"); }
 bool fat_present(void)      { return xchg.ready; }
 
 bool fat_boot_present(void)
 {
-    if (!bootv.ready && blk_boot_present()) mount_on(&bootv, true, "boot disk");
+    if (!bootv.ready && blk_boot_disk() >= 0) mount_on(&bootv, blk_boot_disk(), "boot disk");
     return bootv.ready;
 }
 
@@ -450,40 +450,23 @@ static bool dir_rename(fat_vol *v, u32 dir, const char *from, const char *to)
     return true;
 }
 
-/* Lays one payload down as a new file in the directory: clusters
- * chained, the entry placed in the first free slot, the directory
- * grown by a cluster when it has none. */
-static bool write_file_in(fat_vol *v, u32 dir, const u8 name83[11],
-                          const u8 *data, u32 size)
+static void fill_entry(u8 *e, const u8 name83[11], u32 first, u32 size, u8 attr)
 {
-    u32 first = 0, prev = 0;
-    u32 left = size, cur = 0;
+    memset(e, 0, 32);
+    memcpy(e, name83, 11);
+    e[11] = attr;
+    e[26] = (u8)first; e[27] = (u8)(first >> 8);
+    e[20] = (u8)(first >> 16); e[21] = (u8)(first >> 24);
+    e[28] = (u8)size; e[29] = (u8)(size >> 8);
+    e[30] = (u8)(size >> 16); e[31] = (u8)(size >> 24);
+}
+
+/* One directory entry, placed in the first free slot; the directory
+ * is grown by a cluster when it has none. */
+static bool dir_add_entry(fat_vol *v, u32 dir, const u8 name83[11],
+                          u32 first, u32 size, u8 attr)
+{
     static u8 cbuf[512];
-
-    u32 need = (size + v->spc * 512 - 1) / (v->spc * 512);
-
-    for (u32 n = 0; n < need; n++) {
-        u32 c = fat_free_cluster(v, prev ? prev + 1 : 3);
-        if (c == 0) return false;
-        if (!fat_set(v, c, END_CHAIN)) return false;
-        if (prev && !fat_set(v, prev, c)) return false;
-        if (!first) first = c;
-
-        for (u32 s = 0; s < v->spc; s++) {
-            memset(cbuf, 0, 512);
-            u32 take = left < 512 ? left : 512;
-            if (take) memcpy(cbuf, data + cur, take);
-            cur += take;
-            left -= take;
-            if (!vwrite(v, cluster_lba(v, c) + s, 1, cbuf))
-                return false;
-        }
-        prev = c;
-    }
-    /* The chain is on the disk before anything points at it. */
-    if (!fat_flush(v)) return false;
-
-    /* Then the entry. */
     u32 cluster = dir;
     u32 last = dir;
     u32 guard = 0;
@@ -494,38 +477,69 @@ static bool write_file_in(fat_vol *v, u32 dir, const u8 name83[11],
             if (!vread(v, lba, 1, sec)) return false;
             for (u32 i = 0; i < 512; i += 32) {
                 if (sec[i] != 0x00 && sec[i] != 0xE5) continue;
-                memset(sec + i, 0, 32);
-                memcpy(sec + i, name83, 11);
-                sec[i + 11] = 0x20;                  /* archive */
-                sec[i + 26] = (u8)first;
-                sec[i + 27] = (u8)(first >> 8);
-                sec[i + 20] = (u8)(first >> 16);
-                sec[i + 21] = (u8)(first >> 24);
-                sec[i + 28] = (u8)size;
-                sec[i + 29] = (u8)(size >> 8);
-                sec[i + 30] = (u8)(size >> 16);
-                sec[i + 31] = (u8)(size >> 24);
+                fill_entry(sec + i, name83, first, size, attr);
                 return vwrite(v, lba, 1, sec) && fat_flush(v);
             }
         }
         cluster = fat_get(v, cluster);
     }
 
-    /* No room: one more cluster for the directory, zeroed, and the
-     * entry at its head. */
     u32 c = fat_free_cluster(v, 3);
     if (c == 0) return false;
     if (!fat_set(v, c, END_CHAIN) || !fat_set(v, last, c)) return false;
     memset(cbuf, 0, 512);
     for (u32 s = 1; s < v->spc; s++)
         if (!vwrite(v, cluster_lba(v, c) + s, 1, cbuf)) return false;
-    memcpy(cbuf, name83, 11);
-    cbuf[11] = 0x20;
-    cbuf[26] = (u8)first; cbuf[27] = (u8)(first >> 8);
-    cbuf[20] = (u8)(first >> 16); cbuf[21] = (u8)(first >> 24);
-    cbuf[28] = (u8)size; cbuf[29] = (u8)(size >> 8);
-    cbuf[30] = (u8)(size >> 16); cbuf[31] = (u8)(size >> 24);
+    fill_entry(cbuf, name83, first, size, attr);
     return vwrite(v, cluster_lba(v, c), 1, cbuf) && fat_flush(v);
+}
+
+/* Lays one payload down as a new file in the directory: clusters
+ * chained, the entry placed in the first free slot, the directory
+ * grown by a cluster when it has none. */
+static bool write_file_in(fat_vol *v, u32 dir, const u8 name83[11],
+                          const u8 *data, u32 size)
+{
+    static u8 run[64 * 512];
+    u32 need = (size + v->spc * 512 - 1) / (v->spc * 512);
+    u32 first = 0, prev = 0;
+
+    /* The chain first: every cluster claimed and linked, and on the
+     * disk before anything points at it. */
+    for (u32 n = 0; n < need; n++) {
+        u32 c = fat_free_cluster(v, prev ? prev + 1 : 3);
+        if (c == 0) return false;
+        if (!fat_set(v, c, END_CHAIN)) return false;
+        if (prev && !fat_set(v, prev, c)) return false;
+        if (!first) first = c;
+        prev = c;
+    }
+    if (!fat_flush(v)) return false;
+
+    /* Then the bytes, in runs of neighbouring clusters up to sixty-four
+     * sectors long: one command and one flush per run instead of one
+     * per sector. On a fresh volume a file is one long run; a kernel
+     * of two megabytes took a minute sector by sector. */
+    u32 c = first, done = 0;
+    while (done < size && c >= 2 && !chain_end(c)) {
+        u32 run_first = c, clusters = 1;
+        while ((clusters + 1) * v->spc <= 64) {
+            u32 nx = fat_get(v, c);
+            if (nx != c + 1) break;
+            c = nx;
+            clusters++;
+        }
+        u32 sectors = clusters * v->spc;
+        u32 bytes = sectors * 512;
+        u32 take = size - done < bytes ? size - done : bytes;
+        memset(run, 0, bytes);
+        memcpy(run, data + done, take);
+        if (!vwrite(v, cluster_lba(v, run_first), sectors, run)) return false;
+        done += take;
+        c = fat_get(v, c);
+    }
+
+    return dir_add_entry(v, dir, name83, first, size, 0x20);
 }
 
 /* --- reading in ------------------------------------------------------ */
@@ -759,6 +773,127 @@ bool fat_install_kernel(const u8 *elf, u64 len, char *why, u32 max)
     put_count(dir, 0);
     fat_flush(&bootv);
     return true;
+}
+
+/* --- a fresh boot volume --------------------------------------------- */
+
+/* A directory, made in another: its own cluster with "." and "..",
+ * and an entry in the parent. */
+static bool make_dir_in(fat_vol *v, u32 parent, const char *name, u32 *made)
+{
+    static u8 cbuf[512];
+    u32 c = fat_free_cluster(v, 3);
+    if (c == 0) return false;
+    if (!fat_set(v, c, END_CHAIN)) return false;
+
+    memset(cbuf, 0, 512);
+    u8 dot[11], dotdot[11];
+    memset(dot, ' ', 11); dot[0] = '.';
+    memset(dotdot, ' ', 11); dotdot[0] = '.'; dotdot[1] = '.';
+    fill_entry(cbuf, dot, c, 0, 0x10);
+    fill_entry(cbuf + 32, dotdot, parent == v->root_cluster ? 0 : parent, 0, 0x10);
+    if (!vwrite(v, cluster_lba(v, c), 1, cbuf)) return false;
+    memset(cbuf, 0, 512);
+    for (u32 s = 1; s < v->spc; s++)
+        if (!vwrite(v, cluster_lba(v, c) + s, 1, cbuf)) return false;
+    if (!fat_flush(v)) return false;
+
+    u8 name83[11];
+    make_short(name, name83);
+    if (!dir_add_entry(v, parent, name83, c, 0, 0x10)) return false;
+    *made = c;
+    return true;
+}
+
+/* A fat32 volume written from nothing onto a stretch of a disk: the
+ * boot sector and its copy, the fs information sector, two fats with
+ * the root directory's chain begun, the root directory empty. One
+ * sector per cluster keeps the arithmetic plain; below some seventy
+ * thousand sectors there would be too few clusters for fat32 at all. */
+static bool fat_format32(u32 disk, u64 first, u64 sectors)
+{
+    static u8 chunk[64 * 512];
+    if (sectors < 70000 || sectors > 0xFFFFFFFFULL) return false;
+    u32 total = (u32)sectors;
+    u32 reserved = 32, nfats = 2;
+    u32 fatsz = (total + 127) / 128;            /* 128 entries a sector: more than enough */
+
+    memset(chunk, 0, 512);
+    u8 *b = chunk;
+    b[0] = 0xEB; b[1] = 0x58; b[2] = 0x90;
+    memcpy(b + 3, "EREBUS  ", 8);
+    b[11] = 0; b[12] = 2;                        /* 512 bytes a sector */
+    b[13] = 1;                                   /* one sector a cluster */
+    b[14] = (u8)reserved; b[15] = (u8)(reserved >> 8);
+    b[16] = (u8)nfats;
+    b[21] = 0xF8;                                /* a fixed disk */
+    b[24] = 63; b[26] = 255;                     /* sectors a track, heads: nobody looks */
+    b[28] = (u8)first; b[29] = (u8)(first >> 8); b[30] = (u8)(first >> 16); b[31] = (u8)(first >> 24);
+    b[32] = (u8)total; b[33] = (u8)(total >> 8); b[34] = (u8)(total >> 16); b[35] = (u8)(total >> 24);
+    b[36] = (u8)fatsz; b[37] = (u8)(fatsz >> 8); b[38] = (u8)(fatsz >> 16); b[39] = (u8)(fatsz >> 24);
+    b[44] = 2;                                   /* the root directory's cluster */
+    b[48] = 1;                                   /* fs information sector */
+    b[50] = 6;                                   /* the boot sector's copy */
+    b[64] = 0x80;
+    b[66] = 0x29;
+    b[67] = 0x45; b[68] = 0x52; b[69] = 0x45; b[70] = 0x42;   /* a volume id: "EREB" */
+    memcpy(b + 71, "EREBUS     ", 11);
+    memcpy(b + 82, "FAT32   ", 8);
+    b[510] = 0x55; b[511] = 0xAA;
+    if (!blk_disk_write(disk, first, 1, chunk)) return false;
+    if (!blk_disk_write(disk, first + 6, 1, chunk)) return false;
+
+    memset(chunk, 0, 512);
+    b[0] = 0x52; b[1] = 0x52; b[2] = 0x61; b[3] = 0x41;         /* "RRaA" */
+    b[484] = 0x72; b[485] = 0x72; b[486] = 0x41; b[487] = 0x61; /* "rrAa" */
+    memset(b + 488, 0xFF, 8);                                   /* free count, next free: unknown */
+    b[510] = 0x55; b[511] = 0xAA;
+    if (!blk_disk_write(disk, first + 1, 1, chunk)) return false;
+    if (!blk_disk_write(disk, first + 7, 1, chunk)) return false;
+
+    /* the fats, zero but for their first three entries; and the root
+     * directory, zero */
+    memset(chunk, 0, sizeof(chunk));
+    for (u32 f = 0; f < nfats; f++) {
+        u64 at = first + reserved + (u64)f * fatsz;
+        for (u32 s = 0; s < fatsz; s += 64) {
+            u32 n = fatsz - s < 64 ? fatsz - s : 64;
+            if (!blk_disk_write(disk, at + s, n, chunk)) return false;
+        }
+    }
+    memset(chunk, 0, 512);
+    b[0] = 0xF8; b[1] = 0xFF; b[2] = 0xFF; b[3] = 0x0F;
+    b[4] = 0xFF; b[5] = 0xFF; b[6] = 0xFF; b[7] = 0x0F;
+    b[8] = 0xFF; b[9] = 0xFF; b[10] = 0xFF; b[11] = 0x0F;
+    for (u32 f = 0; f < nfats; f++)
+        if (!blk_disk_write(disk, first + reserved + (u64)f * fatsz, 1, chunk)) return false;
+    memset(chunk, 0, 512);
+    return blk_disk_write(disk, first + reserved + (u64)nfats * fatsz, 1, chunk);
+}
+
+bool fat_lay_boot_volume(u32 disk, u64 first, u64 sectors,
+                         const u8 *loader, u64 lsize, const u8 *kernel, u64 ksize,
+                         char *why, u32 max)
+{
+    static fat_vol tv;
+    if (!fat_format32(disk, first, sectors)) { say_why(why, max, "the boot volume could not be formatted"); return false; }
+    memset(&tv, 0, sizeof(tv));
+    tv.disk = disk;
+    if (!vol_open(&tv, first)) { say_why(why, max, "the fresh volume does not read back as fat32"); return false; }
+
+    u32 efi = 0, boot = 0, erebus = 0;
+    if (!make_dir_in(&tv, tv.root_cluster, "EFI", &efi) ||
+        !make_dir_in(&tv, efi, "BOOT", &boot) ||
+        !make_dir_in(&tv, tv.root_cluster, "erebus", &erebus)) {
+        say_why(why, max, "the folders could not be made");
+        return false;
+    }
+    u8 short83[11];
+    make_short("BOOTX64.EFI", short83);
+    if (!write_file_in(&tv, boot, short83, loader, (u32)lsize)) { say_why(why, max, "the loader could not be written"); return false; }
+    make_short("kernel.elf", short83);
+    if (!write_file_in(&tv, erebus, short83, kernel, (u32)ksize)) { say_why(why, max, "the kernel could not be written"); return false; }
+    return fat_flush(&tv);
 }
 
 u32 fat_boot_settle(void)

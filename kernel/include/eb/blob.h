@@ -30,6 +30,10 @@ bool blob_read(const u8 *hash, u64 lba_hint, u64 size, void *dst);
 u64  blob_free_sectors(void);
 u32  blob_count(void);
 
+/* Forgets the log read so far, for a store that arrived after the
+ * boot. */
+void blob_reset(void);
+
 /* Drops every entry not in the live set and moves the rest down. */
 bool blob_compact(const u8 *live, u32 count);
 

@@ -49,6 +49,15 @@ void system_off(void);
 /* Saves the graph and starts the machine again. */
 void system_restart(void);
 
+/* The files the loader came with, as read from the boot volume: its
+ * own, and the kernel's. False under a loader that did not hand them
+ * over. */
+bool system_boot_files(const u8 **loader, u64 *lsize, const u8 **kernel, u64 *ksize);
+
+/* Starts the keeper of the graph, if there is a store and it is not
+ * running yet: at boot, or once a store has been made. */
+void persist_start(void);
+
 /* The list named "the served", or NULL: what the web server offers.
  * The reference is the whole switch. */
 object *system_served(void);

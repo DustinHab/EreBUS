@@ -17,7 +17,7 @@ typedef unsigned long long eb_u64;
  * The version is bumped whenever this struct changes shape, so a stale
  * loader paired with a fresh kernel says so instead of reading rubbish. */
 #define EREBUS_BOOT_MAGIC   0x45524542u
-#define EREBUS_BOOT_VERSION 2u
+#define EREBUS_BOOT_VERSION 3u   /* 3: the loader hands its files over; a kernel still reads 2 */
 
 /* How the kernel sees a region of the address space. */
 #define EB_MEM_FREE     0u  /* usable */
@@ -84,6 +84,12 @@ typedef struct {
     /* --- firmware ---------------------------------------------------- */
     eb_u64 acpi_rsdp;        /* zero if not found */
     eb_u64 efi_system_table; /* kept for later runtime services */
+
+    /* --- the files the loader came with (from version 3) ------------ */
+    eb_u64 loader_file;      /* physical address of BOOTX64.EFI as read, or zero */
+    eb_u64 loader_file_size;
+    eb_u64 kernel_file;      /* physical address of kernel.elf as read, or zero */
+    eb_u64 kernel_file_size;
 } eb_boot_info;
 
 #endif /* EREBUS_BOOTINFO_H */

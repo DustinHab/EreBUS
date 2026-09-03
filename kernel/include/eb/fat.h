@@ -47,4 +47,11 @@ bool fat_install_kernel(const u8 *elf, u64 len, char *why, u32 max);
  * zero. Answers what the count was, or 0 when there was none. */
 u32 fat_boot_settle(void);
 
+/* A boot volume made from nothing on a stretch of a disk: fat32, the
+ * folders, the loader and the kernel laid in. For settling on a
+ * fresh disk. */
+bool fat_lay_boot_volume(u32 disk, u64 first, u64 sectors,
+                         const u8 *loader, u64 lsize, const u8 *kernel, u64 ksize,
+                         char *why, u32 max);
+
 #endif /* EB_FAT_H */

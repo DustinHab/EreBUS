@@ -864,6 +864,27 @@ built binary.
   store partition is out of reach -- the store is then a partition of
   this kind, or a blank disk, on SATA, or the machine runs without a
   memory and says so. Real hardware has not been booted yet.
+* **Settling — done.** A machine that runs off the stick, or whose
+  disks are somebody else's, comes up without a memory and says so in
+  the journal, with the words that make one. In the terminal, `disks`
+  shows every disk on the bus with its partitions, their kinds and the
+  room left between them. `settle on disk N` takes a disk whole: a
+  partition table, a boot volume with the loader and this very kernel
+  -- the loader hands both files over at boot for this -- and a store
+  on the rest. `settle in partition P of disk N` makes one partition
+  the store and touches nothing else on the disk. `settle in the free
+  space of disk N` makes a store in the largest gap and leaves every
+  partition as it is -- how a machine with somebody else's system on
+  it lends this one a corner. Each says exactly what is lost and does
+  nothing until told `yes`; then the running machine adopts the new
+  store on the spot and keeps its graph there from then on. A disk
+  taken whole boots the machine the next time. A blank disk beside a
+  machine that runs off a stick is offered, never taken; beside a
+  machine that boots from its own disk it is the store, as before.
+  tools/settletest.sh boots the stick image on usb with a blank disk
+  on sata, settles on it through the terminal, and boots the disk
+  alone; tools/settlefree.sh settles in the free space beside a
+  partition full of random bytes and compares those bytes afterwards.
 * Certificate verification — turning the seal from privacy into
   identity: RSA/ECDSA signatures and a root store
 * Work at scale, further — several desk jobs advancing at once, a

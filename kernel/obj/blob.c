@@ -127,6 +127,15 @@ static bool ready(void)
     return true;
 }
 
+/* A store that arrived after the boot -- settled on -- has a log of
+ * its own to read; whatever was learned about none is forgotten. */
+void blob_reset(void)
+{
+    scanned = false;
+    usable = false;
+    count = 0;
+}
+
 bool blob_find(const u8 *hash, u64 *lba, u64 *size)
 {
     if (!ready()) return false;

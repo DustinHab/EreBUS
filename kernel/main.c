@@ -811,6 +811,32 @@ void system_restart(void)
  * typing costs one write instead of thirty, and half a second of
  * stillness is far below the point where anyone would notice. */
 static u32 taken_at_boot;         /* files the exchange disk handed over before this ran */
+static bool persist_running;
+
+/* The files the loader came with, kept where it left them: loader
+ * data, which the frame allocator never hands out. */
+static const u8 *loader_file, *kernel_file;
+static u64 loader_file_size, kernel_file_size;
+
+bool system_boot_files(const u8 **loader, u64 *lsize, const u8 **kernel, u64 *ksize)
+{
+    if (!loader_file || !kernel_file) return false;
+    *loader = loader_file;
+    *lsize = loader_file_size;
+    *kernel = kernel_file;
+    *ksize = kernel_file_size;
+    return true;
+}
+
+static void persist_thread(void *arg);
+
+/* At boot, or the moment a store is made by settling: once. */
+void persist_start(void)
+{
+    if (persist_running || !blk_present()) return;
+    persist_running = true;
+    thread_create("persist", persist_thread, NULL, thread_domain(sched_current()));
+}
 
 static void persist_thread(void *arg)
 {
@@ -1107,7 +1133,7 @@ void kmain(eb_boot_info *bi)
                 bi->magic, EREBUS_BOOT_MAGIC);
         cpu_stop();
     }
-    if (bi->version != EREBUS_BOOT_VERSION) {
+    if (bi->version < 2 || bi->version > EREBUS_BOOT_VERSION) {
         kprintf("\nboot: loader speaks version %u, kernel expects %u\n",
                 bi->version, EREBUS_BOOT_VERSION);
         cpu_stop();
@@ -1131,6 +1157,14 @@ void kmain(eb_boot_info *bi)
 
     kprintf("\n\nErebus %s (x86_64)\n", EREBUS_VERSION);
     kprintf("boot: handover verified, version %u\n", bi->version);
+    if (bi->version >= 3 && bi->loader_file && bi->kernel_file) {
+        loader_file = (const u8 *)phys_to_virt(bi->loader_file);
+        loader_file_size = bi->loader_file_size;
+        kernel_file = (const u8 *)phys_to_virt(bi->kernel_file);
+        kernel_file_size = bi->kernel_file_size;
+        kprintf("boot: the loader handed its files over, %llu and %llu bytes\n",
+                loader_file_size, kernel_file_size);
+    }
 #ifdef __erebus__
     /* The compiler the machine carries defines this; the one outside
      * does not. A kernel that says it was built here, was. */
@@ -1888,10 +1922,12 @@ void kmain(eb_boot_info *bi)
         kout_detach_screen();
         /* The keeper of the graph before the shell: its count of
          * changes must begin before the first key can be taken. */
-        if (blk_present()) thread_create("persist", persist_thread, NULL,
-                                         kernel_domain);
+        persist_start();
         thread_create("shell", shell_run, NULL, kernel_domain);
         thread_create("activity", activity_thread, NULL, kernel_domain);
+        if (!blk_present())
+            journal_says("system", "nothing keeps the graph between starts; "
+                                   "'disks' in the terminal shows where a store could be made");
     }
 
     /* The kernel is up: the loader's count of starts goes back to
