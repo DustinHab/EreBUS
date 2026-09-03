@@ -383,12 +383,26 @@ built binary.
   DNS over UDP, a one-conversation TCP client carrying a single
   HTTP/1.0 request, and the machine answers pings. Who we are is
   asked, not assumed -- whatever network answers the lease decides,
-  and a silent one gets the emulator's well-known defaults. Three
-  drivers behind one seam: Intel's 8254x (QEMU, VirtualBox, VMware),
-  the RTL8139 (proven against QEMU's model), and the RTL8168/8169
-  family that sits in most machines with a cable socket -- that last
-  one written against documentation and honest about never having met
-  its silicon. The network is a capability, not an API: the fetch
+  and a silent one gets the emulator's well-known defaults. Four
+  drivers behind one seam. Intel's older family, which covers the
+  8254x the emulators offer, the PCI Express parts that followed, and
+  the ones built into a chipset up to the I219 -- one driver, because
+  the rings live at the same addresses and the descriptors have the
+  same shape across all of it; what differs is where the card's own
+  address is read from, and that a chipset card shares its wire with
+  the firmware's management and so is never reset. Intel's later
+  family for the 82576, I210, I211 and I350, which moved the rings
+  into a block per queue and gave the descriptors a second form.
+  The RTL8139, and the RTL8168/8169 family, that last one written
+  against documentation and honest about never having met its silicon.
+  Which card carries the traffic is not the order of the bus: every
+  driver is asked first to pass over a card with no cable in it, and
+  only then to take anything at all, because a board with two sockets
+  has one cable more often than not. tools/nictest.sh boots each
+  family with an address of its own and waits for a lease, which is
+  both rings proven at once; its last boot is two Intel cards of
+  different families with the socket pulled on one of them.
+  The network is a capability, not an API: the fetch
   program is born holding "the wire", send-only, and whoever holds
   fetch can ask for pages while whoever does not cannot knock. A
   request is a text whose first line names the page; the answer lands
@@ -857,10 +871,33 @@ built binary.
   i8042 switched off and QEMU's usb keyboard and mouse on an xHCI
   controller, and types the terminal's day's work through them;
   tools/usbhub.sh does the same with both of them behind a hub and
-  nothing at all on the machine's own ports. Not driven, and said so:
-  USB disks and anything isochronous. Written but not yet proven
-  against a real one: two inputs on a single device, because no
-  emulated device offers that shape.
+  nothing at all on the machine's own ports.
+
+  A pointer is not read the boot way. The boot protocol was defined
+  for a firmware setup screen and has three bytes in it -- buttons and
+  two directions -- so a mouse read that way cannot scroll, whatever
+  wheel it has. Every pointer describes its own layout, and that
+  description is read and taken apart: which bits are the buttons,
+  where each direction lives and how many bits it uses, where the
+  wheel is, and whether reports are numbered. That also gets the mice
+  that count in sixteen bits. Where the description cannot be made
+  sense of, the boot protocol is asked for and the old three bytes are
+  read, because a pointer that moves without scrolling beats one that
+  does neither. The reading proves itself at start-up against three
+  descriptions written out by hand, because the emulated mouse is too
+  kind to be a test: it sends its wheel whatever it was asked for, so
+  it looks the same whether the description was read or ignored.
+
+  A device plugged in while the machine runs is found, and this took a
+  pause to get right: something electrically present is not yet ready
+  to answer, and a port reset too early gets nothing back. Under
+  emulation the device is ready before the plug is in, so the pause
+  looks like superstition until a real socket proves otherwise.
+  tools/usbplug.sh pulls a mouse out, puts it back, and uses it.
+
+  Not driven, and said so: USB disks and anything isochronous.
+  Written but not yet proven against a real one: two inputs on a
+  single device, because no emulated device offers that shape.
 * **M10, the disk half — done.** tools/mkusb.sh makes build/stick.img:
   a GPT disk with an EFI system partition carrying the loader and the
   kernel, and a partition of the store's kind -- a type GUID of this

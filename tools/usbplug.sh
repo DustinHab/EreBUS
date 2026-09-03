@@ -60,5 +60,10 @@ ok=1
 grep -aq 'is gone' $BUILD/plug-serial.log \
   && echo "and the machine noticed it leaving" \
   || { echo "FAILED: unplugging went unnoticed"; ok=0; }
-grep -aq 'pointer' $BUILD/plug-serial.log && true
+grep -aq 'self test passed -- a pointer' $BUILD/plug-serial.log \
+  && echo "and a pointer's own layout is read as written, wheel and all" \
+  || { echo "FAILED: the reading of a pointer's layout is wrong"; ok=0; }
+grep -aq 'and a wheel' $BUILD/plug-serial.log \
+  && echo "the mouse that is here described a wheel, and it was found" \
+  || { echo "FAILED: no wheel was found in the mouse's description"; ok=0; }
 [ $ok = 1 ] && echo "a mouse can be unplugged and plugged back in" || echo "plugging back in FAILED"

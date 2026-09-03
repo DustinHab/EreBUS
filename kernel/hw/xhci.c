@@ -186,6 +186,16 @@ static phys_addr ring_put(ring *r, u64 param, u32 status, u32 control)
  * own memory of what was held down. */
 #define IN_MAX 4
 
+/* Where a pointer keeps its numbers inside its own reports; read out
+ * of the description the device carries. See read_pointer_map. */
+typedef struct {
+    bool have;
+    u8   id;                       /* the report number, 0 where there is none */
+    u16  buttons_at; u8 buttons_bits;
+    u16  x_at, y_at, wheel_at;
+    u8   x_bits, y_bits, wheel_bits;
+} pointer_map;
+
 typedef struct {
     bool used;
     ring r;
@@ -194,6 +204,7 @@ typedef struct {
     u32  at;                          /* where its reports land in the page */
     u8   kind;                        /* keyboard or mouse */
     u8   iface;
+    pointer_map map;                  /* for a pointer: where its numbers are */
     u8   last[8];                     /* the previous keyboard report */
     u8   held;                        /* the key held for repeating, as a usage */
     u64  held_since, last_repeat;
@@ -244,6 +255,195 @@ static usbdev *dev_by_slot(u32 slot)
     for (u32 i = 0; i < DEV_MAX; i++)
         if (dev[i].used && dev[i].slot == slot) return &dev[i];
     return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* Where a pointer keeps its numbers                                   */
+/* ------------------------------------------------------------------ */
+/*
+ * A mouse asked to speak the boot protocol sends three bytes: the
+ * buttons, and how far it moved in each direction. There is no fourth
+ * byte, and there is no wheel -- the boot protocol was defined for a
+ * firmware setup screen in 1996, and wheels came later.
+ *
+ * The wheel is in the device's own layout, which every one of them
+ * describes for itself in a small language: this many bits mean this,
+ * then this many mean that. So the description is read and the offsets
+ * worked out, and after that the reports are taken as the device meant
+ * them -- which also gets the mice that count in sixteen bits, and the
+ * ones that put a report number in front.
+ *
+ * When the description cannot be made sense of, the boot protocol is
+ * asked for and the old three bytes are read. A pointer that moves
+ * without scrolling is better than one that does neither.
+ */
+/* One field out of a report, as a number that may be negative. */
+static i32 field_signed(const u8 *r, u32 len, u16 at, u8 bits)
+{
+    if (!bits) return 0;
+    u32 v = 0;
+    for (u32 i = 0; i < bits; i++) {
+        u32 b = (u32)at + i;
+        if (b / 8 >= len) return 0;
+        if (r[b / 8] & (1u << (b % 8))) v |= 1u << i;
+    }
+    if (bits < 32 && (v & (1u << (bits - 1)))) v |= ~0u << bits;
+    return (i32)v;
+}
+
+static u32 field_plain(const u8 *r, u32 len, u16 at, u8 bits)
+{
+    u32 v = 0;
+    if (bits > 32) bits = 32;
+    for (u32 i = 0; i < bits; i++) {
+        u32 b = (u32)at + i;
+        if (b / 8 >= len) break;
+        if (r[b / 8] & (1u << (b % 8))) v |= 1u << i;
+    }
+    return v;
+}
+
+/* Reads the description. Items are a prefix byte saying what kind and
+ * how many bytes follow; globals hold until changed, locals until the
+ * next thing they describe. Only what a pointer needs is kept. */
+static bool read_pointer_map(const u8 *p, u32 len, pointer_map *m)
+{
+    u32 usage_page = 0, report_size = 0, report_count = 0, report_id = 0;
+    u32 usages[16], nusages = 0;
+    u32 usage_min = 0, usage_max = 0;
+    bool ranged = false;
+    u32 bit = 0;
+
+    memset(m, 0, sizeof(*m));
+
+    for (u32 i = 0; i < len; ) {
+        u8 prefix = p[i];
+        if (prefix == 0xFE) break;              /* a long item; none of ours are */
+        u32 size = prefix & 3u;
+        if (size == 3) size = 4;
+        u32 tag = prefix >> 4, type = (prefix >> 2) & 3u;
+        if (i + 1 + size > len) break;
+
+        u32 value = 0;
+        for (u32 b = 0; b < size; b++) value |= (u32)p[i + 1 + b] << (8 * b);
+        i += 1 + size;
+
+        if (type == 1) {                        /* holds until changed */
+            if (tag == 0) usage_page = value;
+            else if (tag == 7) report_size = value;
+            else if (tag == 8) { if (report_id != value) { report_id = value; bit = 0; } }
+            else if (tag == 9) report_count = value;
+        } else if (type == 2) {                 /* describes what comes next */
+            if (tag == 0 && nusages < 16) usages[nusages++] = value;
+            else if (tag == 1) { usage_min = value; ranged = true; }
+            else if (tag == 2) usage_max = value;
+        } else if (type == 0) {
+            if (tag == 8) {                     /* something the device reports */
+                bool constant = (value & 1) != 0;
+                if (!constant) {
+                    if (usage_page == 0x09 && !m->buttons_bits) {
+                        m->buttons_at = (u16)bit;
+                        m->buttons_bits = (u8)(report_size * report_count > 8
+                                               ? 8 : report_size * report_count);
+                    } else {
+                        for (u32 k = 0; k < report_count; k++) {
+                            u32 u = 0;
+                            if (ranged) u = usage_min + k > usage_max ? usage_max : usage_min + k;
+                            else if (k < nusages) u = usages[k];
+                            else if (nusages) u = usages[nusages - 1];
+                            u16 at = (u16)(bit + k * report_size);
+                            if (usage_page == 0x01 && u == 0x30) {
+                                m->x_at = at; m->x_bits = (u8)report_size; m->id = (u8)report_id;
+                            } else if (usage_page == 0x01 && u == 0x31) {
+                                m->y_at = at; m->y_bits = (u8)report_size;
+                            } else if (usage_page == 0x01 && u == 0x38 && !m->wheel_bits) {
+                                m->wheel_at = at; m->wheel_bits = (u8)report_size;
+                            }
+                        }
+                    }
+                }
+                bit += report_size * report_count;
+            }
+            nusages = 0; ranged = false; usage_min = usage_max = 0;
+        }
+    }
+
+    m->have = m->x_bits && m->y_bits;
+    return m->have;
+}
+
+/* The reading of descriptions, checked against three written out by
+ * hand -- because the device that would catch a mistake here is the
+ * one nobody has, and the emulated mouse is too kind to be a test: it
+ * sends its wheel whatever it was asked for, so it looks the same
+ * whether the description was read correctly or ignored entirely.
+ *
+ * The three are the shapes that actually turn up. A plain mouse, three
+ * buttons and eight bits a direction. One that counts in sixteen bits,
+ * which every high-resolution mouse does. And one that numbers its
+ * reports, because it has more than one thing to say -- there the
+ * numbers start a byte later than they look. */
+static bool pointer_selftest(void)
+{
+    static const u8 plain[] = {
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00,
+        0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01,
+        0x95, 0x03, 0x75, 0x01, 0x81, 0x02,             /* three buttons */
+        0x95, 0x01, 0x75, 0x05, 0x81, 0x01,             /* five bits of nothing */
+        0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38,
+        0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x03, 0x81, 0x06,
+        0xC0, 0xC0,
+    };
+    static const u8 wide[] = {
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00,
+        0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01,
+        0x95, 0x05, 0x75, 0x01, 0x81, 0x02,             /* five buttons */
+        0x95, 0x01, 0x75, 0x03, 0x81, 0x01,             /* three bits of nothing */
+        0x05, 0x01, 0x09, 0x30, 0x09, 0x31,
+        0x16, 0x00, 0x80, 0x26, 0xFF, 0x7F,
+        0x75, 0x10, 0x95, 0x02, 0x81, 0x06,             /* sixteen bits each way */
+        0x09, 0x38, 0x15, 0x81, 0x25, 0x7F,
+        0x75, 0x08, 0x95, 0x01, 0x81, 0x06,             /* and a wheel */
+        0xC0, 0xC0,
+    };
+    static const u8 numbered[] = {
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01,
+        0x85, 0x02,                                     /* this one is report two */
+        0x09, 0x01, 0xA1, 0x00,
+        0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01,
+        0x95, 0x03, 0x75, 0x01, 0x81, 0x02,
+        0x95, 0x01, 0x75, 0x05, 0x81, 0x01,
+        0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38,
+        0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x03, 0x81, 0x06,
+        0xC0, 0xC0,
+    };
+
+    pointer_map m;
+    if (!read_pointer_map(plain, sizeof(plain), &m)) return false;
+    if (m.id || m.buttons_at != 0 || m.buttons_bits != 3) return false;
+    if (m.x_at != 8 || m.x_bits != 8) return false;
+    if (m.y_at != 16 || m.y_bits != 8) return false;
+    if (m.wheel_at != 24 || m.wheel_bits != 8) return false;
+
+    if (!read_pointer_map(wide, sizeof(wide), &m)) return false;
+    if (m.buttons_bits != 5) return false;
+    if (m.x_at != 8 || m.x_bits != 16) return false;
+    if (m.y_at != 24 || m.y_bits != 16) return false;
+    if (m.wheel_at != 40 || m.wheel_bits != 8) return false;
+
+    if (!read_pointer_map(numbered, sizeof(numbered), &m)) return false;
+    if (m.id != 2 || m.x_at != 8 || m.wheel_at != 24) return false;
+
+    /* And the taking apart, on a report of the first shape: the middle
+     * button down, four left, three up, one notch back. */
+    static const u8 report[4] = { 0x02, 0xFC, 0x03, 0xFF };
+    read_pointer_map(plain, sizeof(plain), &m);
+    if (field_plain(report, 4, m.buttons_at, m.buttons_bits) != 2) return false;
+    if (field_signed(report, 4, m.x_at, m.x_bits) != -4) return false;
+    if (field_signed(report, 4, m.y_at, m.y_bits) != 3) return false;
+    if (field_signed(report, 4, m.wheel_at, m.wheel_bits) != -1) return false;
+
+    return true;
 }
 
 static void handle_report(usbdev *d, usbin *in, u32 len);
@@ -526,9 +726,21 @@ static void device_gone(usbdev *d)
             if (dev[i].used && dev[i].up_slot == d->slot) device_gone(&dev[i]);
 
     kprintf("usb:  %s is gone\n", d->name[0] ? d->name : "a device");
-    d->used = false;                 /* its memory stays; devices are few */
+    d->used = false;
     command(0, TRB_TYPE(T_DISABLE_SLOT) | TRB_SLOT(d->slot), NULL);
     dcbaa[d->slot] = 0;
+
+    /* Hand back what it held. A device that comes and goes all evening
+     * would otherwise take four pages with it every time, and the one
+     * plugging it in would have no way of knowing why the machine
+     * eventually stopped finding anything. */
+    if (d->ep0.pa) pmm_free(d->ep0.pa);
+    for (u32 k = 0; k < IN_MAX; k++)
+        if (d->in[k].r.pa) pmm_free(d->in[k].r.pa);
+    if (d->dctx_pa) pmm_free(d->dctx_pa);
+    if (d->ictx_pa) pmm_free(d->ictx_pa);
+    if (d->buf_pa)  pmm_free(d->buf_pa);
+    memset(d, 0, sizeof(*d));
 }
 
 static bool hub_set(usbdev *d, u32 port, u16 feature)
@@ -741,10 +953,11 @@ static bool device_up(const where *w)
      * that the answer is further in. So each interface is looked at,
      * and each one that is a keyboard or a pointer gets its own
      * endpoint set up. */
-    struct { u8 kind, iface, addr; u32 packet, interval; } found[IN_MAX];
+    struct { u8 kind, iface, addr; u32 packet, interval, report_len; } found[IN_MAX];
     u32 nfound = 0;
     u8 seen_class[8]; u32 nclass = 0;
     u8 cur_kind = 0, cur_iface = 0;
+    u32 cur_report_len = 0;
 
     for (u32 i = 0; i + 1 < total; i += d->buf[i] ? d->buf[i] : 1) {
         u8 len = d->buf[i], type = d->buf[i + 1];
@@ -764,8 +977,14 @@ static bool device_up(const where *w)
             if (cls == 3 && (proto == 1 || proto == 2)) {
                 cur_kind = proto == 1 ? KIND_KEYBOARD : KIND_MOUSE;
                 cur_iface = d->buf[i + 2];
+                cur_report_len = 0;
                 (void)sub;
             }
+        } else if (type == 0x21 && len >= 9 && cur_kind) {
+            /* The interface's own descriptor, whose one useful number
+             * here is how long the description of its reports is. */
+            if (d->buf[i + 6] == 0x22)
+                cur_report_len = (u32)(d->buf[i + 7] | (d->buf[i + 8] << 8));
         } else if (type == 5 && len >= 7 && cur_kind && nfound < IN_MAX) {
             /* interrupt, and inbound */
             if ((d->buf[i + 3] & 3) == 3 && (d->buf[i + 2] & 0x80)) {
@@ -774,6 +993,7 @@ static bool device_up(const where *w)
                 found[nfound].addr = d->buf[i + 2];
                 found[nfound].packet = (u32)(d->buf[i + 4] | (d->buf[i + 5] << 8)) & 0x7FF;
                 found[nfound].interval = d->buf[i + 6];
+                found[nfound].report_len = cur_report_len;
                 nfound++;
                 cur_kind = 0;                  /* one endpoint per interface */
             }
@@ -840,8 +1060,11 @@ static bool device_up(const where *w)
         in->kind = found[k].kind;
         in->iface = found[k].iface;
         in->at = 512 + k * 64;
+        /* A keyboard is read the boot way, eight bytes, which every
+         * one of them speaks. A pointer is read the way it describes
+         * itself, which may be longer than eight and often is. */
         in->report_len = found[k].kind == KIND_KEYBOARD
-                       ? 8 : (packet < 8 ? packet : 8);
+                       ? 8 : (packet < 64 ? packet : 64);
     }
     sl[0] = (sl[0] & ~(0x1Fu << 27)) | (top << 27);
 
@@ -854,14 +1077,35 @@ static bool device_up(const where *w)
     d->kind = nfound == 1 ? d->in[0].kind : KIND_OTHER;
     for (u32 k = 0; k < nfound; k++) {
         usbin *in = &d->in[k];
-        /* Ask for the fixed layout and for silence while nothing
+
+        /* A pointer is asked how it lays its reports out, because the
+         * boot protocol has no wheel in it and never had. */
+        if (in->kind == KIND_MOUSE && found[k].report_len) {
+            u32 want = found[k].report_len;
+            if (want > 1024) want = 1024;
+            if (control(d, 0x81, 6, 0x2200, in->iface, (u16)want, d->buf_pa + 1024))
+                read_pointer_map(d->buf + 1024, want, &in->map);
+        }
+
+        /* Ask for the layout that suits, and for silence while nothing
          * changes. Neither is required of the device, and a device that
-         * refuses is still read -- it simply keeps its own layout,
-         * which for keyboards and mice is almost always the same one. */
-        control(d, 0x21, 0x0B, 0, in->iface, 0, 0);
+         * refuses either is still read: it simply keeps what it had. */
+        control(d, 0x21, 0x0B, in->map.have ? 1 : 0, in->iface, 0, 0);
         control(d, 0x21, 0x0A, 0, in->iface, 0, 0);
         if (in->kind == KIND_KEYBOARD) keyboards++; else mice++;
         queue_report(d, in);
+    }
+
+    for (u32 k = 0; k < nfound; k++) {
+        usbin *in = &d->in[k];
+        if (in->kind != KIND_MOUSE) continue;
+        if (in->map.have)
+            kprintf("usb:  its pointer reports %u buttons, %u bits each way%s\n",
+                    in->map.buttons_bits, in->map.x_bits,
+                    in->map.wheel_bits ? ", and a wheel" : ", and no wheel");
+        else
+            kprintf("usb:  its pointer would not describe itself; "
+                    "read the boot way, without a wheel\n");
     }
 
     if (nfound == 1) {
@@ -940,9 +1184,28 @@ static void handle_report(usbdev *d, usbin *in, u32 len)
 {
     const u8 *r = d->buf + in->at;
     if (in->kind == KIND_MOUSE) {
+        if (in->map.have) {
+            const u8 *p = r;
+            u32 plen = len;
+            /* Where the device numbers its reports, the number comes
+             * first and the offsets are counted after it. A report of
+             * another number belongs to something else on the same
+             * wire -- extra keys, a battery reading -- and is not ours. */
+            if (in->map.id) {
+                if (!len || r[0] != in->map.id) return;
+                p = r + 1;
+                plen = len - 1;
+            }
+            i32 dx = field_signed(p, plen, in->map.x_at, in->map.x_bits);
+            i32 dy = field_signed(p, plen, in->map.y_at, in->map.y_bits);
+            i32 dz = field_signed(p, plen, in->map.wheel_at, in->map.wheel_bits);
+            u32 b = field_plain(p, plen, in->map.buttons_at, in->map.buttons_bits);
+            /* the wheel counts away from the person; the page counts down */
+            ps2_feed_mouse(dx, dy, -dz, (u8)b);
+            return;
+        }
         if (len < 3) return;
         i32 dx = (i8)r[1], dy = (i8)r[2], dz = len >= 4 ? (i8)r[3] : 0;
-        /* the wheel counts away from the person; the page counts down */
         ps2_feed_mouse(dx, dy, -dz, r[0]);
         return;
     }
@@ -991,23 +1254,45 @@ static void repeat_held(void)
 
 static bool port_seen[256];
 
+static u8 port_tries[256];
+
 static void look_at_ports(void)
 {
     for (u32 p = 1; p <= max_ports && p < 256; p++) {
         u32 sc = op[OP_PORTSC(p)];
         bool connected = (sc & PORT_CONNECTED) != 0;
         if (connected && !port_seen[p]) {
-            port_seen[p] = true;
+            /* Something is electrically present. That is not the same
+             * as ready to answer: the standard asks for a settling time
+             * before the port is reset, and a device asked too early
+             * answers nothing at all. Under emulation the device is
+             * ready before the plug is in and this pause looks like
+             * superstition; on a real socket it is the difference
+             * between plugging a mouse back in and restarting. */
+            wait_ms(150);
+            if (!(op[OP_PORTSC(p)] & PORT_CONNECTED)) continue;   /* it bounced back out */
+
+            bool came_up = false;
             if (port_reset(p)) {
                 where w;
                 memset(&w, 0, sizeof(w));
                 w.root_port = p;
                 w.speed = PORT_SPEED(op[OP_PORTSC(p)]);
-                device_up(&w);
-            } else {
-                kprintf("usb:  port %u: something is there, but it would not come up\n", p);
+                came_up = device_up(&w);
+            }
+            if (came_up) {
+                port_seen[p] = true;
+                port_tries[p] = 0;
+            } else if (++port_tries[p] >= 3) {
+                /* Three goes and then quiet, so a socket with something
+                 * broken in it does not fill the log forever. Pulling
+                 * whatever it is starts the count again. */
+                port_seen[p] = true;
+                kprintf("usb:  port %u: something is there, but it would not come up "
+                        "(port register %08x)\n", p, op[OP_PORTSC(p)]);
             }
         } else if (!connected && port_seen[p]) {
+            port_tries[p] = 0;
             port_seen[p] = false;
             for (u32 i = 0; i < DEV_MAX; i++)
                 if (dev[i].used && !dev[i].depth && dev[i].port == p)
@@ -1199,6 +1484,9 @@ bool xhci_init(void)
 
     kprintf("usb:  xhci at %02x:%02x.%u, %u ports, %u slots, %u-byte contexts\n",
             pd->bus, pd->device, pd->function, max_ports, max_slots, csz);
+    kprintf("usb:  %s\n", pointer_selftest()
+            ? "self test passed -- a pointer's own layout is read as written"
+            : "SELF TEST FAILED -- pointers will be read the boot way, without wheels");
 
     /* Power anything that is not powered, then give the ports a moment
      * to show what is plugged in. */
