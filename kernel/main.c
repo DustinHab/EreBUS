@@ -1912,10 +1912,15 @@ void kmain(eb_boot_info *bi)
          * mode; the core it talks to knows nothing of screens, which
          * is what will let a remote line speak to it one day. */
         term_init(root, CAP_READ | CAP_WRITE | CAP_GRANT);
-        kprintf("shell: %s, %u generations kept on the disk\n",
-                resume ? "resumed where it was left"
-                       : "starting at the root",
-                snap_slot_count());
+        if (blk_present())
+            kprintf("shell: %s, %u generations kept on the disk\n",
+                    resume ? "resumed where it was left"
+                           : "starting at the root",
+                    snap_slot_count());
+        else
+            kprintf("shell: %s, nothing kept between starts\n",
+                    resume ? "resumed where it was left"
+                           : "starting at the root");
 
         /* The screen belongs to the shell from here on. The log keeps
          * going to the serial port, where it paints over nothing. */

@@ -892,6 +892,27 @@ built binary.
   lending its own processor too, and repeated answers compared by
   the system instead of by hand
 
+## Trying it: the iso
+
+The latest build is on the releases page as
+[erebus.iso](https://github.com/DustinHab/Erebus/releases/latest/download/erebus.iso).
+It boots the way any other iso does: burn it, or write it whole onto a
+usb stick -- `dd if=erebus.iso of=/dev/sdX bs=4M` on Linux, Rufus in
+dd mode or balenaEtcher on Windows -- and start the machine from it,
+the UEFI way, with Secure Boot off. There is no BIOS half. In QEMU:
+
+```bash
+qemu-system-x86_64 -machine q35 -m 512M -bios /usr/share/OVMF/OVMF.fd -cdrom erebus.iso
+```
+
+A machine booted from the iso runs whole, but without a memory: it
+says so in the journal, and `disks` in the terminal shows where one
+could be made -- `settle on disk N` for a disk of its own, `settle in
+the free space of disk N` beside somebody else's system. A usb
+keyboard and mouse at the root ports work; a usb disk does not yet, so
+the store has to be on sata. tools/mkiso.sh builds the iso;
+tools/isotest.sh boots it both ways.
+
 ## A note on Secure Boot
 
 The loader is unsigned, so Secure Boot has to be off on real hardware.
