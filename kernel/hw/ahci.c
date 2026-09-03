@@ -113,6 +113,12 @@ typedef struct {
 static hba_mem  *hba;
 static ahci_disk store_d, aux_d, boot_d;
 static bool present;
+
+/* Where the store lies: on which disk, from which sector, how far. A
+ * store is a partition of the store's kind on any disk -- the boot
+ * disk included -- or a whole disk that is ours or blank. */
+static ahci_disk *store_p;
+static u64 store_base, store_span;
 static u32  disk_count;
 static char model[41];
 
@@ -288,36 +294,83 @@ static bool disk_up(ahci_disk *d, hba_port *p, u32 index, bool keep_model)
  * without a memory and says so. On a real machine this is the
  * difference between a system and a disk wiper. */
 #define STORE_MARK "EREBUS STORE"
+#define STORE_MIN_SECTORS 40960u      /* 20 MiB: the ring, and a log worth having */
 
 static bool disk_read(ahci_disk *d, u64 lba, u32 count, void *dst);
 static bool disk_write(ahci_disk *d, u64 lba, u32 count, const void *src);
+
+static u32 le32(const u8 *p) { return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24); }
+static u64 le64(const u8 *p) { return (u64)le32(p) | ((u64)le32(p + 4) << 32); }
+
+/* The partition type that means "a store of this system": a GUID of
+ * our own, E2EB0500-5354-4F52-4552-454255530001, here in the order
+ * the table keeps it. tools/mkusb.sh makes one; anyone's partitioning
+ * tool can. A partition of this kind on any disk is the store, the
+ * boot disk included -- which is how one disk carries the whole
+ * system, and how a machine with somebody else's system on the rest
+ * of the disk lends this one a corner. */
+static const u8 STORE_GUID[16] = { 0x00, 0x05, 0xEB, 0xE2, 0x54, 0x53, 0x52, 0x4F,
+                                   0x45, 0x52, 0x45, 0x42, 0x55, 0x53, 0x00, 0x01 };
+
+static bool find_store_partition(ahci_disk *d, u64 *first, u64 *count)
+{
+    static u8 hdr[BLK_SECTOR_SIZE];
+    static u8 ents[32 * BLK_SECTOR_SIZE];
+    if (!disk_read(d, 1, 1, hdr)) return false;
+    if (memcmp(hdr, "EFI PART", 8) != 0) return false;
+
+    u64 elba = le64(hdr + 72);
+    u32 n = le32(hdr + 80), sz = le32(hdr + 84);
+    if (sz < 128 || sz > 512 || n == 0 || elba < 2 || elba >= d->sectors) return false;
+    u32 bytes = n * sz;
+    if (bytes > sizeof(ents)) bytes = sizeof(ents);
+    if (!disk_read(d, elba, (bytes + BLK_SECTOR_SIZE - 1) / BLK_SECTOR_SIZE, ents)) return false;
+
+    for (u32 i = 0; (u64)i * sz + sz <= bytes; i++) {
+        const u8 *e = ents + i * sz;
+        if (memcmp(e, STORE_GUID, 16) != 0) continue;
+        u64 f = le64(e + 32), l = le64(e + 40);
+        if (l < f || l >= d->sectors) return false;
+        *first = f;
+        *count = l - f + 1;
+        return true;
+    }
+    return false;
+}
 
 static bool claim_store(void)
 {
     static u8 sector[BLK_SECTOR_SIZE];
     static u8 probe[64 * BLK_SECTOR_SIZE];
-    u32 port = store_d.index;
+    ahci_disk *d = store_p;
+    u32 port = d->index;
+    const char *what = store_base ? "the partition" : "the disk";
 
-    if (!disk_read(&store_d, 0, 1, sector)) return false;
+    if (store_span < STORE_MIN_SECTORS) {
+        kprintf("blk:  %s on port %u is too small for a store\n", what, port);
+        return false;
+    }
+    if (!disk_read(d, store_base, 1, sector)) return false;
     if (memcmp(sector, STORE_MARK, sizeof(STORE_MARK) - 1) == 0) {
-        kprintf("blk:  the disk on port %u carries our mark; it is the store\n", port);
+        kprintf("blk:  %s on port %u carries our mark; it is the store\n", what, port);
         return true;
     }
 
     for (u64 lba = 0; lba < 1024; lba += 64) {
-        if (!disk_read(&store_d, lba, 64, probe)) return false;
+        if (!disk_read(d, store_base + lba, 64, probe)) return false;
         for (u32 i = 0; i < sizeof(probe); i++) {
             if (!probe[i]) continue;
-            kprintf("blk:  the disk on port %u carries something that is not ours; "
-                    "nothing will be written to it\n", port);
+            kprintf("blk:  %s on port %u carries something that is not ours; "
+                    "nothing will be written to it\n", what, port);
             return false;
         }
     }
 
     memset(sector, 0, BLK_SECTOR_SIZE);
     memcpy(sector, STORE_MARK, sizeof(STORE_MARK) - 1);
-    if (!disk_write(&store_d, 0, 1, sector)) return false;
-    kprintf("blk:  a blank disk on port %u; it is the store now and carries our mark\n", port);
+    if (!disk_write(d, store_base, 1, sector)) return false;
+    kprintf("blk:  a blank %s on port %u; it is the store now and carries our mark\n",
+            store_base ? "partition" : "disk", port);
     return true;
 }
 
@@ -369,19 +422,52 @@ bool blk_init(void)
         return false;
     }
 
-    i32 store_at = -1, aux_at = -1;
+    /* Roles. Port zero is where the machine booted from: the kernel
+     * lives there, and a kernel built here is installed there. The
+     * store is, first, a partition of the store's kind on the boot
+     * disk or on the disk after it; failing that, the disk after the
+     * boot disk, whole, when it is ours or blank. The disk after that
+     * is the exchange disk files cross on. */
+    bool have_zero = false;
+    i32 next_at = -1, aux_at = -1;
     for (u32 i = 0; i < nfound; i++) {
-        if (found[i] == 0) continue;
-        if (store_at < 0)     store_at = found[i];
-        else if (aux_at < 0)  aux_at = found[i];
+        if (found[i] == 0) { have_zero = true; continue; }
+        if (next_at < 0)     next_at = found[i];
+        else if (aux_at < 0) aux_at = found[i];
     }
-    if (store_at < 0) store_at = found[0];
 
-    if (!disk_up(&store_d, &hba->ports[store_at], (u32)store_at, true)) {
-        kprintf("blk:  the disk did not answer IDENTIFY\n");
-        return false;
+    if (have_zero) {
+        if (disk_up(&boot_d, &hba->ports[0], 0, true))
+            kprintf("blk:  the boot disk on port 0, %llu sectors\n", boot_d.sectors);
+        else
+            kprintf("blk:  the boot disk did not answer\n");
     }
-    present = claim_store();
+
+    u64 first = 0, count = 0;
+    if (boot_d.ready && find_store_partition(&boot_d, &first, &count)) {
+        store_p = &boot_d;
+        store_base = first;
+        store_span = count;
+        kprintf("blk:  a store partition on the boot disk, %llu sectors from sector %llu\n",
+                count, first);
+    } else if (next_at >= 0) {
+        if (!disk_up(&store_d, &hba->ports[next_at], (u32)next_at, true)) {
+            kprintf("blk:  the disk on port %d did not answer IDENTIFY\n", next_at);
+        } else {
+            store_p = &store_d;
+            if (find_store_partition(&store_d, &first, &count)) {
+                store_base = first;
+                store_span = count;
+                kprintf("blk:  a store partition on port %d, %llu sectors from sector %llu\n",
+                        next_at, count, first);
+            } else {
+                store_base = 0;
+                store_span = store_d.sectors;
+            }
+        }
+    }
+    if (store_p && store_p->ready) present = claim_store();
+    else kprintf("blk:  no disk to keep the graph on\n");
 
     if (aux_at >= 0) {
         if (disk_up(&aux_d, &hba->ports[aux_at], (u32)aux_at, false))
@@ -390,18 +476,6 @@ bool blk_init(void)
         else
             kprintf("blk:  the exchange disk did not answer\n");
     }
-
-    /* The disk the machine booted from, when it is not also the store:
-     * the kernel lives there, and a kernel built here is installed
-     * there. */
-    bool have_zero = false;
-    for (u32 i = 0; i < nfound; i++) if (found[i] == 0) have_zero = true;
-    if (have_zero && store_at != 0) {
-        if (disk_up(&boot_d, &hba->ports[0], 0, false))
-            kprintf("blk:  the boot disk on port 0, %llu sectors\n", boot_d.sectors);
-        else
-            kprintf("blk:  the boot disk did not answer\n");
-    }
     return true;
 }
 
@@ -409,9 +483,9 @@ bool blk_boot_present(void)  { return boot_d.ready; }
 u64  blk_boot_sectors(void)  { return boot_d.sectors; }
 
 bool blk_present(void)      { return present; }
-u64  blk_sectors(void)      { return store_d.sectors; }
-const char *blk_model(void) { return present ? model : "none"; }
-u32  blk_port(void)         { return store_d.index; }
+u64  blk_sectors(void)      { return present ? store_span : 0; }
+const char *blk_model(void) { return model[0] ? model : "none"; }
+u32  blk_port(void)         { return store_p ? store_p->index : 0; }
 u32  blk_disk_count(void)   { return disk_count; }
 
 bool blk_aux_present(void)  { return aux_d.ready; }
@@ -467,14 +541,18 @@ static bool disk_write(ahci_disk *d, u64 lba, u32 count, const void *src)
     return run_command(d, ATA_FLUSH, 0, 0, 0, 0, false);
 }
 
+/* The store's sectors count from where the store begins, and end
+ * where it ends: a partition's neighbours are never reached. */
 bool blk_read(u64 lba, u32 count, void *dst)
 {
-    return present && disk_read(&store_d, lba, count, dst);
+    if (!present || lba + count > store_span || lba + count < lba) return false;
+    return disk_read(store_p, store_base + lba, count, dst);
 }
 
 bool blk_write(u64 lba, u32 count, const void *src)
 {
-    return present && disk_write(&store_d, lba, count, src);
+    if (!present || lba + count > store_span || lba + count < lba) return false;
+    return disk_write(store_p, store_base + lba, count, src);
 }
 
 bool blk_aux_read(u64 lba, u32 count, void *dst)
@@ -501,7 +579,7 @@ bool blk_boot_write(u64 lba, u32 count, const void *src)
 
 bool blk_selftest(void)
 {
-    if (!present || store_d.sectors < 4096) return false;
+    if (!present || store_span < 4096) return false;
 
     /* Below the ring of generations, which begins at sector 1024, and
      * restored afterwards, so a test run leaves the disk exactly as it

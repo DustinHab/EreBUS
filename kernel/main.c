@@ -810,18 +810,19 @@ void system_restart(void)
  * for quiet rather than saving on every keystroke means a burst of
  * typing costs one write instead of thirty, and half a second of
  * stillness is far below the point where anyone would notice. */
+static u32 taken_at_boot;         /* files the exchange disk handed over before this ran */
+
 static void persist_thread(void *arg)
 {
     (void)arg;
 
-    /* Whatever changed the graph before this thread was counting --
-     * files the boot took in from the exchange disk, keys typed while
-     * the machine was still coming up -- is written down at the first
-     * quiet moment like any later change, or a machine turned off in
-     * the meantime would come up without it. Nothing written yet is
-     * the honest starting point. */
+    /* This thread starts before the shell's, so no key can be taken
+     * before the count begins. What the boot itself changed -- files
+     * taken in from the exchange disk -- is counted as pending, so the
+     * first quiet moment writes it down; a boot that changed nothing
+     * writes nothing. */
     u64 seen = shell_changes() + obj_touches();
-    u64 written = 0;
+    u64 written = taken_at_boot ? seen - 1 : seen;
     u64 quiet_since = time_ns();
 
     for (;;) {
@@ -1845,7 +1846,7 @@ void kmain(eb_boot_info *bi)
             }
             if (dl) {
                 disk_list = dl;
-                fat_take_in(dl);
+                taken_at_boot = fat_take_in(dl);
             }
         }
 
@@ -1885,10 +1886,12 @@ void kmain(eb_boot_info *bi)
         /* The screen belongs to the shell from here on. The log keeps
          * going to the serial port, where it paints over nothing. */
         kout_detach_screen();
-        thread_create("shell", shell_run, NULL, kernel_domain);
-        thread_create("activity", activity_thread, NULL, kernel_domain);
+        /* The keeper of the graph before the shell: its count of
+         * changes must begin before the first key can be taken. */
         if (blk_present()) thread_create("persist", persist_thread, NULL,
                                          kernel_domain);
+        thread_create("shell", shell_run, NULL, kernel_domain);
+        thread_create("activity", activity_thread, NULL, kernel_domain);
     }
 
     /* The kernel is up: the loader's count of starts goes back to

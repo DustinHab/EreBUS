@@ -849,7 +849,21 @@ built binary.
   disks, anything isochronous. tools/usbtest.sh boots with the
   i8042 switched off and QEMU's usb keyboard and mouse on an xHCI
   controller, and types the terminal's day's work through them.
-* M10 — booting real hardware from a USB stick
+* **M10, the disk half — done.** tools/mkusb.sh makes build/stick.img:
+  a GPT disk with an EFI system partition carrying the loader and the
+  kernel, and a partition of the store's kind -- a type GUID of this
+  system's own, E2EB0500-5354-4F52-4552-454255530001 -- which the
+  kernel finds on any disk, the boot disk included. One disk carries
+  the whole system that way; a machine with somebody else's system on
+  the rest of the disk lends this one a partition. tools/stick.ps1
+  writes the image to a usb stick on Windows, refusing anything that
+  is not a stick; dd does it elsewhere. tools/sticktest.sh boots the
+  image as the only disk twice and finds on the second boot what was
+  typed on the first. What is still missing for a real machine: usb
+  disks are not driven, so the stick boots the machine but its own
+  store partition is out of reach -- the store is then a partition of
+  this kind, or a blank disk, on SATA, or the machine runs without a
+  memory and says so. Real hardware has not been booted yet.
 * Certificate verification — turning the seal from privacy into
   identity: RSA/ECDSA signatures and a root store
 * Work at scale, further — several desk jobs advancing at once, a
