@@ -62,4 +62,9 @@ bool settings_door_key(u32 i, u8 out[32]);
 bool settings_known(const u8 ip[4], u8 out[32]);
 bool settings_remember(const u8 ip[4], const u8 key[32]);
 
+/* Wireless networks joined before, by name: the passphrase kept for
+ * one, and the writing down of a new one as a "wlan |" line. */
+bool settings_wlan(const char *ssid, char *pass, u32 max);
+bool settings_remember_wlan(const char *ssid, const char *pass);
+
 #endif /* EB_SETTINGS_H */

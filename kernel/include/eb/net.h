@@ -40,7 +40,12 @@ bool        nic_up(void);
 const char *nic_name(void);
 const u8   *nic_mac(void);
 bool        nic_send(const void *frame, u32 len);
+bool        nic_send_raw(const void *frame, u32 len);   /* past the station, to the card */
 i32         nic_recv(void *out, u32 max);
+
+/* The link changed underneath -- a wireless network joined or left:
+ * the address is asked for anew. */
+void net_relink(void);
 
 /* The drivers. Intel's 8254x family covers QEMU, VirtualBox and
  * VMware; the two Realtek families cover most machines with a cable

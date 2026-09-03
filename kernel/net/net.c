@@ -23,6 +23,7 @@
  * travels readable, and the page says "http" so nobody mistakes it.
  */
 #include <eb/net.h>
+#include <eb/wifi.h>
 #include <eb/pipe.h>
 #include <eb/ssh.h>
 #include <eb/standard.h>
@@ -43,6 +44,7 @@ static u8 ip_ours[4];
 static u8 ip_gw[4];
 static u8 ip_dns[4];
 static bool configured;
+static bool relink_wanted;
 
 static domain    *kdom;
 static object    *service_port;
@@ -1646,12 +1648,28 @@ static void net_thread(void *arg)
             sntp_ask();
         }
 
+        /* The air: the station's clock, and a link that changed
+         * underneath -- joined, or left -- asks for its address anew,
+         * as a cable plugged in elsewhere would. */
+        wifi_poll();
+        if (relink_wanted) {
+            relink_wanted = false;
+            configured = false;
+            have_gw = false;
+            for (u32 i = 0; i < ARP_CACHE; i++) neigh[i].used = false;
+            wait_dhcp.have_offer = false;
+            wait_dhcp.have_ack = false;
+            dhcp_run();
+        }
+
         pipe_service();
         door_service();
         ssh_service();
         net_breathe();
     }
 }
+
+void net_relink(void) { relink_wanted = true; }
 
 void net_prepare(domain *kernel)
 {
@@ -1688,6 +1706,7 @@ bool net_start(void)
         kprintf("pipe: transfers travel sealed; a knock is signed with the door's key, "
                 "and a machine met once must answer with the same key\n");
 
+    wifi_init();
     thread_create("net", net_thread, NULL, kdom);
     running = true;
 

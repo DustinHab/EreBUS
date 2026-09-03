@@ -775,7 +775,10 @@ static void on_keys(const u8 *d, u32 n)
         }
         if (c >= 0x20 && c < 0x7F && ssh.llen < sizeof(ssh.line) - 1) {
             ssh.line[ssh.llen++] = (char)c;
-            if (ssh.pty) chan_data(&c, 1);
+            if (ssh.pty) {
+                u8 shown = term_secret(ssh.ts) ? '*' : c;   /* a passphrase shows as dots */
+                chan_data(&shown, 1);
+            }
         }
     }
 }

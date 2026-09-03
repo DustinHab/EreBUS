@@ -41,8 +41,6 @@ static const u8 sbox[256] = {
 
 static u8 xtime(u8 x) { return (u8)((x << 1) ^ ((x >> 7) * 0x1b)); }
 
-typedef struct { u8 rk[176]; } aes_key;
-
 static void aes128_expand(aes_key *k, const u8 key[16])
 {
     for (u32 i = 0; i < 16; i++) k->rk[i] = key[i];
@@ -196,6 +194,12 @@ static void gcm_core(const u8 key[16], const u8 iv[12],
     aes128_encrypt(&k, j0, mask);
     for (u32 i = 0; i < 16; i++) tag[i] = y[i] ^ mask[i];
 }
+
+/* The block cipher on its own, for the modes that live elsewhere:
+ * counter mode with a cbc mac for the wireless frames, key wrapping
+ * for the group key. */
+void aes128_setkey(aes_key *k, const u8 key[16]) { aes128_expand(k, key); }
+void aes128_block(const aes_key *k, const u8 in[16], u8 out[16]) { aes128_encrypt(k, in, out); }
 
 void aes128_gcm_seal(const u8 key[16], const u8 iv[12],
                      const u8 *aad, u32 alen,

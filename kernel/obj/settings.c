@@ -54,12 +54,18 @@ typedef struct {
     u8   known_ip[8][4];
     u8   known_key[8][32];
     u32  knowns;
+    /* Wireless networks joined before: name and passphrase, from a
+     * "wlan |" line each, written by the station when a join worked.
+     * The page is readable by whoever holds it; so is this. */
+    char wlan_ssid[4][33];
+    char wlan_pass[4][64];
+    u32  wlans;
 } values;
 
 static values current = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                           false, { 0, 0, 0, 0 }, 0,
                           false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0,
-                          { { 0 } }, { { 0 } }, 0 };
+                          { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0 };
 
 object *settings_object(void) { return settings; }
 
@@ -90,6 +96,46 @@ bool settings_address(u8 ip[4])
 {
     if (!current.addr_set) return false;
     if (ip) for (u32 i = 0; i < 4; i++) ip[i] = current.addr_ip[i];
+    return true;
+}
+
+bool settings_wlan(const char *ssid, char *pass, u32 max)
+{
+    for (u32 i = 0; i < current.wlans; i++) {
+        if (strcmp(current.wlan_ssid[i], ssid) != 0) continue;
+        u32 k = 0;
+        while (current.wlan_pass[i][k] && k + 1 < max) { pass[k] = current.wlan_pass[i][k]; k++; }
+        pass[k] = 0;
+        return true;
+    }
+    return false;
+}
+
+/* Writes a "wlan |" line: the network's name, " = ", the passphrase. */
+bool settings_remember_wlan(const char *ssid, const char *pass)
+{
+    if (!settings) return false;
+    u8 *d = (u8 *)obj_data(settings);
+    u64 size = obj_size(settings);
+    u64 len = 0;
+    while (len < size && d[len]) len++;
+
+    char line[128];
+    u32 at = 0;
+    const char *k = "wlan     | ";
+    while (k[at]) { line[at] = k[at]; at++; }
+    for (u32 i = 0; ssid[i] && at < sizeof(line) - 1; i++) line[at++] = ssid[i];
+    const char *m = " = ";
+    for (u32 i = 0; m[i] && at < sizeof(line) - 1; i++) line[at++] = m[i];
+    for (u32 i = 0; pass[i] && at < sizeof(line) - 1; i++) line[at++] = pass[i];
+
+    if (len + at + 2 >= size) return false;
+    if (len && d[len - 1] != '\n') d[len++] = '\n';
+    for (u32 i = 0; i < at; i++) d[len++] = (u8)line[i];
+    d[len++] = '\n';
+    d[len] = 0;
+    obj_touch(settings);
+    settings_apply();
     return true;
 }
 
@@ -396,6 +442,32 @@ static void read_line(values *v, const char *line, u64 len)
                 if (slot == v->knowns) v->knowns++;
             }
         }
+    } else if (matter_is(line, a, b, "wlan")) {
+        /* A network joined before: its name, " = ", its passphrase.
+         * A later line for the same name replaces the earlier. */
+        u64 from = 0, to = vlen;
+        while (from < to && val[from] == ' ') from++;
+        while (to > from && (val[to - 1] == ' ' || val[to - 1] == '\r')) to--;
+        u64 eq = from;
+        while (eq + 2 < to && !(val[eq] == ' ' && val[eq + 1] == '=' && val[eq + 2] == ' ')) eq++;
+        if (eq + 2 < to) {
+            char ssid[33], pass[64];
+            u32 sl = 0, pl = 0;
+            for (u64 i = from; i < eq && sl < 32; i++) ssid[sl++] = val[i];
+            ssid[sl] = 0;
+            for (u64 i = eq + 3; i < to && pl < 63; i++) pass[pl++] = val[i];
+            pass[pl] = 0;
+            if (sl) {
+                u32 slot = v->wlans;
+                for (u32 s = 0; s < v->wlans; s++)
+                    if (strcmp(v->wlan_ssid[s], ssid) == 0) slot = s;
+                if (slot < 4) {
+                    for (u32 k = 0; k <= sl; k++) v->wlan_ssid[slot][k] = ssid[k];
+                    for (u32 k = 0; k <= pl; k++) v->wlan_pass[slot][k] = pass[k];
+                    if (slot == v->wlans) v->wlans++;
+                }
+            }
+        }
     } else if (matter_is(line, a, b, "name")) {
         /* What this machine calls itself when another asks: shown to
          * the other side as a claim, like every self-given name. */
@@ -523,7 +595,7 @@ void settings_apply(void)
     values next = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                     false, { 0, 0, 0, 0 }, 0,
                     false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0,
-                    { { 0 } }, { { 0 } }, 0 };
+                    { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0 };
 
     u64 start = 0;
     for (u64 i = 0; i <= size; i++) {

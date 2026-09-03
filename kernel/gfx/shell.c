@@ -2881,8 +2881,9 @@ static void draw_term_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     u32 at = 0;
     gline[at++] = '>';
     gline[at++] = ' ';
+    bool hush = term_secret(ts);                     /* a passphrase: dots, not letters */
     for (u32 k = 0; k < gl && at < sizeof(gline) - 2; k++)
-        gline[at++] = g[k];
+        gline[at++] = hush ? '*' : g[k];
     gline[at++] = '_';
     gline[at] = 0;
     text_at(x, gy, x + w, gline, C_TEXT);

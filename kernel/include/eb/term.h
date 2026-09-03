@@ -60,6 +60,7 @@ bool term_link_list(object *list, const char *name, term_say_fn say, void *ctx);
  * wait while a build runs -- term_building says so. */
 bool term_build_start(object *list, const char *name);
 bool term_building(void);
+bool term_secret(term_session *s);        /* the line being gathered is a passphrase: show dots */
 void term_key(term_session *s, char c);
 void term_rub(term_session *s);
 void term_clear_line(term_session *s);

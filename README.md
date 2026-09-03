@@ -892,6 +892,46 @@ built binary.
   lending its own processor too, and repeated answers compared by
   the system instead of by hand
 
+## Wireless
+
+The machine has a wireless station: kernel/net/wifi.c hears the
+networks around, joins one the WPA2 way, and seals every frame after
+that. In the terminal, `networks` lists what is in the air -- name,
+channel, signal, and whether it is open, wpa2, or something this
+station does not speak; `join <name>` asks for the passphrase, which
+is typed unseen (dots on the screen, dots on the door's terminal) and
+never written into the transcript; `join <name> with <passphrase>`
+gives it in one line; `leave` leaves; `wifi` says where the station
+stands and what its address is. A network joined once is written into
+the settings as a `wlan |` line -- name and passphrase, readable by
+whoever holds the settings, which is the person -- and joined again on
+its own the next time it is heard.
+
+The WPA2 way, in full and with nothing borrowed: the passphrase and
+the network's name become the master key by 4096 rounds of HMAC-SHA1;
+the four-way handshake mixes it with two fresh nonces and both
+addresses into the session keys; the group key arrives wrapped and is
+unwrapped; every data frame is AES-CCM with a packet number that never
+repeats, so a frame recorded cannot be played back; a wrong passphrase
+is turned away at the third message and the station says so. SHA-1,
+HMAC, PBKDF2, CCM and the key unwrapping each prove themselves at boot
+against the published test vectors.
+
+What the machine does not have is a radio chip's driver. QEMU has no
+wireless card to emulate, and every real chip needs a driver of its
+own with the maker's firmware. So the radio the station speaks through
+today is the test bench's: 802.11 frames carried inside ethernet frames
+down the wire to tools/wifi-ap.py, a virtual access point on the host
+that beacons, greets, runs the handshake with a passphrase of its own,
+seals and unseals with CCMP, and behind the seal leases an address and
+pings the station -- everything but the antenna. tools/wifitest.sh
+runs the whole thing: a wrong passphrase turned away, the right one
+typed unseen, the lease through the seal, the pings answered, and a
+second boot joining on its own from memory. A real chip's driver plugs
+in under the same three verbs -- send a frame, hand up what arrived,
+name the antenna -- and the first one will be for a usb dongle the
+author can hold, reached from QEMU through usb passthrough.
+
 ## Trying it: the iso
 
 The latest build is on the releases page as

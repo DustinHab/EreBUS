@@ -62,6 +62,42 @@ bool ed25519_verify(const u8 pk[32], const void *msg, u32 len,
                     const u8 sig[64]);
 
 /* AES-128-GCM, seal and open. A 96-bit nonce, a 128-bit tag. */
+/* The block cipher itself, keyed once and used many times. */
+typedef struct { u8 rk[176]; } aes_key;
+void aes128_setkey(aes_key *k, const u8 key[16]);
+void aes128_block(const aes_key *k, const u8 in[16], u8 out[16]);
+
+/* SHA-1, and the constructions on it that wireless security still
+ * leans on: the keyed hash, the slow key derivation from a passphrase
+ * (4096 rounds, as the standard says), and the expansion of a master
+ * key into the session keys. */
+typedef struct {
+    u32 h[5];
+    u8  buf[64];
+    u64 len;
+    u32 fill;
+} sha1_ctx;
+void sha1_init(sha1_ctx *c);
+void sha1_update(sha1_ctx *c, const void *data, u64 len);
+void sha1_final(sha1_ctx *c, u8 out[20]);
+void sha1(const void *data, u64 len, u8 out[20]);
+void hmac_sha1(const u8 *key, u32 klen, const void *data, u64 len, u8 out[20]);
+void pbkdf2_hmac_sha1(const u8 *pass, u32 plen, const u8 *salt, u32 slen,
+                      u32 rounds, u8 *out, u32 olen);
+void prf_sha1(const u8 *key, u32 klen, const char *label,
+              const u8 *data, u32 dlen, u8 *out, u32 olen);
+
+/* AES in counter mode with a cbc mac, as the wireless frames use it:
+ * a 13-byte nonce, an 8-byte tag. And the unwrapping of a key wrapped
+ * the RFC 3394 way, which is how the group key travels. */
+void aes_ccm_seal(const aes_key *k, const u8 nonce[13],
+                  const u8 *aad, u32 alen, const u8 *in, u32 len,
+                  u8 *out, u8 tag[8]);
+bool aes_ccm_open(const aes_key *k, const u8 nonce[13],
+                  const u8 *aad, u32 alen, const u8 *in, u32 len,
+                  const u8 tag[8], u8 *out);
+bool aes_unwrap(const u8 kek[16], const u8 *in, u32 len, u8 *out);
+
 void aes128_gcm_seal(const u8 key[16], const u8 iv[12],
                      const u8 *aad, u32 alen,
                      const u8 *pt, u32 len, u8 *ct, u8 tag[16]);

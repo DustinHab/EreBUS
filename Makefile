@@ -80,6 +80,9 @@ KERN_C   := kernel/main.c \
             kernel/gfx/html.c \
             kernel/hw/ps2.c \
             kernel/hw/xhci.c \
+            kernel/net/sha1.c \
+            kernel/net/ccmp.c \
+            kernel/net/wifi.c \
             kernel/hw/pci.c \
             kernel/hw/ahci.c \
             kernel/mm/pmm.c \

@@ -33,6 +33,8 @@
 #include <eb/lang.h>
 #include <eb/fat.h>
 #include <eb/settle.h>
+#include <eb/wifi.h>
+#include <eb/net.h>
 #include <eb/fmt.h>
 #include <eb/time.h>
 #include <eb/thread.h>
@@ -59,6 +61,11 @@ struct term_session {
     char in_line[TERM_LINE];
     u32  in_len;
     char last_line[TERM_LINE];
+
+    /* The next line is a passphrase for this network: not echoed,
+     * not kept as the last line. */
+    bool secret;
+    char secret_for[33];
 };
 
 static term_session sessions[TERM_SESSIONS];
@@ -1552,6 +1559,10 @@ static void cmd_help(term_session *s)
     t_say(s, "  settle in partition P of disk N      make that partition the store");
     t_say(s, "  settle in the free space of disk N   make a store in the room left, touching nothing else");
     t_say(s, "  yes              go ahead with what 'settle' offered");
+    t_say(s, "  networks         the wireless networks in the air");
+    t_say(s, "  join <name> [with <passphrase>]   join one; the passphrase is asked for if not given");
+    t_say(s, "  leave            leave the wireless network");
+    t_say(s, "  wifi             the station: joined where, how, and its address");
     t_say(s, "  give <name> to <program>   hand it a reference");
     t_say(s, "  end <name>       end a running program");
     t_end(s);
@@ -1579,10 +1590,112 @@ static void say_to(void *ctx, const char *line)
     t_say((term_session *)ctx, line);
 }
 
+/* ------------------------------------------------------------------ */
+/* The air                                                             */
+/* ------------------------------------------------------------------ */
+
+static const char *security_word(u8 s)
+{
+    return s == WIFI_OPEN ? "open" : s == WIFI_WPA2 ? "wpa2" : "not one this station speaks";
+}
+
+static void cmd_networks(term_session *s)
+{
+    if (!wifi_radio_present()) { t_say(s, "no radio, and no wire to carry the test bench's air."); return; }
+    wifi_scan();
+    wifi_net list[16];
+    u32 n = wifi_networks(list, 16);
+    if (n == 0) { t_say(s, "nothing heard yet; the radio listens.  ask again in a moment."); return; }
+    for (u32 i = 0; i < n; i++) {
+        t_puts(s, "  ");
+        t_puts(s, list[i].ssid);
+        t_puts(s, "  channel ");
+        t_dec(s, list[i].channel);
+        t_puts(s, "  signal ");
+        if (list[i].rssi < 0) { t_putc(s, '-'); t_dec(s, (u64)(-list[i].rssi)); }
+        else t_dec(s, (u64)list[i].rssi);
+        t_puts(s, " dBm  ");
+        t_puts(s, security_word(list[i].security));
+        if (list[i].joined) t_puts(s, "  (joined)");
+        else if (list[i].remembered) t_puts(s, "  (remembered)");
+        t_end(s);
+    }
+    t_say(s, "join <name> joins one; a passphrase is asked for when the network wants one.");
+}
+
+static void cmd_join(term_session *s, const char *what)
+{
+    if (!what[0]) { t_say(s, "join which network?  'networks' names them."); return; }
+    char a[TERM_LINE], b[TERM_LINE];
+    const char *name = what, *pass = NULL;
+    if (split_at(what, " with ", a, b)) { name = a; pass = b; }
+
+    wifi_net list[16];
+    u32 n = wifi_networks(list, 16);
+    wifi_net *found = NULL;
+    for (u32 i = 0; i < n && !found; i++)
+        if (strcmp(list[i].ssid, name) == 0) found = &list[i];
+    if (!found) { t_puts(s, "no network called "); t_puts(s, name); t_say(s, " has been heard; 'networks' lists them."); return; }
+    if (found->security == WIFI_OTHER) { t_say(s, "that network's protection is not one this station speaks; wpa2 with a passphrase is."); return; }
+
+    char had[64];
+    if (pass) wifi_join(name, pass);
+    else if (found->security == WIFI_OPEN) wifi_join(name, "");
+    else if (settings_wlan(name, had, sizeof(had))) wifi_join(name, had);
+    else {
+        s->secret = true;
+        u32 i = 0;
+        while (name[i] && i < 32) { s->secret_for[i] = name[i]; i++; }
+        s->secret_for[i] = 0;
+        t_puts(s, "the passphrase for ");
+        t_puts(s, name);
+        t_say(s, "?  (the letters will not show)");
+        return;
+    }
+    t_puts(s, "joining ");
+    t_puts(s, name);
+    t_say(s, "; the journal says how it went, and so does 'wifi'.");
+}
+
+static void cmd_leave(term_session *s)
+{
+    if (!wifi_up()) { t_say(s, "not on any network."); return; }
+    wifi_leave();
+    t_say(s, "leaving the network.");
+}
+
+static void cmd_wifi(term_session *s)
+{
+    char line[160];
+    t_say(s, wifi_radio_name());
+    t_say(s, wifi_state(line, sizeof(line)));
+    u8 ip[4];
+    if (wifi_up() && net_own_address(ip)) {
+        t_puts(s, "address ");
+        put_ip(s, ip);
+        t_end(s);
+    }
+}
+
+bool term_secret(term_session *s) { return s && s->secret; }
+
 void term_line(term_session *s, const char *line)
 {
     if (!s || !s->used || !s->depth) return;
     while (*line == ' ') line++;
+
+    /* A passphrase asked for: taken, and never written down here. */
+    if (s->secret) {
+        s->secret = false;
+        s->last_line[0] = 0;
+        t_say(s, "> (a passphrase, not shown)");
+        if (!*line) { t_say(s, "nothing given; the network stays unjoined."); return; }
+        wifi_join(s->secret_for, line);
+        t_puts(s, "joining ");
+        t_puts(s, s->secret_for);
+        t_say(s, "; the journal says how it went, and so does 'wifi'.");
+        return;
+    }
 
     /* The command echoes first, so the transcript reads as the talk
      * it is. */
@@ -1606,6 +1719,10 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "disks", NULL))    settle_disks(say_to, s);
     else if (word_starts(line, "settle", &rest))  settle_plan(rest, say_to, s);
     else if (word_starts(line, "yes", NULL))      settle_yes(say_to, s);
+    else if (word_starts(line, "networks", NULL)) cmd_networks(s);
+    else if (word_starts(line, "join", &rest))    cmd_join(s, rest);
+    else if (word_starts(line, "leave", NULL))    cmd_leave(s);
+    else if (word_starts(line, "wifi", NULL))     cmd_wifi(s);
     else if (word_starts(line, "write", &rest))   cmd_write(s, rest);
     else if (word_starts(line, "make", &rest))    cmd_make(s, rest);
     else if (word_starts(line, "copy", &rest))    cmd_copy(s, rest);
