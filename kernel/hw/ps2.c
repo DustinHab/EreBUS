@@ -189,11 +189,12 @@ static const u8 de_altgr[0x59] = {
 
 static bool shift_down, ctrl_down, alt_down, altgr_down;
 
-static void on_keyboard(trap_frame *f)
+/* One byte of scancode set 1, from the controller or from anyone
+ * else who speaks it: the usb keyboard driver translates its reports
+ * into these bytes, so that one table and one set of modifier rules
+ * serve both. */
+void ps2_feed_scancode(u8 code)
 {
-    (void)f;
-    u8 code = inb(PS2_DATA);
-
     /* 0xE0 introduces a two-byte code for the keys that did not exist
      * on the original keyboard: the arrows, the right-hand modifiers,
      * the navigation block. Their second byte repeats a code that also
@@ -265,9 +266,28 @@ static void on_keyboard(trap_frame *f)
     push_key(&e);
 }
 
+static void on_keyboard(trap_frame *f)
+{
+    (void)f;
+    ps2_feed_scancode(inb(PS2_DATA));
+}
+
 /* ------------------------------------------------------------------ */
 /* Mouse                                                               */
 /* ------------------------------------------------------------------ */
+
+/* A movement from anyone: dy already the screen's way, down positive;
+ * dz positive rolls the page down. */
+void ps2_feed_mouse(i32 dx, i32 dy, i32 dz, u8 buttons)
+{
+    if (dz > 8) dz = 8;
+    if (dz < -8) dz = -8;
+    mouse_event e = { .dx = dx, .dy = dy, .dz = dz, .buttons = (u8)(buttons & 7) };
+    u64 flags = irq_save();
+    mouse_total++;
+    push_mouse(&e);
+    irq_restore(flags);
+}
 
 static bool mouse_wheel;             /* the fourth byte carries the wheel */
 
@@ -330,8 +350,10 @@ void ps2_init(void)
 
     command(CMD_READ_CONFIG);
     int cfg = read_data();
-    if (cfg < 0) {
-        kprintf("ps2:  controller does not answer\n");
+    if (cfg < 0 || cfg == 0xFF) {
+        /* nothing, or a bus with nobody on it answering all ones: a
+         * machine without the controller, which usb then has to cover */
+        kprintf("ps2:  no controller answers\n");
         return;
     }
 

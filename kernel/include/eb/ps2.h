@@ -5,11 +5,11 @@
 
 /* The PS/2 controller: keyboard on line 1, mouse on line 12.
  *
- * PS/2 rather than USB, and not only because a USB stack is a large
- * piece of work. Every machine with a USB keyboard also presents it as
- * a PS/2 one through the firmware's legacy emulation, so this one
- * driver reaches both. A real USB stack will replace it; until then it
- * is one file instead of a subsystem.
+ * The queues here are the system's one door for keys and movements.
+ * The controller fills them where a machine has one; the usb driver
+ * fills the same queues from the xHCI controller's devices, speaking
+ * scancode set 1 into ps2_feed_scancode so that the layout tables and
+ * the modifier rules live in one place.
  */
 
 /* Keys with no character get a code point of their own, above anything
@@ -50,5 +50,11 @@ bool ps2_poll_mouse(mouse_event *out);
 
 u64 ps2_key_count(void);
 u64 ps2_mouse_count(void);
+
+/* The same queues fed from elsewhere: a byte of scancode set 1, or a
+ * movement with dy the screen's way. The usb driver speaks through
+ * these, so the layout tables and the modifier rules live once. */
+void ps2_feed_scancode(u8 code);
+void ps2_feed_mouse(i32 dx, i32 dy, i32 dz, u8 buttons);
 
 #endif /* EB_PS2_H */

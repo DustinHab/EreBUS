@@ -39,6 +39,7 @@
 #include <eb/pic.h>
 #include <eb/pmm.h>
 #include <eb/ps2.h>
+#include <eb/xhci.h>
 #include <eb/serial.h>
 #include <eb/shell.h>
 #include <eb/snapshot.h>
@@ -1462,6 +1463,9 @@ void kmain(eb_boot_info *bi)
     kprintf("ps2:  keyboard %s, mouse %s\n",
             ps2_keyboard_present() ? "ready" : "absent",
             ps2_mouse_present() ? "ready" : "absent");
+    /* USB keyboards and mice speak into the same queues; a machine
+     * without a PS/2 controller has its keys this way. */
+    xhci_init();
 
     u64 back_bytes = fb_backbuffer_bytes();
     phys_addr back = pmm_alloc_contig(PAGE_UP(back_bytes) / PAGE_SIZE);

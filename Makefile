@@ -79,6 +79,7 @@ KERN_C   := kernel/main.c \
             kernel/gfx/shell.c \
             kernel/gfx/html.c \
             kernel/hw/ps2.c \
+            kernel/hw/xhci.c \
             kernel/hw/pci.c \
             kernel/hw/ahci.c \
             kernel/mm/pmm.c \

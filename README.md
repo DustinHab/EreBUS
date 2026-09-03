@@ -836,6 +836,19 @@ built binary.
   forgotten by removing its line, by hand. tools/pipe-identity.sh
   lets two machines meet, then gives the answering one a fresh
   identity at the same address and shows the second send refused.
+* **USB keyboards and mice — done.** kernel/hw/xhci.c drives the
+  host controller every machine since about 2012 has: the firmware
+  handed over, the controller reset and given its rings, the root
+  ports walked, each device given a slot and an address, asked who it
+  is, and -- when it is a keyboard or a mouse -- set to the boot
+  protocol with its interrupt endpoint polled by a thread. Reports
+  become the bytes a PS/2 keyboard would have sent and go into the
+  same queues, so the shell never learns which wire a key came down;
+  held keys repeat the way a keyboard's own electronics used to. Not
+  driven, and said so at boot: what hangs off an external hub, USB
+  disks, anything isochronous. tools/usbtest.sh boots with the
+  i8042 switched off and QEMU's usb keyboard and mouse on an xHCI
+  controller, and types the terminal's day's work through them.
 * M10 — booting real hardware from a USB stick
 * Certificate verification — turning the seal from privacy into
   identity: RSA/ECDSA signatures and a root store
