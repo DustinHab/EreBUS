@@ -1687,8 +1687,8 @@ bool net_start(void)
     if (!service_port) return false;
 
     /* The drivers, in the order of how much silicon each one covers
-     * in practice. The first to find its chip carries the traffic. */
-    if (!e1000_init() && !rtl8169_init() && !rtl8139_init())
+     * in practice, and preferring a card with a cable in it. */
+    if (!nic_start())
         return false;
 
     /* The seal proves its arithmetic before it is offered. A failure

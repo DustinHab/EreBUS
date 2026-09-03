@@ -105,8 +105,13 @@ static const nic_ops r8169_ops = {
     .recv = r8169_recv,
 };
 
-bool rtl8169_init(void)
+bool rtl8169_init(bool need_link)
 {
+    /* This driver does not read the socket, so it cannot pass over a
+     * card with no cable in it. On the round where that is asked for
+     * it answers as it always would; a machine with one of these and
+     * nothing else is better served by having it than by waiting. */
+    (void)need_link;
     static const u16 kin[] = { 0x8168, 0x8169, 0x8167, 0x8161, 0x8136 };
     const pci_device *dev = NULL;
     for (u32 i = 0; i < pci_device_count() && !dev; i++) {

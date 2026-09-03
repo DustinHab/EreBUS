@@ -100,6 +100,7 @@ KERN_C   := kernel/main.c \
             kernel/sched/proc.c \
             kernel/net/nic.c \
             kernel/net/e1000.c \
+            kernel/net/igb.c \
             kernel/net/rtl8139.c \
             kernel/net/rtl8169.c \
             kernel/net/sha256.c \

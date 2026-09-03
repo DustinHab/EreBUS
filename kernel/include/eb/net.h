@@ -47,12 +47,25 @@ i32         nic_recv(void *out, u32 max);
  * the address is asked for anew. */
 void net_relink(void);
 
-/* The drivers. Intel's 8254x family covers QEMU, VirtualBox and
- * VMware; the two Realtek families cover most machines with a cable
- * socket. Each answers false quietly when its chip is not there. */
-bool e1000_init(void);
-bool rtl8139_init(void);
-bool rtl8169_init(void);
+/* The drivers. Intel's older family covers the emulators and a great
+ * many cards besides; its later one covers the I210 and I350 that sit
+ * on desktop boards; the two Realtek families cover most of the rest.
+ * Each answers false quietly when its chip is not there.
+ *
+ * need_link asks a driver to pass over a card that has no cable in it.
+ * A board with two sockets has one cable more often than not, and the
+ * card that is plugged in is the one worth having; nic_start asks
+ * first with the demand and then without it, so a machine with nothing
+ * plugged in anywhere still comes up with a card rather than none. */
+bool e1000_init(bool need_link);
+bool igb_init(bool need_link);
+bool rtl8139_init(bool need_link);
+bool rtl8169_init(bool need_link);
+
+/* Every driver in turn, cabled cards first. False when no card here
+ * knows the silicon; what was seen and not driven is named in the log
+ * either way. */
+bool nic_start(void);
 
 /* The service. Prepare early -- the port has to exist before the
  * fetch program starts holding a way to it -- and start late, once

@@ -102,8 +102,11 @@ static const nic_ops r8139_ops = {
     .recv = r8139_recv,
 };
 
-bool rtl8139_init(void)
+bool rtl8139_init(bool need_link)
 {
+    /* As with its bigger relative: the socket is not read here, so
+     * there is nothing to pass over on. */
+    (void)need_link;
     const pci_device *dev = NULL;
     for (u32 i = 0; i < pci_device_count(); i++) {
         const pci_device *d = pci_get(i);
