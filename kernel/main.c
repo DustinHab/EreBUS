@@ -810,18 +810,18 @@ void system_restart(void)
  * for quiet rather than saving on every keystroke means a burst of
  * typing costs one write instead of thirty, and half a second of
  * stillness is far below the point where anyone would notice. */
-static u32 taken_at_boot;         /* files the exchange disk handed over before this ran */
-
 static void persist_thread(void *arg)
 {
     (void)arg;
 
-    /* What the boot took in from the exchange disk changed the graph
-     * before anyone was counting; the first quiet moment writes it
-     * down, or a machine turned off in the meantime would come up
-     * without it. */
+    /* Whatever changed the graph before this thread was counting --
+     * files the boot took in from the exchange disk, keys typed while
+     * the machine was still coming up -- is written down at the first
+     * quiet moment like any later change, or a machine turned off in
+     * the meantime would come up without it. Nothing written yet is
+     * the honest starting point. */
     u64 seen = shell_changes() + obj_touches();
-    u64 written = taken_at_boot ? seen - 1 : seen;
+    u64 written = 0;
     u64 quiet_since = time_ns();
 
     for (;;) {
@@ -1402,7 +1402,11 @@ void kmain(eb_boot_info *bi)
             continue;
         }
         if (proc_start(proc)) {
+            /* The table's own hold: a program that ends before its
+             * object is laid on a shelf would otherwise be reaped from
+             * under the pointer kept here. */
             standard_obj[i] = proc_object(proc);
+            obj_retain(standard_obj[i]);
             standard_wire(standard[i].name, standard_obj[i]);
             kprintf("proc: %llu (%s) waiting on its letter box\n",
                     proc_id(proc), proc_name(proc));
@@ -1446,7 +1450,9 @@ void kmain(eb_boot_info *bi)
         print_size(blk_sectors() * BLK_SECTOR_SIZE);
         kprintf("), %u disks found\n", blk_disk_count());
 
-        if (blk_selftest())
+        if (!blk_present())
+            kprintf("blk:  no store: nothing is kept between boots\n");
+        else if (blk_selftest())
             kprintf("blk:  self test passed, a written sector reads back\n");
         else
             kprintf("blk:  self test FAILED\n");
@@ -1839,7 +1845,7 @@ void kmain(eb_boot_info *bi)
             }
             if (dl) {
                 disk_list = dl;
-                taken_at_boot = fat_take_in(dl);
+                fat_take_in(dl);
             }
         }
 

@@ -862,6 +862,19 @@ built binary.
 The loader is unsigned, so Secure Boot has to be off on real hardware.
 A signing chain of our own would be a separate project.
 
+## A note on other people's disks
+
+The store is written from sector 1024 up, with no partition table and
+no file system around it. On a real machine the disk after the boot
+disk could be somebody's system disk, so a disk is claimed as the
+store only when it carries the machine's mark in its first sector, or
+is blank below the ring -- a fresh image, a wiped disk -- in which case
+the mark is written and the disk is the store from then on. Anything
+else is left exactly as found, read and written by nobody here, and
+the machine comes up without a memory and says so at boot.
+tools/foreigndisk.sh boots with a disk that carries a partition table
+and data, and compares it byte for byte afterwards.
+
 ## A note on real processors
 
 QEMU's emulator is forgiving in places a processor is not. The first

@@ -21,6 +21,7 @@
 #include <eb/mm.h>
 #include <eb/io.h>
 #include <eb/fmt.h>
+#include <eb/string.h>
 
 /* --- register layout ------------------------------------------------ */
 
@@ -275,6 +276,51 @@ static bool disk_up(ahci_disk *d, hba_port *p, u32 index, bool keep_model)
     return true;
 }
 
+/* --- whose disk is it ------------------------------------------------- */
+
+/* The store is written from sector 1024 up, with no partition table
+ * and no file system around it: a disk that already holds something
+ * else would lose it. So a disk is claimed as the store only when it
+ * carries our mark in its first sector, or is blank below the ring --
+ * a fresh image, a wiped disk -- in which case the mark is written
+ * and the disk is ours from then on. Anything else is left exactly as
+ * found, read and written by nobody here, and the machine runs
+ * without a memory and says so. On a real machine this is the
+ * difference between a system and a disk wiper. */
+#define STORE_MARK "EREBUS STORE"
+
+static bool disk_read(ahci_disk *d, u64 lba, u32 count, void *dst);
+static bool disk_write(ahci_disk *d, u64 lba, u32 count, const void *src);
+
+static bool claim_store(void)
+{
+    static u8 sector[BLK_SECTOR_SIZE];
+    static u8 probe[64 * BLK_SECTOR_SIZE];
+    u32 port = store_d.index;
+
+    if (!disk_read(&store_d, 0, 1, sector)) return false;
+    if (memcmp(sector, STORE_MARK, sizeof(STORE_MARK) - 1) == 0) {
+        kprintf("blk:  the disk on port %u carries our mark; it is the store\n", port);
+        return true;
+    }
+
+    for (u64 lba = 0; lba < 1024; lba += 64) {
+        if (!disk_read(&store_d, lba, 64, probe)) return false;
+        for (u32 i = 0; i < sizeof(probe); i++) {
+            if (!probe[i]) continue;
+            kprintf("blk:  the disk on port %u carries something that is not ours; "
+                    "nothing will be written to it\n", port);
+            return false;
+        }
+    }
+
+    memset(sector, 0, BLK_SECTOR_SIZE);
+    memcpy(sector, STORE_MARK, sizeof(STORE_MARK) - 1);
+    if (!disk_write(&store_d, 0, 1, sector)) return false;
+    kprintf("blk:  a blank disk on port %u; it is the store now and carries our mark\n", port);
+    return true;
+}
+
 bool blk_init(void)
 {
     const pci_device *dev = pci_find(0x01, 0x06, 0x01);   /* SATA, AHCI */
@@ -335,7 +381,7 @@ bool blk_init(void)
         kprintf("blk:  the disk did not answer IDENTIFY\n");
         return false;
     }
-    present = true;
+    present = claim_store();
 
     if (aux_at >= 0) {
         if (disk_up(&aux_d, &hba->ports[aux_at], (u32)aux_at, false))

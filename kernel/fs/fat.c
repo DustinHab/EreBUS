@@ -624,6 +624,7 @@ u32 fat_take_in(object *into)
     if (ctx.skipped)
         kprintf("fat:  %u files were too big to carry\n", ctx.skipped);
     kprintf("fat:  took %u files in\n", ctx.taken);
+    if (ctx.taken) obj_touch(into);        /* the graph changed; the next quiet moment writes it */
     return ctx.taken;
 }
 
