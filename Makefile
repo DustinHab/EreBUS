@@ -149,7 +149,14 @@ KERN_S   := kernel/arch/x86_64/start.S \
             kernel/user/fetch.S
 
 KERN_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(KERN_C)) \
-            $(patsubst %.S,$(BUILD)/%.o,$(KERN_S))
+            $(patsubst %.S,$(BUILD)/%.o,$(KERN_S)) \
+            $(BUILD)/version.o
+
+# What this build calls itself: the nearest tag, how far past it, and
+# the commit -- with "-dirty" when the tree has changes not committed.
+# Every kernel had said "0.1" until now, which made two builds a
+# fortnight apart indistinguishable on a screen.
+VERSION ?= $(shell git -C $(ROOT) describe --tags --always --dirty 2>/dev/null || echo unnumbered)
 
 
 FONT   := kernel/gfx/font8x16.h
@@ -190,6 +197,21 @@ $(BUILD)/%.o: %.S
 	@mkdir -p $(dir $@)
 	@echo "  AS      $<"
 	@$(CC) $(KERN_FLAGS) -c $< -o $@
+
+# The version, as one small file made on every run and rewritten only
+# when it would say something new -- so a commit changes what the
+# kernel calls itself without touching any other object, and a build
+# that changed nothing relinks nothing.
+$(BUILD)/version.c: FORCE
+	@mkdir -p $(BUILD)
+	@v='const char erebus_version[] = "$(VERSION)";'; \
+	 if [ ! -f $@ ] || [ "$$(cat $@)" != "$$v" ]; then echo "$$v" > $@; fi
+
+$(BUILD)/version.o: $(BUILD)/version.c
+	@echo "  CC      version $(VERSION)"
+	@$(CC) $(KERN_FLAGS) -c $< -o $@
+
+FORCE:
 
 # The C files that run in ring 3. They live in the kernel image but
 # are mapped read-only into every process, so they may not lean on the

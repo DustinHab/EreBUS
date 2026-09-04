@@ -50,7 +50,7 @@
 #include <eb/vmm.h>
 #include <common/bootinfo.h>
 
-#define EREBUS_VERSION "0.1"
+#include <eb/version.h>
 
 /* The graph a fresh system starts with.
  *
@@ -1168,7 +1168,7 @@ void kmain(eb_boot_info *bi)
     if (clock_ok) kout_set_clock(time_ns);
     time_read_rtc();
 
-    kprintf("\n\nErebus %s (x86_64)\n", EREBUS_VERSION);
+    kprintf("\n\nErebus %s (x86_64)\n", erebus_version);
     kprintf("boot: handover verified, version %u\n", bi->version);
     if (bi->version >= 3 && bi->loader_file && bi->kernel_file) {
         loader_file = (const u8 *)phys_to_virt(bi->loader_file);

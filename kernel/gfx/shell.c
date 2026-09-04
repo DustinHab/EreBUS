@@ -3230,9 +3230,15 @@ static void draw_all(void)
         }
     }
 
-    /* Far right, quietly: which generation is on the disk, and how long
-     * the system has been up. Not a status bar -- two facts. */
-    at = put(line, 0, "generation ");
+    /* Far right, quietly: which kernel this is, which generation is on
+     * the disk, and how long the system has been up. Not a status bar
+     * -- three facts. The first is there because a machine that keeps
+     * its graph looks the same whichever kernel it starts with, and
+     * somebody who has just booted a stick deserves to know whether
+     * they are looking at it. */
+    extern const char erebus_version[];
+    at = put(line, 0, erebus_version);
+    at = put(line, at, "   generation ");
     at = put_dec(line, at, snap_generation());
     at = put(line, at, "   up ");
     u64 ups = time_ns() / 1000000000ULL;

@@ -43,6 +43,10 @@ bool fat_boot_present(void);
  * running one as kernel.old. False with a reason in why. */
 bool fat_install_kernel(const u8 *elf, u64 len, char *why, u32 max);
 
+/* The loader, replaced under the name the firmware reads. No stepping
+ * aside here: the firmware reads exactly one name. */
+bool fat_install_loader(const u8 *pe, u64 len, char *why, u32 max);
+
 /* The kernel has come up: the loader's count of starts goes back to
  * zero. Answers what the count was, or 0 when there was none. */
 u32 fat_boot_settle(void);

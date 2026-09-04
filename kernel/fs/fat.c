@@ -14,6 +14,7 @@
  */
 #include <eb/fat.h>
 #include <eb/blk.h>
+#include <eb/gpt.h>
 #include <eb/cap.h>
 #include <eb/journal.h>
 #include <eb/string.h>
@@ -112,6 +113,24 @@ static bool mount_on(fat_vol *v, i32 disk, const char *what)
     v->disk = (u32)disk;
 
     if (vol_open(v, 0)) goto up;
+
+    /* A disk with a partition table: the firmware's own partition,
+     * wherever the table puts it. A disk this system settled on has
+     * one, and it is not at the front. */
+    {
+        static gpt_table t;
+        if (gpt_read((u32)disk, &t)) {
+            for (u32 i = 0; i < GPT_ENTRIES; i++) {
+                u8 type[16];
+                u64 first, last;
+                if (!gpt_entry(&t, i, type, &first, &last)) continue;
+                if (memcmp(type, GPT_TYPE_EFI, 16) != 0) continue;
+                if (first < 0xFFFFFFFFULL && vol_open(v, (u32)first)) goto up;
+            }
+        }
+    }
+
+    /* The old-style table: its first partition. */
     if (vread(v, 0, 1, sec) && sec[510] == 0x55 && sec[511] == 0xAA) {
         u32 pstart = (u32)sec[454] | ((u32)sec[455] << 8) |
                      ((u32)sec[456] << 16) | ((u32)sec[457] << 24);
@@ -129,9 +148,19 @@ up:
 bool fat_mount(void)        { return mount_on(&xchg, blk_aux_disk(), "exchange disk"); }
 bool fat_present(void)      { return xchg.ready; }
 
+/* The boot volume that counts is the one on the disk carrying the
+ * store this machine runs with: that is the disk it will start from
+ * next time, and the one 'install' should write. A machine running
+ * from a stick beside a settled disk has its store on that disk and
+ * nothing at the first port; a machine settled at the first port has
+ * both there. Only with no store at all is the first port the guess. */
 bool fat_boot_present(void)
 {
-    if (!bootv.ready && blk_boot_disk() >= 0) mount_on(&bootv, blk_boot_disk(), "boot disk");
+    if (!bootv.ready) {
+        i32 d = blk_store_disk();
+        if (d < 0) d = blk_boot_disk();
+        if (d >= 0) mount_on(&bootv, d, "boot disk");
+    }
     return bootv.ready;
 }
 
@@ -771,6 +800,48 @@ bool fat_install_kernel(const u8 *elf, u64 len, char *why, u32 max)
         return false;
     }
     put_count(dir, 0);
+    fat_flush(&bootv);
+    return true;
+}
+
+/* The loader, replaced under the name the firmware reads. There is no
+ * stepping aside for this one: the firmware reads exactly one name,
+ * and a loader is small and changes rarely. It goes in whole before
+ * the old entry is removed, so a failure part way leaves the new file
+ * as a stranger beside a working old one rather than nothing. */
+bool fat_install_loader(const u8 *pe, u64 len, char *why, u32 max)
+{
+    if (!pe || len < 64 || pe[0] != 'M' || pe[1] != 'Z') {
+        say_why(why, max, "that is not a loader: it does not begin the way the firmware's programs do");
+        return false;
+    }
+    if (len > WRITE_MAX) { say_why(why, max, "the loader is too large to lay down"); return false; }
+    if (!fat_boot_present()) { say_why(why, max, "the boot disk is not to be found"); return false; }
+
+    dir_entry e;
+    if (!dir_find(&bootv, bootv.root_cluster, "EFI", &e) || !(e.attr & 0x10) || e.cluster < 2) {
+        say_why(why, max, "the boot disk has no EFI folder");
+        return false;
+    }
+    u32 efi = e.cluster;
+    if (!dir_find(&bootv, efi, "BOOT", &e) || !(e.attr & 0x10) || e.cluster < 2) {
+        say_why(why, max, "the boot disk has no EFI\\BOOT folder");
+        return false;
+    }
+    u32 boot = e.cluster;
+
+    u8 short83[11];
+    if (!dir_delete(&bootv, boot, "BOOTX64.NEW")) { say_why(why, max, "an old BOOTX64.NEW would not go"); return false; }
+    make_short("BOOTX64.NEW", short83);
+    if (!write_file_in(&bootv, boot, short83, pe, (u32)len)) {
+        say_why(why, max, "the loader could not be written; the boot disk is unchanged");
+        return false;
+    }
+    if (!dir_delete(&bootv, boot, "BOOTX64.EFI")) { say_why(why, max, "the old loader would not go; BOOTX64.NEW lies beside it"); return false; }
+    if (!dir_rename(&bootv, boot, "BOOTX64.NEW", "BOOTX64.EFI")) {
+        say_why(why, max, "the new loader could not take the name; BOOTX64.NEW lies there still");
+        return false;
+    }
     fat_flush(&bootv);
     return true;
 }

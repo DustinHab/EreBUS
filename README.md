@@ -950,6 +950,21 @@ built binary.
   stick beside a disk that already carries a partition table and data,
   answers the question the way a person would, and boots the disk
   alone afterwards.
+
+  A machine already settled takes a newer system without being
+  emptied. Booting a newer stick beside the disk brings up the new
+  kernel with the disk's store -- the same graph, the same desktop, and
+  nothing on the screen to say anything changed, which is why the
+  kernel now names itself at the top of the boot log and at the far
+  right of the desktop, from the nearest tag and commit. `install this
+  kernel` then puts the loader and kernel the machine started with onto
+  the boot disk: the kernel it had steps aside as kernel.old, the
+  loader is replaced under the one name the firmware reads, and the
+  store is not touched. `settle` could not do this -- it empties the
+  disk, and refuses the disk whose store is in use. tools/renewtest.sh
+  settles one build onto a disk, boots a second that calls itself
+  "renewed" from a stick beside it, installs, and boots the disk alone:
+  it must call itself renewed and still find the graph.
 * Certificate verification — turning the seal from privacy into
   identity: RSA/ECDSA signatures and a root store
 * Work at scale, further — several desk jobs advancing at once, a

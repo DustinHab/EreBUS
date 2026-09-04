@@ -33,6 +33,7 @@
 #include <eb/lang.h>
 #include <eb/fat.h>
 #include <eb/settle.h>
+#include <eb/standard.h>
 #include <eb/wifi.h>
 #include <eb/net.h>
 #include <eb/fmt.h>
@@ -1114,9 +1115,43 @@ static void cmd_take_in(term_session *s, const char *what)
 /* install <name>: the kernel in those bytes becomes the one the next
  * start runs; the running one stays beside it as kernel.old, and the
  * loader comes back to it if the new one does not come up twice. */
+static bool words_are(const char *s, const char *w)
+{
+    u32 i = 0;
+    while (s[i] && w[i] && s[i] == w[i]) i++;
+    return s[i] == 0 && w[i] == 0;
+}
+
 static void cmd_install(term_session *s, const char *what)
 {
-    if (!what[0]) { t_say(s, "install which kernel?"); return; }
+    if (!what[0]) { t_say(s, "install which kernel?  a built one by name, or 'this kernel' for the one running."); return; }
+
+    /* 'install this kernel': the loader and kernel this machine started
+     * with -- from a stick, most often -- go onto the boot disk. That is
+     * how an installed machine gets a newer system without being
+     * emptied: boot the new stick, and say so. The store is not
+     * touched; what was made stays made. */
+    if (words_are(what, "this kernel") || words_are(what, "this system")) {
+        const u8 *l, *k;
+        u64 ls, ks;
+        if (!system_boot_files(&l, &ls, &k, &ks)) {
+            t_say(s, "the loader did not hand its files over at start, so there is nothing to install from.");
+            return;
+        }
+        char why[120];
+        if (!fat_install_kernel(k, ks, why, sizeof(why))) { t_say(s, why); return; }
+        if (!fat_install_loader(l, ls, why, sizeof(why))) {
+            t_say(s, why);
+            t_say(s, "the kernel went on all the same; the next start runs it with the old loader.");
+        }
+        kprintf("boot: the running loader and kernel (%llu and %llu bytes) are installed on the boot disk\n", ls, ks);
+        journal_says("system", "the running system is installed on the boot disk for the next start");
+        t_say(s, "installed.  the boot disk now starts with this loader and this kernel;");
+        t_say(s, "the kernel it had stays beside it as kernel.old, and the store is as it was.");
+        t_say(s, "take the stick out and 'restart'.");
+        return;
+    }
+
     spot sp;
     if (!resolve(s, what, &sp)) return;
     if (obj_type(sp.o) != TYPE_BYTES) { t_say(s, "a kernel is bytes: the kernel.elf a build makes."); return; }
@@ -1553,6 +1588,8 @@ static void cmd_help(term_session *s)
     t_say(s, "  take in <list>   the exchange disk's files, into the list");
     t_say(s, "  write out <list> the list's texts and bytes, onto the exchange disk");
     t_say(s, "  install <name>   make that kernel the one the next start runs");
+    t_say(s, "  install this kernel   put the loader and kernel this machine started with");
+    t_say(s, "                   onto the boot disk; the store stays as it is");
     t_say(s, "  restart          start the machine again");
     t_say(s, "  disks            the disks on the bus, and what is on them");
     t_say(s, "  settle on disk N                     make that disk this machine's: boot volume and store");
