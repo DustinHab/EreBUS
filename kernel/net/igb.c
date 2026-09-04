@@ -213,15 +213,28 @@ static void wait_ms(u64 ms)
 
 static u32 phy_at = MDIC_PHY1;       /* the second chip's address, in place */
 
+/* The I210 and I211 put the wire's chip to sleep when nothing is
+ * plugged in, and say so in a register of their own. A chip asleep
+ * does not answer on the wire between it and the card, and the first
+ * boot on a real board with no cable stopped exactly there: asking a
+ * sleeping chip, and waiting. Where the card says the chip may sleep
+ * and there is no link, it is asleep, and is left alone; where the
+ * card is being taken, it is woken first, the way its own driver
+ * elsewhere does before the first word to it. */
+#define R_PHPM        0x00E14
+#define PHPM_GO_LINK_D (1u << 5)      /* sleeps when no partner is found */
+
 static bool mdic_wait(u32 *out)
 {
-    for (u32 i = 0; i < 2000; i++) {
+    /* Bounded by the clock, not by a count of reads: a read across two
+     * bridges takes what it takes, and a count assumes it takes little. */
+    u64 since = time_ns();
+    for (;;) {
         u32 v = rr(R_MDIC);
         if (v & MDIC_ERROR) return false;
         if (v & MDIC_READY) { if (out) *out = v; return true; }
-        for (volatile u32 s = 0; s < 200; s++) { }
+        if (time_ns() - since > 20000000ULL) return false;     /* 20 ms */
     }
-    return false;
 }
 
 static u16 phy_read(u32 reg)
@@ -273,9 +286,20 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
             u32 addr = (rr(R_MDICNFG) >> 21) & 0x1Fu;
             if (addr) phy_at = addr << 21;
         }
+        u32 phpm = k->old_rings ? 0 : rr(R_PHPM);
+        if (phpm & PHPM_GO_LINK_D) {
+            /* No link, and the card says its wire chip sleeps when there
+             * is none: it is asleep, and asking it now is asking a wall.
+             * Nothing is plugged in here; pass over without a word. */
+            kprintf("net:  %s at %02x:%02x.%u: no link, and its wire chip is asleep; "
+                    "passed over for now\n", k->name, dev->bus, dev->device, dev->function);
+            return false;
+        }
         kprintf("net:  %s at %02x:%02x.%u: no link; asking the wire's chip at address %u\n",
                 k->name, dev->bus, dev->device, dev->function, phy_at >> 21);
         u16 pc = phy_read(PHY_CTRL);
+        kprintf("net:  %s: the chip %s\n", k->name,
+                pc == 0xFFFF ? "did not answer" : "answered; asked to agree a speed");
         if (pc != 0xFFFF) phy_write(PHY_CTRL, (u16)(pc | PHY_AUTONEG | PHY_RESTART));
         for (u32 i = 0; i < 30 && !(rr(R_STATUS) & STATUS_LU); i++) wait_ms(50);
         if (!(rr(R_STATUS) & STATUS_LU)) {
@@ -338,6 +362,18 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
     /* Ask the two ends of the cable to agree on a speed. Without this
      * the link stays down however long anyone waits, and a card with a
      * link down keeps its rings and throws every frame away. */
+    /* This card is being taken, so its wire chip is woken before the
+     * first word to it: the sleep-when-alone bit comes off, and the
+     * chip is given a moment to come round. */
+    if (!k->old_rings) {
+        u32 phpm = rr(R_PHPM);
+        if (phpm & PHPM_GO_LINK_D) {
+            wr(R_PHPM, phpm & ~PHPM_GO_LINK_D);
+            wait_ms(10);
+            kprintf("net:  %s: its wire chip was asleep; woken\n", k->name);
+        }
+    }
+
     u16 pc = phy_read(PHY_CTRL);
     if (pc != 0xFFFF) {
         phy_write(PHY_CTRL, (u16)(pc | PHY_AUTONEG | PHY_RESTART));
