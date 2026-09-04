@@ -3,6 +3,7 @@
  */
 #include <eb/shell.h>
 #include <eb/fb.h>
+#include <eb/version.h>
 #include <eb/ps2.h>
 #include <eb/thread.h>
 #include <eb/snapshot.h>
@@ -3236,7 +3237,6 @@ static void draw_all(void)
      * its graph looks the same whichever kernel it starts with, and
      * somebody who has just booted a stick deserves to know whether
      * they are looking at it. */
-    extern const char erebus_version[];
     at = put(line, 0, erebus_version);
     at = put(line, at, "   generation ");
     at = put_dec(line, at, snap_generation());

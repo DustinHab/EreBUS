@@ -157,9 +157,13 @@ bool fat_present(void)      { return xchg.ready; }
 bool fat_boot_present(void)
 {
     if (!bootv.ready) {
+        /* The store's disk first; where that carries no boot volume --
+         * a store that is a bare disk beside a boot disk, as the test
+         * rig has it -- the first port after all. */
         i32 d = blk_store_disk();
-        if (d < 0) d = blk_boot_disk();
         if (d >= 0) mount_on(&bootv, d, "boot disk");
+        if (!bootv.ready && blk_boot_disk() >= 0 && blk_boot_disk() != d)
+            mount_on(&bootv, blk_boot_disk(), "boot disk");
     }
     return bootv.ready;
 }

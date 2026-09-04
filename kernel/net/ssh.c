@@ -746,6 +746,23 @@ static void run_line(void)
 static void on_keys(const u8 *d, u32 n)
 {
     for (u32 i = 0; i < n; i++) {
+        /* Bytes owed to a text: they go in as they are, and the window
+         * they came through is opened again by as much, or the other
+         * side stops sending at a megabyte and waits for a word that
+         * would never come. */
+        if (term_taking(ssh.ts)) {
+            u32 used = term_take_bytes(ssh.ts, d + i, n - i);
+            if (used) {
+                pl = 0;
+                pw_byte(MSG_CHANNEL_WINDOW);
+                pw_u32(ssh.rid);
+                pw_u32(used);
+                send_packet();
+                if (!term_taking(ssh.ts)) flush_transcript();
+                i += used - 1;
+                continue;
+            }
+        }
         u8 c = d[i];
         if (ssh.esc) {
             if (c >= 0x40 && c <= 0x7E && c != '[') ssh.esc = 0;

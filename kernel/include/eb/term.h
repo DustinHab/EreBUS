@@ -61,6 +61,13 @@ bool term_link_list(object *list, const char *name, term_say_fn say, void *ctx);
 bool term_build_start(object *list, const char *name);
 bool term_building(void);
 bool term_secret(term_session *s);        /* the line being gathered is a passphrase: show dots */
+
+/* Bytes coming in whole, after 'receive <n> bytes as <name>': while
+ * term_taking says so, whatever arrives on the session is contents,
+ * not words. term_take_bytes takes as many as are still owed and
+ * answers how many it took; the rest are words again. */
+bool term_taking(term_session *s);
+u32  term_take_bytes(term_session *s, const u8 *d, u32 n);
 void term_key(term_session *s, char c);
 void term_rub(term_session *s);
 void term_clear_line(term_session *s);

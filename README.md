@@ -965,6 +965,21 @@ built binary.
   settles one build onto a disk, boots a second that calls itself
   "renewed" from a stick beside it, installs, and boots the disk alone:
   it must call itself renewed and still find the graph.
+
+  And the loop closes. A machine with no exchange disk had no way to be
+  handed a text except a line at a time; `receive <n> bytes as <name>`
+  makes a text of that size where the session stands and takes the
+  next n bytes of the session as its contents, nothing inside them
+  looked at, the door opening its window again by as much as it took.
+  tools/mkupload.sh turns the source tree into one such stream -- every
+  source and header under its own name, and a version text made up on
+  the spot -- and a shell session through the door carries it in.
+  `build kernel` then compiles all of it with the machine's own tools,
+  `install kernel.elf` puts the result on the boot disk beside the old
+  one, and `restart` boots it. tools/selfkernel.sh does exactly that
+  against the emulator under KVM (`sh build/kvm.sh tools/selfkernel.sh`):
+  the kernel that comes up says it was built on the machine itself.
+  Eighty-two objects in about thirty seconds on a real processor.
 * Certificate verification — turning the seal from privacy into
   identity: RSA/ECDSA signatures and a root store
 * Work at scale, further — several desk jobs advancing at once, a

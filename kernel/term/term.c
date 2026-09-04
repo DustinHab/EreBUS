@@ -67,6 +67,13 @@ struct term_session {
      * not kept as the last line. */
     bool secret;
     char secret_for[33];
+
+    /* Bytes coming in whole: 'receive <n> bytes as <name>' makes the
+     * text and then the next n bytes of this session are its contents,
+     * not words. The door feeds them straight in. */
+    object *take_o;
+    u64     take_left, take_size;
+    char    take_name[NAME_SHOWN];
 };
 
 static term_session sessions[TERM_SESSIONS];
@@ -172,6 +179,9 @@ term_session *term_open(void)
 void term_close(term_session *s)
 {
     if (!s || s == &sessions[0] || !s->used) return;
+    /* A visitor who leaves with bytes still owed leaves a text half
+     * filled; the text stays where it was laid, the hold on it goes. */
+    if (s->take_o) { obj_release(s->take_o); s->take_o = NULL; s->take_left = 0; }
     while (s->depth > 0) {
         s->depth--;
         obj_release(s->node[s->depth]);
@@ -570,6 +580,82 @@ static void cmd_make(term_session *s, const char *what)
     t_puts(s, "  lies here now, slot ");
     t_dec(s, (u64)at);
     t_end(s);
+}
+
+/* receive <n> bytes as <name>: a text made here, and then the next n
+ * bytes of this session are its contents rather than words.
+ *
+ * This is how a file comes in through the door. A machine with no
+ * exchange disk in it -- one whose disks are all its own or somebody
+ * else's -- had no way to be handed a text except a line at a time,
+ * and a kernel's sources are forty thousand lines. The count comes
+ * first so the text can be made the right size and so the session
+ * knows exactly when words begin again; nothing inside the bytes is
+ * looked at, whatever it happens to say. */
+#define RECEIVE_MAX (8u << 20)
+
+static void cmd_receive(term_session *s, const char *what)
+{
+    const char *p = what;
+    while (*p == ' ') p++;
+    if (*p < '0' || *p > '9') { t_say(s, "receive <n> bytes as <name>: the count first."); return; }
+    u64 n = 0;
+    while (*p >= '0' && *p <= '9') n = n * 10 + (u64)(*p++ - '0');
+    while (*p == ' ') p++;
+    if (!(p[0] == 'b' && p[1] == 'y' && p[2] == 't' && p[3] == 'e' && p[4] == 's')) {
+        t_say(s, "receive <n> bytes as <name>: say 'bytes' after the count."); return;
+    }
+    p += 5;
+    while (*p == ' ') p++;
+    if (!(p[0] == 'a' && p[1] == 's' && p[2] == ' ')) { t_say(s, "receive <n> bytes as <name>: 'as' and then the name."); return; }
+    p += 3;
+    while (*p == ' ') p++;
+    if (!*p) { t_say(s, "name it."); return; }
+    if (n == 0 || n > RECEIVE_MAX) { t_say(s, "between one byte and eight million, please."); return; }
+    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "you may not lay things in here."); return; }
+    if (s->take_o) { t_say(s, "bytes are still coming for the last one."); return; }
+
+    object *made = obj_create(TYPE_TEXT, n + 1, 0);
+    if (!made) { t_say(s, "nothing came of it; memory is short."); return; }
+    memset(obj_data(made), 0, n + 1);
+    i64 at = lay_here(s, made, CAP_READ | CAP_WRITE | CAP_GRANT, p);
+    if (at < 0) { obj_release(made); t_say(s, "no room for another reference here."); return; }
+
+    s->take_o = made;                 /* held until the last byte is in */
+    s->take_left = s->take_size = n;
+    u32 k = 0;
+    while (p[k] && k < NAME_SHOWN - 1) { s->take_name[k] = p[k]; k++; }
+    s->take_name[k] = 0;
+
+    t_puts(s, "send ");
+    t_dec(s, n);
+    t_say(s, " bytes now.");
+}
+
+bool term_taking(term_session *s)
+{
+    return s && s->used && s->take_o != NULL;
+}
+
+u32 term_take_bytes(term_session *s, const u8 *d, u32 n)
+{
+    if (!s || !s->take_o || !n) return 0;
+    u64 done = s->take_size - s->take_left;
+    u32 take = (u64)n < s->take_left ? n : (u32)s->take_left;
+    u8 *dst = (u8 *)obj_data(s->take_o);
+    memcpy(dst + done, d, take);
+    s->take_left -= take;
+    if (s->take_left == 0) {
+        dst[s->take_size] = 0;
+        obj_touch(s->take_o);
+        t_puts(s, s->take_name);
+        t_puts(s, "  lies here now, ");
+        t_dec(s, s->take_size);
+        t_say(s, " bytes.");
+        obj_release(s->take_o);
+        s->take_o = NULL;
+    }
+    return take;
 }
 
 static void cmd_copy(term_session *s, const char *what)
@@ -1601,6 +1687,8 @@ static void cmd_help(term_session *s)
     t_say(s, "  leave            leave the wireless network");
     t_say(s, "  wifi             the station: joined where, how, and its address");
     t_say(s, "  address          which card carries the traffic, and the address it holds");
+    t_say(s, "  receive <n> bytes as <name>   a text made here, filled with the next n bytes");
+    t_say(s, "                   of this session as they are; how a file comes in through the door");
     t_say(s, "  give <name> to <program>   hand it a reference");
     t_say(s, "  end <name>       end a running program");
     t_end(s);
@@ -1796,6 +1884,7 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "leave", NULL))    cmd_leave(s);
     else if (word_starts(line, "wifi", NULL))     cmd_wifi(s);
     else if (word_starts(line, "address", NULL))  cmd_address(s);
+    else if (word_starts(line, "receive", &rest))  cmd_receive(s, rest);
     else if (word_starts(line, "write", &rest))   cmd_write(s, rest);
     else if (word_starts(line, "make", &rest))    cmd_make(s, rest);
     else if (word_starts(line, "copy", &rest))    cmd_copy(s, rest);
