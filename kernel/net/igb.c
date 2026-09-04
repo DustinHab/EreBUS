@@ -69,8 +69,12 @@
 #define TX_OLD     0x03800
 
 #define CTRL_SLU   (1u << 6)
+#define CTRL_GIO_MD (1u << 2)         /* finish what is on the bus, start nothing new */
 #define CTRL_RST   (1u << 26)
 #define STATUS_LU  (1u << 1)
+#define STATUS_GIO_ME (1u << 19)      /* still a master on the bus */
+#define R_EECD     0x00010
+#define EECD_AUTO_RD (1u << 9)        /* read back in from its own memory after a reset */
 
 #define RCTL_EN    (1u << 1)
 #define RCTL_BAM   (1u << 15)
@@ -317,10 +321,29 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
     wr(R_TCTL, 0);
     wait_ms(10);
 
+    /* Before the reset, the card is asked to finish what it has on the
+     * bus and start nothing new, and is waited for. The firmware left
+     * it running -- its rings, its management traffic -- and a reset
+     * with a transfer still in flight is a thing a bridge between the
+     * card and the processor may never recover from: every read after
+     * it waits for a completion that does not come, and the machine
+     * stands still at this line. That is what the first boot with a
+     * cable in this socket did. */
+    wr(R_CTRL, rr(R_CTRL) | CTRL_GIO_MD);
+    bool quiet = false;
+    for (u32 i = 0; i < 100 && !quiet; i++) {
+        if (!(rr(R_STATUS) & STATUS_GIO_ME)) quiet = true;
+        else wait_ms(1);
+    }
+    kprintf("net:  %s: %s; resetting\n", k->name,
+            quiet ? "its bus traffic has stopped" : "its bus traffic would not stop");
+
     wr(R_CTRL, rr(R_CTRL) | CTRL_RST);
     wait_ms(10);
     for (u32 i = 0; i < 100 && (rr(R_CTRL) & CTRL_RST); i++) wait_ms(1);
-    wait_ms(20);                      /* the card reloads itself from its own memory */
+    /* and until it has read itself back in from its own memory */
+    for (u32 i = 0; i < 100 && !(rr(R_EECD) & EECD_AUTO_RD); i++) wait_ms(1);
+    wait_ms(20);
     if (rr(R_STATUS) == 0xFFFFFFFFu) {
         kprintf("net:  %s: did not come back from its reset\n", k->name);
         return false;

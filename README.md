@@ -1099,6 +1099,19 @@ and leave the decision in four registers. Where the firmware pointed
 them at a controller the machine no longer has, those sockets are dead.
 The driver now claims everything the mask says it may claim.
 
+**A card is not reset while it is still on the bus.** The firmware
+leaves a network card running -- rings of its own, management traffic
+of its own -- and a reset with a transfer still in flight is a thing a
+bridge between the card and the processor may never recover from:
+every read after it waits for a completion that does not come, and the
+processor waits with it. The first boot with a cable in the I210's
+socket stood at exactly that line. A card is now asked to finish what
+it has on the bus and start nothing new, and is waited for, before the
+reset; and after the reset it is waited for again until it has read
+itself back in from its own memory. Its wire chip, which the I210 puts
+to sleep when nothing is plugged in, is left alone when the card is
+being passed over and woken before the first word when it is taken.
+
 ## A note on real processors
 
 QEMU's emulator is forgiving in places a processor is not. The first

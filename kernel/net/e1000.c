@@ -59,6 +59,8 @@
 #define CTRL_SLU     (1u << 6)      /* set link up */
 #define CTRL_RST     (1u << 26)
 #define STATUS_LU    (1u << 1)      /* the wire has somebody at the other end */
+#define CTRL_GIO_MD  (1u << 2)      /* finish what is on the bus, start nothing new */
+#define STATUS_GIO_ME (1u << 19)    /* still a master on the bus */
 #define RCTL_EN      (1u << 1)
 #define RCTL_BAM     (1u << 15)     /* take broadcasts */
 #define RCTL_SECRC   (1u << 26)     /* strip the crc */
@@ -272,6 +274,15 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
     wait_ms(10);
 
     if (k->kind != CHIP) {
+        /* The PCI Express parts are asked to finish what they have on
+         * the bus before the reset, and waited for; a reset with a
+         * transfer in flight is a thing a bridge on the way may never
+         * recover from. The old PCI parts have no such bit. */
+        if (k->kind == PCIE) {
+            wr(R_CTRL, rr(R_CTRL) | CTRL_GIO_MD);
+            for (u32 i = 0; i < 100 && (rr(R_STATUS) & STATUS_GIO_ME); i++) wait_ms(1);
+        }
+        kprintf("net:  %s: resetting\n", k->name);
         wr(R_CTRL, rr(R_CTRL) | CTRL_RST);
         wait_ms(10);
         for (u32 i = 0; i < 100 && (rr(R_CTRL) & CTRL_RST); i++) wait_ms(1);
