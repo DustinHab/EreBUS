@@ -1600,6 +1600,7 @@ static void cmd_help(term_session *s)
     t_say(s, "  join <name> [with <passphrase>]   join one; the passphrase is asked for if not given");
     t_say(s, "  leave            leave the wireless network");
     t_say(s, "  wifi             the station: joined where, how, and its address");
+    t_say(s, "  address          which card carries the traffic, and the address it holds");
     t_say(s, "  give <name> to <program>   hand it a reference");
     t_say(s, "  end <name>       end a running program");
     t_end(s);
@@ -1714,6 +1715,40 @@ static void cmd_wifi(term_session *s)
     }
 }
 
+/* address: which card carries the traffic, its name on the wire, and
+ * the address it holds. The boot log says all of this once and then
+ * the desktop covers it, and a person who wants to reach the machine
+ * from elsewhere needs the number without restarting to read it. */
+static void cmd_address(term_session *s)
+{
+    if (!nic_up()) { t_say(s, "no card carries traffic; the wire goes nowhere."); return; }
+    const u8 *m = nic_mac();
+    char line[96];
+    u32 at = 0;
+    const char *p = nic_name();
+    while (*p && at < 40) line[at++] = *p++;
+    static const char hex[] = "0123456789abcdef";
+    const char *q = " on the wire as ";
+    while (*q) line[at++] = *q++;
+    for (u32 i = 0; i < 6; i++) {
+        if (i) line[at++] = ':';
+        line[at++] = hex[m[i] >> 4];
+        line[at++] = hex[m[i] & 15];
+    }
+    line[at] = 0;
+    t_say(s, line);
+
+    u8 ip[4];
+    if (net_own_address(ip)) {
+        t_puts(s, "address ");
+        put_ip(s, ip);
+        t_end(s);
+    } else {
+        t_say(s, "no address yet; nobody has leased one and none was claimed.");
+    }
+    if (wifi_up()) t_say(s, wifi_state(line, sizeof(line)));
+}
+
 bool term_secret(term_session *s) { return s && s->secret; }
 
 void term_line(term_session *s, const char *line)
@@ -1760,6 +1795,7 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "join", &rest))    cmd_join(s, rest);
     else if (word_starts(line, "leave", NULL))    cmd_leave(s);
     else if (word_starts(line, "wifi", NULL))     cmd_wifi(s);
+    else if (word_starts(line, "address", NULL))  cmd_address(s);
     else if (word_starts(line, "write", &rest))   cmd_write(s, rest);
     else if (word_starts(line, "make", &rest))    cmd_make(s, rest);
     else if (word_starts(line, "copy", &rest))    cmd_copy(s, rest);
