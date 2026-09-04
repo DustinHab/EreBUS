@@ -22,9 +22,9 @@ user_agent:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6E20646C6F682069, %rdx
-    movabsq $0x7920676E6968746F, %r10
-    movabsq $0x2020202020207465, %r8
+    movabsq $0x6261706163206F6E, %rdx   /* "no capab" */
+    movabsq $0x6579207974696C69, %r10   /* "ility ye" */
+    movabsq $0x2020202020202074, %r8    /* "t       " */
     syscall
 
 .Lwait:
@@ -90,7 +90,7 @@ user_agent:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x20203A6565732069, %rdx
+    movabsq $0x20203A7364616572, %rdx   /* "reads:  " */
     movq    %r15, %r10
     movq    %rbx, %r8
     syscall
@@ -110,9 +110,9 @@ user_agent:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x2065746F72772069, %rdx    /* "i wrote " */
-    movabsq $0x207469206F746E69, %r10    /* "into it " */
-    movabsq $0x2020202020202020, %r8
+    movabsq $0x6B6F206574697277, %rdx   /* "write ok" */
+    movabsq $0x2020202020202020, %r10   /* "        " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 
@@ -120,9 +120,9 @@ user_agent:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6F6E2079616D2069, %rdx    /* "i may no" */
-    movabsq $0x65676E6168632074, %r10    /* "t change" */
-    movabsq $0x2020207461687420, %r8     /* " that   " */
+    movabsq $0x6572206574697277, %rdx   /* "write re" */
+    movabsq $0x2020206465737566, %r10   /* "fused   " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 
@@ -130,9 +130,9 @@ user_agent:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6F6E2079616D2069, %rdx    /* "i may no" */
-    movabsq $0x72206E6576652074, %r10    /* "t even r" */
-    movabsq $0x2020746920646165, %r8     /* "ead it  " */
+    movabsq $0x6665722064616572, %rdx   /* "read ref" */
+    movabsq $0x2020202064657375, %r10   /* "used    " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 

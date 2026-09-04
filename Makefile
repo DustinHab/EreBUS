@@ -395,30 +395,9 @@ trace-input: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 	@echo "vectors seen after the keys were sent:"
 	@grep -oE 'v=[0-9a-f]+' $(BUILD)/qemu.log | sort | uniq -c | sort -rn | head
 
-# The point of the whole milestone, in one target.
-#
-# Boots with an empty store, types into a window, waits for the graph to
-# settle and be written; then boots a second time and photographs what
-# comes back. Nothing was saved by anyone, and nothing was opened.
-persist: $(IMAGE) $(BUILD)/test-vars.fd
-	@rm -f $(STORE)
-	@$(MAKE) --no-print-directory $(STORE)
-	@echo "  RUN 1   typing, then leaving it alone"
-	@{ sleep 9; \
-	   for k in right i t spc j u s t spc s t a y s; do \
-	     echo "sendkey $$k"; sleep 0.2; done; \
-	   sleep 3; echo quit; } | \
-	  $(QEMU) -display none -monitor stdio \
-	          -serial file:$(BUILD)/serial-1.log >/dev/null 2>&1 || true
-	@echo "  RUN 2   booting again, nothing opened"
-	@{ sleep 10; echo "screendump $(BUILD)/screen.ppm"; sleep 2; echo quit; } | \
-	  $(QEMU) -display none -monitor stdio \
-	          -serial file:$(BUILD)/serial-2.log >/dev/null 2>&1 || true
-	@$(PY) tools/ppm2png.py $(BUILD)/screen.ppm $(BUILD)/screen-persist.png
-	@echo "--- first boot ---"
-	@grep -ao 'snap:.*' $(BUILD)/serial-1.log | tail -3
-	@echo "--- second boot ---"
-	@grep -ao 'snap:.*' $(BUILD)/serial-2.log | tail -3
+# Two boots: typed into on the first, restored on the second (tools/persisttest.sh).
+persist: $(IMAGE)
+	@sh tools/persisttest.sh
 
 # Photographs the shell after sending a few keys, so the different ways
 # of looking can actually be seen. KEYS is a list of QEMU key names and
@@ -441,68 +420,13 @@ look: $(IMAGE) $(STORE) $(BUILD)/test-vars.fd
 	@$(PY) tools/ppm2png.py $(BUILD)/screen.ppm $(OUT)
 	@echo "  DONE    $(OUT)"
 
-# The second party, start to finish.
-#
-# Boots with an empty store, walks into the running program, hands it
-# the notes, takes the write away, then takes the reference away
-# altogether. The program reports what it can see and what it may do at
-# each step -- and none of those answers are decisions it made. It asks
-# every time, and the kernel either produces the object or does not.
-#
-# The clicks are counted in hundreds because a PS/2 mouse only reports
-# how far it moved and the monitor clamps a single report; see
-# tools/look.sh.
-AGENT_TO_PROGRAM := down down down down right right home \
-                    $(shell for i in $$(seq 17); do printf 'm100,7 '; done)
-AGENT_KEYS := $(AGENT_TO_PROGRAM) click \
-              m0,100 m0,100 m0,100 m0,100 m0,100 m0,46 click esc \
-              m-94,-100 m0,-100 m0,-100 m0,-100 m0,-100 m0,-47 click \
-              m100,0 m100,0 m78,0 click
+# The agent under changing rights (tools/agenttest.sh).
+agent: $(IMAGE)
+	@sh tools/agenttest.sh
 
-agent: $(IMAGE) $(BUILD)/test-vars.fd
-	@rm -f $(STORE)
-	@tools/look.sh $(BUILD)/screen-agent.png $(AGENT_KEYS) >/dev/null 2>&1
-	@echo "what the program said, in order:"
-	@grep -ao 'user: .*' $(BUILD)/serial.log | sed 's/^user: //' | \
-	 sed 's/[[:space:]]*$$//' | grep -v '^$$' | sed 's/^/    /'
-	@echo "  DONE    $(BUILD)/screen-agent.png"
-
-# One program hands another a capability, weakened on the way.
-#
-# A note is made and filled, the courier is introduced to the agent
-# (which delivers a send-only capability to the agent's letter box), and
-# the note is handed to the courier read-write. The courier passes it on
-# read-only -- its own decision, enforced by the kernel -- and the agent
-# duly reads it and fails to change it. No step here involves the shell
-# doing the delegating; two programs did.
-# The coordinates track the root's shelved layout: seed objects in
-# 0-3, the "programs" list in 4 (the ten standard programs inside,
-# foreman last), the "system" list in 5 (the time, log, settings,
-# activity inside), the arrivals in 6 -- so the note made here
-# becomes slot 7 and home's add sits at y 269. They also track the
-# add palette: seven fixed offers, then a header and the ten
-# startable programs, then a header and the carries at add+440 --
-# when the palette or the carry list gains a row, the carry clicks
-# move by a row's 22 pixels.
-RELAY_HOME := home $(shell for i in $$(seq 17); do printf 'm100,0 '; done)
-RELAY_KEYS := $(RELAY_HOME) m0,100 m0,100 m0,69 click \
-              m0,22 click ret \
-              right \
-              p a s s spc i t left \
-              up up up right down right \
-              $(RELAY_HOME) m0,100 m0,15 click \
-              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,4 \
-              click ret \
-              $(RELAY_HOME) m0,100 m0,39 click \
-              m0,100 m0,100 m0,100 m0,100 m0,100 m0,100 m0,80 click ret
-
-relay: $(IMAGE) $(BUILD)/test-vars.fd
-	@rm -f $(STORE)
-	@tools/look.sh $(BUILD)/screen-relay.png $(RELAY_KEYS) >/dev/null 2>&1
-	@echo "what the programs said, in order:"
-	@grep -ao 'user: .*' $(BUILD)/serial.log | sed 's/^user: //' | \
-	 sed 's/[[:space:]]*$$//' | grep -v '^$$' | sed 's/^/    /'
-	@echo "  DONE    $(BUILD)/screen-relay.png"
+# A capability passed from one program to another, weakened on the way (tools/relaytest.sh).
+relay: $(IMAGE)
+	@sh tools/relaytest.sh
 
 # What the collector costs, measured. Rebuilds with the stress harness
 # (ten thousand unreachable rings of three), boots headless, and prints

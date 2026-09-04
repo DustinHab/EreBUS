@@ -30,7 +30,7 @@ cp $BUILD/esp.img $BUILD/peer-esp.img
     say "write work | welcomed"
     say "back"
     say "back"
-    waitlog $ALOG 'by claim' 30
+    waitlog $ALOG '10.9.9.20 by claim' 40
     touch $BUILD/input-ready
     waitfile $BUILD/input-done 180
     sleep 1
@@ -40,12 +40,13 @@ cp $BUILD/esp.img $BUILD/peer-esp.img
   -drive format=raw,file=$BUILD/peer-esp.img \
   -drive id=store,file=$BUILD/peerstore.img,format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
-  -device e1000,netdev=n0 \
+  -device e1000,netdev=n0,mac=52:54:00:aa:99:20 \
   -netdev socket,id=n0,listen=127.0.0.1:$PORT \
-  -serial file:$ALOG >/dev/null 2>&1 &
+  -serial file:$ALOG >/dev/null 2>$BUILD/input-a.err &
 A_JOB=$!
 
-sleep 2
+waitport $PORT 30 || echo "(A never opened port $PORT)"
+sleep 1
 
 # --- B: beta at 10.9.9.21, points at alpha, asks with an input ---
 # The recipe waits three times: the reply port, the range's high end,
@@ -74,6 +75,7 @@ sleep 2
     say "go in"
     say "write hello"
     say "back"
+    waitlog $BLOG '10.9.9.21 by claim' 40
     waitfile $BUILD/input-ready 90
     sleep 1
     say "ask task with in"
@@ -89,11 +91,12 @@ sleep 2
   -drive format=raw,file=$BUILD/esp.img \
   -drive id=store,file=$BUILD/teststore.img,format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
-  -device e1000,netdev=n0 \
+  -device e1000,netdev=n0,mac=52:54:00:aa:99:21 \
   -netdev socket,id=n0,connect=127.0.0.1:$PORT \
-  -serial file:$BLOG >/dev/null 2>&1
+  -serial file:$BLOG >/dev/null 2>$BUILD/input-b.err
 
 wait $A_JOB 2>/dev/null
+grep -v '^$' $BUILD/input-a.err $BUILD/input-b.err 2>/dev/null | grep -v 'monitor -\|(qemu)' | head -5
 python3 tools/ppm2png.py $BUILD/input-b.ppm $BUILD/input-b.png 2>/dev/null
 
 echo "--- B, the asker ---"

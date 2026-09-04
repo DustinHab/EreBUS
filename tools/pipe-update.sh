@@ -40,7 +40,7 @@ fresh_vars $BUILD/test-vars.fd
     say "write name | alpha"
     say "back"
     say "back"
-    waitlog $ALOG 'by claim' 30
+    waitlog $ALOG '10.9.9.20 by claim' 40
     touch $BUILD/upd-ready
     waitlog $ALOG 'may not update this machine; declined' 120
     say "allow beta update"
@@ -56,12 +56,13 @@ fresh_vars $BUILD/test-vars.fd
   -drive format=raw,file=$BUILD/peer-esp.img \
   -drive id=store,file=$BUILD/peerstore.img,format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
-  -device e1000,netdev=n0 \
+  -device e1000,netdev=n0,mac=52:54:00:aa:99:20 \
   -netdev socket,id=n0,listen=127.0.0.1:$PORT \
-  -serial file:$ALOG >/dev/null 2>&1 &
+  -serial file:$ALOG >/dev/null 2>$BUILD/upd-a.err &
 A_JOB=$!
 
-sleep 2
+waitport $PORT 30 || echo "(A never opened port $PORT)"
+sleep 1
 
 # --- B: beta at 10.9.9.21, points at alpha, handshakes, updates it ---
 {
@@ -74,6 +75,7 @@ sleep 2
     say "write peer | 10.9.9.20 7800"
     say "back"
     say "back"
+    waitlog $BLOG '10.9.9.21 by claim' 40
     waitfile $BUILD/upd-ready 90
     sleep 1
     say "say hello"
@@ -97,11 +99,12 @@ sleep 2
   -drive format=raw,file=$BUILD/esp.img \
   -drive id=store,file=$BUILD/teststore.img,format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
-  -device e1000,netdev=n0 \
+  -device e1000,netdev=n0,mac=52:54:00:aa:99:21 \
   -netdev socket,id=n0,connect=127.0.0.1:$PORT \
-  -serial file:$BLOG >/dev/null 2>&1
+  -serial file:$BLOG >/dev/null 2>$BUILD/upd-b.err
 
 wait $A_JOB 2>/dev/null
+grep -v '^$' $BUILD/upd-a.err $BUILD/upd-b.err 2>/dev/null | grep -v 'monitor -\|(qemu)' | head -5
 python3 tools/ppm2png.py $BUILD/update-a.ppm $BUILD/update-a.png 2>/dev/null
 python3 tools/ppm2png.py $BUILD/update-b.ppm $BUILD/update-b.png 2>/dev/null
 

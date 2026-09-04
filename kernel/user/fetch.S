@@ -20,9 +20,9 @@ user_fetch:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x2068637465662069, %rdx
-    movabsq $0x2073692074616877, %r10
-    movabsq $0x20202064656B7361, %r8
+    movabsq $0x7473206863746566, %rdx   /* "fetch st" */
+    movabsq $0x2020206465747261, %r10   /* "arted   " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
 
 .Lwait:
@@ -56,9 +56,9 @@ user_fetch:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6572206E61632069, %rdx
-    movabsq $0x7374756F20686361, %r10
-    movabsq $0x20776F6E20656469, %r8
+    movabsq $0x6365722065726977, %rdx   /* "wire rec" */
+    movabsq $0x2020206465766965, %r10   /* "eived   " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 
@@ -78,9 +78,9 @@ user_fetch:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6F662064656B7361, %rdx
-    movabsq $0x6170206568742072, %r10
-    movabsq $0x2020202020206567, %r8
+    movabsq $0x7165722065676170, %rdx   /* "page req" */
+    movabsq $0x2020646574736575, %r10   /* "uested  " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 
@@ -89,9 +89,9 @@ user_fetch:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6F6E2079616D2069, %rdx
-    movabsq $0x7420737361702074, %r10
-    movabsq $0x20206E6F20746168, %r8
+    movabsq $0x6665722073736170, %rdx   /* "pass ref" */
+    movabsq $0x2020202064657375, %r10   /* "used    " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 

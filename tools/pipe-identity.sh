@@ -39,14 +39,15 @@ fresh_vars $BUILD/test-vars.fd
   -serial file:$ALOG >/dev/null 2>&1 &
 A_JOB=$!
 
-sleep 2
+waitport $PORT 30 || echo "(A never opened port $PORT)"
+sleep 1
 rm -f $BUILD/identity-done
 
 # B as it was left: standing on its notes, the peer set. Send goes
 # straight out -- and comes back refused.
 {
     bootwait $BLOG
-    waitlog $ALOG 'by claim' 60
+    waitlog $ALOG '10.9.9.20 by claim' 60
     sleep 2
     keys corner m100,20 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
          m100,0 m100,0 m100,0 m95,0 click

@@ -30,9 +30,9 @@ user_hello:
     movq    $2, %rax
     movq    %rbx, %rdi
     movq    $0x54584554, %rsi       /* "TEXT" */
-    movabsq $0x7266206F6C6C6568, %rdx
-    movabsq $0x20676E6972206D6F, %r10
-    movabsq $0x6370692079622033, %r8
+    movabsq $0x75203320676E6972, %rdx   /* "ring 3 u" */
+    movabsq $0x7320637069202C70, %r10   /* "p, ipc s" */
+    movabsq $0x20206B6F20646E65, %r8    /* "end ok  " */
     syscall
 
     /* Give the rest of the system a few turns, to show that a process
@@ -48,9 +48,9 @@ user_hello:
     movq    $2, %rax
     movq    %rbx, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x20776F6E20646E61, %rdx    /* "and now " */
-    movabsq $0x20676E697661656C, %r10    /* "leaving " */
-    movabsq $0x20203320676E6972, %r8     /* "ring 3  " */
+    movabsq $0x70203320676E6972, %rdx   /* "ring 3 p" */
+    movabsq $0x65206D6172676F72, %r10   /* "rogram e" */
+    movabsq $0x2020202073746978, %r8    /* "xits    " */
     syscall
 
     movq    $0, %rax                /* exit(0) */
@@ -80,9 +80,9 @@ user_trespass:
     movq    $2, %rax
     movq    %rbx, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x676E696863616572, %rdx    /* "reaching" */
-    movabsq $0x72656B20726F6620, %r10    /* " for ker" */
-    movabsq $0x206D656D206C656E, %r8     /* "nel mem " */
+    movabsq $0x20676E6964616572, %rdx   /* "reading " */
+    movabsq $0x6D206C656E72656B, %r10   /* "kernel m" */
+    movabsq $0x20202079726F6D65, %r8    /* "emory   " */
     syscall
 
     /* The kernel's own code, at the address the log prints on every
@@ -95,9 +95,9 @@ user_trespass:
     movq    $2, %rax
     movq    %rbx, %rdi
     movq    $0x4641494C, %rsi            /* "FAIL" */
-    movabsq $0x2064616572206920, %rdx    /* " i read " */
-    movabsq $0x206C656E72656B20, %r10    /* " kernel " */
-    movabsq $0x2079726F6D656D20, %r8     /* " memory " */
+    movabsq $0x6D206C656E72656B, %rdx   /* "kernel m" */
+    movabsq $0x61772079726F6D65, %r10   /* "emory wa" */
+    movabsq $0x2020646165722073, %r8    /* "s read  " */
     syscall
 
     movq    $0, %rax

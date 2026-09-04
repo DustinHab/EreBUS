@@ -19,9 +19,9 @@ user_wipe:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x206B6E616C622069, %rdx
-    movabsq $0x6120692074616877, %r10
-    movabsq $0x206E65766967206D, %r8
+    movabsq $0x6174732065706977, %rdx   /* "wipe sta" */
+    movabsq $0x2020202064657472, %r10   /* "rted    " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
 
 .Lwait:
@@ -65,9 +65,9 @@ user_wipe:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x2E64656B6E616C62, %rdx
-    movabsq $0x656874206B736120, %r10
-    movabsq $0x2020207473617020, %r8
+    movabsq $0x2064616F6C796170, %rdx   /* "payload " */
+    movabsq $0x202064656F72657A, %r10   /* "zeroed  " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 
@@ -75,9 +75,9 @@ user_wipe:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6F6E2079616D2069, %rdx    /* "i may no" */
-    movabsq $0x65676E6168632074, %r10    /* "t change" */
-    movabsq $0x2020207461687420, %r8     /* " that   " */
+    movabsq $0x6572206574697277, %rdx   /* "write re" */
+    movabsq $0x2020206465737566, %r10   /* "fused   " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 

@@ -18,9 +18,9 @@ user_tally:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x20746E756F632069, %rdx
-    movabsq $0x6120692074616877, %r10
-    movabsq $0x206E776F6873206D, %r8
+    movabsq $0x747320796C6C6174, %rdx   /* "tally st" */
+    movabsq $0x2020206465747261, %r10   /* "arted   " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
 
 .Lwait:
@@ -151,9 +151,9 @@ user_tally:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6F6E2079616D2069, %rdx    /* "i may no" */
-    movabsq $0x72206E6576652074, %r10    /* "t even r" */
-    movabsq $0x2020746920646165, %r8     /* "ead it  " */
+    movabsq $0x6665722064616572, %rdx   /* "read ref" */
+    movabsq $0x2020202064657375, %r10   /* "used    " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 

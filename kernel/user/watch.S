@@ -19,9 +19,9 @@ user_watch:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x2068637461772069, %rdx
-    movabsq $0x6E61686320726F66, %r10
-    movabsq $0x2020202020736567, %r8
+    movabsq $0x7473206863746177, %rdx   /* "watch st" */
+    movabsq $0x2020206465747261, %r10   /* "arted   " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
 
 .Lround:
@@ -100,9 +100,9 @@ user_watch:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x7720692074616877, %rdx
-    movabsq $0x7361682068637461, %r10
-    movabsq $0x6465676E61686320, %r8
+    movabsq $0x2064656863746177, %rdx   /* "watched " */
+    movabsq $0x63207463656A626F, %r10   /* "object c" */
+    movabsq $0x20206465676E6168, %r8    /* "hanged  " */
     syscall
     jmp     .Lround
 
@@ -112,9 +112,9 @@ user_watch:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6F6E206E61632069, %rdx
-    movabsq $0x207265676E6F6C20, %r10
-    movabsq $0x2020746920656573, %r8
+    movabsq $0x2064656863746177, %rdx   /* "watched " */
+    movabsq $0x6C207463656A626F, %r10   /* "object l" */
+    movabsq $0x202020202074736F, %r8    /* "ost     " */
     syscall
     jmp     .Lround
 
@@ -123,9 +123,9 @@ user_watch:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6F6E2079616D2069, %rdx    /* "i may no" */
-    movabsq $0x72206E6576652074, %r10    /* "t even r" */
-    movabsq $0x2020746920646165, %r8     /* "ead it  " */
+    movabsq $0x6665722064616572, %rdx   /* "read ref" */
+    movabsq $0x2020202064657375, %r10   /* "used    " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lround
 

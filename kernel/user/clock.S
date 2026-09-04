@@ -21,9 +21,9 @@ user_clock:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x7720776F6E6B2069, %rdx
-    movabsq $0x656D697420746168, %r10
-    movabsq $0x2020736920746920, %r8
+    movabsq $0x7473206B636F6C63, %rdx   /* "clock st" */
+    movabsq $0x2020206465747261, %r10   /* "arted   " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
 
 .Lround:
@@ -53,9 +53,9 @@ user_clock:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6B206C6C69772069, %rdx
-    movabsq $0x6320746920706565, %r10
-    movabsq $0x2020746E65727275, %r8
+    movabsq $0x6174206B636F6C63, %rdx   /* "clock ta" */
+    movabsq $0x7465732074656772, %r10   /* "rget set" */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
 
 .Ltick:
@@ -137,9 +137,9 @@ user_clock:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6F6E2079616D2069, %rdx    /* "i may no" */
-    movabsq $0x2065746972772074, %r10    /* "t write " */
-    movabsq $0x2020206572656874, %r8     /* "there   " */
+    movabsq $0x6572206574697277, %rdx   /* "write re" */
+    movabsq $0x2020206465737566, %r10   /* "fused   " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lround
 

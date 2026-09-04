@@ -55,8 +55,9 @@ keys() {
     done
 }
 
-# count <file> <pattern>: how often the pattern is in the log now.
-count() { grep -ac -- "$2" "$1" 2>/dev/null || echo 0; }
+# count <file> <pattern>: how often the pattern is in the log now (0 for no file).
+# grep -c exits 1 when the count is 0; the count itself is what matters here.
+count() { c=$(grep -ac -- "$2" "$1" 2>/dev/null); echo "${c:-0}"; }
 
 key_name() {
     case "$1" in
@@ -106,7 +107,7 @@ waitlog() {
 # waitcount <file> <pattern> <count> [seconds]: until the pattern appears that many times.
 waitcount() {
     n=0
-    while [ "$(grep -ac -- "$2" "$1" 2>/dev/null)" -lt "$3" ]; do
+    while [ "$(count "$1" "$2")" -lt "$3" ]; do
         sleep 0.25
         n=$((n + 1))
         [ $n -ge $(( ${4:-60} * 4 )) ] && return 1
@@ -121,6 +122,20 @@ waitfile() {
         sleep 0.25
         n=$((n + 1))
         [ $n -ge $(( ${2:-60} * 4 )) ] && return 1
+    done
+    return 0
+}
+
+# waitport <port> [seconds]: until something listens on 127.0.0.1:<port>.
+# Two machines on a socket netdev only meet if the listener is bound
+# before the other connects; on a loaded host that takes more than the
+# couple of seconds a fixed sleep would guess.
+waitport() {
+    n=0
+    while ! ss -ltn 2>/dev/null | grep -q ":$1 "; do
+        sleep 0.25
+        n=$((n + 1))
+        [ $n -ge $(( ${2:-30} * 4 )) ] && return 1
     done
     return 0
 }

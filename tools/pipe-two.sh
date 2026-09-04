@@ -12,7 +12,8 @@ PORT=${PIPEPORT:-8010}
 
 rm -f $BUILD/peerstore.img $BUILD/peer-vars.fd $ALOG \
       $BUILD/peer-esp.img $BUILD/teststore.img $BLOG \
-      $BUILD/pipe-choose.ppm $BUILD/pipe-wire.dump $BUILD/pipe-a-ready
+      $BUILD/pipe-wire.dump $BUILD/pipe-a-ready \
+      $BUILD/pipe-a.err $BUILD/pipe-b.err
 fresh_store $BUILD/peerstore.img
 fresh_store $BUILD/teststore.img
 fresh_vars $BUILD/peer-vars.fd
@@ -26,9 +27,11 @@ cp $BUILD/esp.img $BUILD/peer-esp.img
          ret a d d r e s s spc shift-backslash spc \
          1 0 dot 9 dot 9 dot 2 0 \
          ret w o r k spc shift-backslash spc w e l c o m e d
-    # The settings text is applied once typing pauses; the claim in the
-    # log is the sign that the address is in force.
-    waitlog $ALOG 'by claim' 30
+    # The settings text is applied whenever typing pauses, and on a
+    # loaded host a pause between keystrokes can apply a half-typed
+    # address (10.9.9.2 before the last 1). Wait for the exact address,
+    # not just any claim.
+    waitlog $ALOG '10.9.9.20 by claim' 40
     touch $BUILD/pipe-a-ready
     waitlog $ALOG 'bytes arrived' 90
     sleep 1
@@ -40,36 +43,39 @@ cp $BUILD/esp.img $BUILD/peer-esp.img
   -drive format=raw,file=$BUILD/peer-esp.img \
   -drive id=store,file=$BUILD/peerstore.img,format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
-  -device e1000,netdev=n0 \
+  -device e1000,netdev=n0,mac=52:54:00:aa:99:20 \
   -netdev socket,id=n0,listen=127.0.0.1:$PORT \
   -object filter-dump,id=fd0,netdev=n0,file=$BUILD/pipe-wire.dump \
-  -serial file:$ALOG >/dev/null 2>&1 &
+  -serial file:$ALOG >/dev/null 2>$BUILD/pipe-a.err &
 A_JOB=$!
 
-sleep 2
+# B only meets A if A's listen socket is bound first.
+waitport $PORT 30 || echo "(A never opened port $PORT)"
+sleep 1
 
-# --- machine B: claim 10.9.9.21, then send the shortest way there is:
-# stand on the notes, press send. No peer is set, so the chooser opens
-# under the word and scans by itself; one click on the machine that
-# answers points the pipe and lets the notes go, in the same breath.
+# --- machine B: claim 10.9.9.21, discover A by scan, point at it, send
+# the notes. Driven through the screen terminal, the same reliable path
+# pipe-update and pipe-input take: the mouse chooser is too sensitive to
+# host load to prove anything in a parallel battery.
 {
     bootwait $BLOG
-    keys tab tab tab t h e m e ret \
-         ret a d d r e s s spc shift-backslash spc \
-         1 0 dot 9 dot 9 dot 2 1 \
-         left left up up up up up right
-    waitlog $BLOG 'by claim' 30
+    keys tab tab tab tab tab pause
+    say "go system"
+    say "go settings"
+    say "write address | 10.9.9.21"
+    say "back"
+    say "back"
+    waitlog $BLOG '10.9.9.21 by claim' 40
     waitfile $BUILD/pipe-a-ready 90
     sleep 1
-    keys corner m100,20 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 m100,0 \
-         m100,0 m100,0 m100,0 m95,0 click \
-         m0,1 m0,1 m0,1 m0,1 m0,1 m0,1
-    sleep 3
-    echo "screendump $BUILD/pipe-choose.ppm"
-    sleep 1
-    keys m105,49 click \
-         m0,1 m0,1 m0,1 m0,1 m0,1 m0,1
-    waitlog $BLOG 'carried\|nothing was sent\|did not take' 60
+    # scan puts a SEEK on the wire and A answers it; point at names the
+    # peer by its address, so the send does not depend on the answer
+    # having been parsed yet.
+    say "scan"
+    sleep 2
+    say "point at 10.9.9.20"
+    say "send notes"
+    waitlog $BLOG 'carried\|nothing was sent\|did not take\|refused it' 60
     sleep 1
     echo "screendump $BUILD/pipe-b.ppm"
     sleep 1
@@ -79,15 +85,16 @@ sleep 2
   -drive format=raw,file=$BUILD/esp.img \
   -drive id=store,file=$BUILD/teststore.img,format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
-  -device e1000,netdev=n0 \
+  -device e1000,netdev=n0,mac=52:54:00:aa:99:21 \
   -netdev socket,id=n0,connect=127.0.0.1:$PORT \
-  -serial file:$BLOG >/dev/null 2>&1
+  -serial file:$BLOG >/dev/null 2>$BUILD/pipe-b.err
 
 wait $A_JOB 2>/dev/null
+# QEMU's own complaints, if any (a machine that died early leaves an empty log)
+grep -v '^$' $BUILD/pipe-a.err $BUILD/pipe-b.err 2>/dev/null | grep -v 'monitor -\|(qemu)' | head -5
 
 python3 tools/ppm2png.py $BUILD/pipe-a.ppm $BUILD/pipe-a.png 2>/dev/null
 python3 tools/ppm2png.py $BUILD/pipe-b.ppm $BUILD/pipe-b.png 2>/dev/null
-python3 tools/ppm2png.py $BUILD/pipe-choose.ppm $BUILD/pipe-choose.png 2>/dev/null
 
 echo "--- sender (B) ---"
 grep -a 'net:.*claim\|pipe' $BLOG

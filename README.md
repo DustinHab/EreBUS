@@ -30,7 +30,7 @@ Targets:
     make debug    # halted, gdb on port 1234
     make clean
     sh tools/mkiso.sh          # build/erebus.iso
-    sh build/battery.sh        # all regression tests; KVM when /dev/kvm is writable, 6 lanes, about 7 minutes
+    sh build/battery.sh        # all regression tests; KVM when /dev/kvm is writable, 6 lanes, about 4 minutes
     sh build/kvm-battery.sh    # the same, plus the self-built kernel
 
 From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
@@ -172,11 +172,12 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/usbplug.sh | mouse unplugged and plugged back in; report descriptor self-test |
 | tools/asmtest.sh, cctest.sh, cctest2.sh | assembler and compiler on the machine (24 checks) |
 | tools/sshtest.sh | door: exec, pipe, pty; foreign key refused |
-| tools/pipe-two.sh, pipe-identity.sh | object pipe, sealed, identity enforced |
+| tools/pipe-two.sh | object pipe: discovered by scan, sealed, crosses; nothing in the clear on the wire |
+| tools/pipe-identity.sh | the pipe refuses a changed key at a known address |
 | tools/pipe-update.sh | a kernel through the pipe: refused without the update right, installed and booted with it |
 | tools/pipe-input.sh | far work with an input object; the answer names the worker |
 | tools/pipe-work.sh, pipe-desk.sh, pipe-foreman.sh | far work, split tasks over three machines, standing tasks |
-| make relay, make agent, make persist | capability passing, delegation, snapshots |
+| tools/relaytest.sh, agenttest.sh, persisttest.sh | capability passing between programs, rights following the reference, snapshots (also `make relay`, `make agent`, `make persist`) |
 | tools/sticktest.sh | one disk carries loader, kernel and store |
 | tools/foreigndisk.sh | a foreign disk stays byte-identical |
 | tools/settletest.sh, settlefree.sh | settling whole / in free space |
@@ -188,9 +189,9 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/selfbuild.sh, cctrial.sh | kernel built by the machine's compiler on the host |
 | tools/fuzz/run.sh | fuzzing of the language tools |
 
-`build/battery.sh` builds once, then runs 18 tests in parallel lanes (`LANES`, default 6), each in its own directory under `build/par/`, then relay, agent, persist and renew one at a time. Every test sources `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps, `BUILD` points at the test's directory. The summary prints seconds per test. `build/kvm-battery.sh` adds selfkernel.
+`build/battery.sh` builds once, then runs 21 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`; disk images on `/mnt/c` stall under parallel writes), then renew alone (it rebuilds the kernel twice). Logs, screenshots and QEMU stderr come back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (default 480); a failed or stopped test runs once more and is marked "2nd try". Every test sources `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps, `BUILD` points at the test's directory. The summary prints seconds per test. `build/kvm-battery.sh` adds selfkernel.
 
-Measured on 32 cores under KVM: 393 s for all 22 tests (before: 38 minutes sequential under KVM, 22 minutes under TCG). Longest single tests: renew 83 s, pipe-input 81 s, pipe-update 79 s.
+Measured on 32 cores under KVM: about 230 s for all 22 tests (before: 38 minutes sequential under KVM, 22 minutes under TCG). Longest single tests: pipe-input 72 s, pipe-update 65 s, wifi 59 s.
 
 ## Using the ISO
 

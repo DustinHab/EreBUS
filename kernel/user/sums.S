@@ -18,9 +18,9 @@ user_sums:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x7265676E69662069, %rdx
-    movabsq $0x687420746E697270, %r10
-    movabsq $0x2020202073676E69, %r8
+    movabsq $0x61747320736D7573, %rdx   /* "sums sta" */
+    movabsq $0x2020202064657472, %r10   /* "rted    " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
 
 .Lwait:
@@ -109,9 +109,9 @@ user_sums:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6F6E2079616D2069, %rdx    /* "i may no" */
-    movabsq $0x72206E6576652074, %r10    /* "t even r" */
-    movabsq $0x2020746920646165, %r8     /* "ead it  " */
+    movabsq $0x6665722064616572, %rdx   /* "read ref" */
+    movabsq $0x2020202064657375, %r10   /* "used    " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 

@@ -19,9 +19,9 @@ user_cipher:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x77206E7275742069, %rdx
-    movabsq $0x6F20676E69746972, %r10
-    movabsq $0x2020202020726576, %r8
+    movabsq $0x7320726568706963, %rdx   /* "cipher s" */
+    movabsq $0x2020646574726174, %r10   /* "tarted  " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
 
 .Lwait:
@@ -106,9 +106,9 @@ user_cipher:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x203B64656E727574, %rdx
-    movabsq $0x7574206E69616761, %r10
-    movabsq $0x6B63616220736E72, %r8
+    movabsq $0x7061203331746F72, %rdx   /* "rot13 ap" */
+    movabsq $0x2020206465696C70, %r10   /* "plied   " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 
@@ -116,9 +116,9 @@ user_cipher:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6F6E2079616D2069, %rdx    /* "i may no" */
-    movabsq $0x65676E6168632074, %r10    /* "t change" */
-    movabsq $0x2020207461687420, %r8     /* " that   " */
+    movabsq $0x6572206574697277, %rdx   /* "write re" */
+    movabsq $0x2020206465737566, %r10   /* "fused   " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 
@@ -126,9 +126,9 @@ user_cipher:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6F6E2079616D2069, %rdx    /* "i may no" */
-    movabsq $0x72206E6576652074, %r10    /* "t even r" */
-    movabsq $0x2020746920646165, %r8     /* "ead it  " */
+    movabsq $0x6665722064616572, %rdx   /* "read ref" */
+    movabsq $0x2020202064657375, %r10   /* "used    " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 

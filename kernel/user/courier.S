@@ -72,9 +72,9 @@ user_courier:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6920646573736170, %rdx
-    movabsq $0x6572202C6E6F2074, %r10
-    movabsq $0x20796C6E6F206461, %r8
+    movabsq $0x6F20646573736170, %rdx   /* "passed o" */
+    movabsq $0x6F2D64616572206E, %r10   /* "n read-o" */
+    movabsq $0x2020202020796C6E, %r8    /* "nly     " */
     syscall
     jmp     .Lwait
 
@@ -84,9 +84,9 @@ user_courier:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6572206E61632069, %rdx
-    movabsq $0x7266206120686361, %r10
-    movabsq $0x776F6E20646E6569, %r8
+    movabsq $0x622072657474656C, %rdx   /* "letter b" */
+    movabsq $0x696563657220786F, %r10   /* "ox recei" */
+    movabsq $0x2020202020646576, %r8    /* "ved     " */
     syscall
     jmp     .Lwait
 
@@ -95,9 +95,9 @@ user_courier:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x7420656E6F206F6E, %rdx
-    movabsq $0x692065766967206F, %r10
-    movabsq $0x202020206F742074, %r8
+    movabsq $0x657474656C206F6E, %rdx   /* "no lette" */
+    movabsq $0x657920786F622072, %r10   /* "r box ye" */
+    movabsq $0x2020202020202074, %r8    /* "t       " */
     syscall
     jmp     .Lwait
 
@@ -106,9 +106,9 @@ user_courier:
     movq    $2, %rax
     movq    %r12, %rdi
     movq    $0x54584554, %rsi
-    movabsq $0x6F6E2079616D2069, %rdx
-    movabsq $0x7420737361702074, %r10
-    movabsq $0x20206E6F20746168, %r8
+    movabsq $0x6665722073736170, %rdx   /* "pass ref" */
+    movabsq $0x2020202064657375, %r10   /* "used    " */
+    movabsq $0x2020202020202020, %r8    /* "        " */
     syscall
     jmp     .Lwait
 
