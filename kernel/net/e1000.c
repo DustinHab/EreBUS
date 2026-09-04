@@ -238,6 +238,27 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
         return false;
     regs = (volatile u8 *)phys_to_virt(bar);
 
+    /* A device that is not really there answers every read with all
+     * ones. Nothing below would fail on that; it would carry on and
+     * set up rings for a card that does not exist. */
+    if (rr(R_STATUS) == 0xFFFFFFFFu) {
+        kprintf("net:  %s at %02x:%02x.%u: its registers read as all ones; "
+                "it is not answering\n", k->name, dev->bus, dev->device, dev->function);
+        return false;
+    }
+
+    /* On the round that only wants a card with a cable in it, look and
+     * touch nothing else. The firmware left the link as it found it,
+     * and that is a truer answer than anything this driver could make
+     * the card say in the next two seconds -- and it costs no reset,
+     * which matters for a card that is about to be passed over. */
+    if (need_link) {
+        if (!(rr(R_STATUS) & STATUS_LU)) return false;
+    }
+
+    kprintf("net:  %s at %02x:%02x.%u: taking it\n",
+            k->name, dev->bus, dev->device, dev->function);
+
     wr(R_IMC, 0xFFFFFFFFu);         /* no interrupts; this is a polled card */
     (void)rr(R_ICR);
 
@@ -255,10 +276,15 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
         wait_ms(10);
         for (u32 i = 0; i < 100 && (rr(R_CTRL) & CTRL_RST); i++) wait_ms(1);
         wait_ms(10);
+        if (rr(R_STATUS) == 0xFFFFFFFFu) {
+            kprintf("net:  %s: did not come back from its reset\n", k->name);
+            return false;
+        }
         wr(R_IMC, 0xFFFFFFFFu);
         (void)rr(R_ICR);
         wr(R_RCTL, 0);
         wr(R_TCTL, 0);
+        kprintf("net:  %s: reset\n", k->name);
     }
 
     /* The address the card answers to. A chipset card was given one
@@ -284,18 +310,7 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
     for (u32 i = 0; i < 128; i++) wr(R_MTA + i * 4, 0);
 
     wr(R_CTRL, rr(R_CTRL) | CTRL_SLU);
-
-    /* A machine with two sockets has one cable. Given the choice, take
-     * the card that is plugged in; the caller comes back round without
-     * this demand if neither is. */
-    if (need_link) {
-        bool linked = false;
-        for (u32 i = 0; i < 40 && !linked; i++) {
-            if (rr(R_STATUS) & STATUS_LU) linked = true;
-            else wait_ms(50);
-        }
-        if (!linked) return false;
-    }
+    kprintf("net:  %s: address read, link asked for\n", k->name);
 
     /* The receive ring: a page of descriptors, each with its own
      * buffer. The card owns everything between head and tail. */

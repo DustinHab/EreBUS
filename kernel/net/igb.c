@@ -200,6 +200,7 @@ static void wait_ms(u64 ms)
  * agreed on a speed, and they only do that when somebody asks them to.
  */
 #define R_MDIC     0x00020
+#define R_MDICNFG  0x00E04
 #define MDIC_READY (1u << 28)
 #define MDIC_ERROR (1u << 30)
 #define MDIC_WRITE (1u << 26)
@@ -209,6 +210,8 @@ static void wait_ms(u64 ms)
 #define PHY_CTRL       0
 #define PHY_AUTONEG    (1u << 12)
 #define PHY_RESTART    (1u << 9)
+
+static u32 phy_at = MDIC_PHY1;       /* the second chip's address, in place */
 
 static bool mdic_wait(u32 *out)
 {
@@ -224,14 +227,14 @@ static bool mdic_wait(u32 *out)
 static u16 phy_read(u32 reg)
 {
     u32 v = 0;
-    wr(R_MDIC, (reg << 16) | MDIC_PHY1 | MDIC_READ);
+    wr(R_MDIC, (reg << 16) | phy_at | MDIC_READ);
     if (!mdic_wait(&v)) return 0xFFFF;
     return (u16)v;
 }
 
 static void phy_write(u32 reg, u16 value)
 {
-    wr(R_MDIC, value | (reg << 16) | MDIC_PHY1 | MDIC_WRITE);
+    wr(R_MDIC, value | (reg << 16) | phy_at | MDIC_WRITE);
     mdic_wait(NULL);
 }
 
@@ -242,12 +245,47 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
 
     phys_addr bar = pci_bar(dev, 0);
     if (!bar) return false;
+    /* The register window is 128 KiB on every one of these, and nothing
+     * here reaches past the first 64. Mapping more than the card has
+     * would put the next device's window under this driver's feet. */
     if (!vmm_map(vmm_kernel_pml4(), (virt_addr)phys_to_virt(bar), bar,
-                 128 * PAGE_SIZE, PAGE_KERNEL_MMIO))
+                 32 * PAGE_SIZE, PAGE_KERNEL_MMIO))
         return false;
     regs = (volatile u8 *)phys_to_virt(bar);
     rx_base = k->old_rings ? RX_OLD : RX_BLOCK;
     tx_base = k->old_rings ? TX_OLD : TX_BLOCK;
+
+    if (rr(R_STATUS) == 0xFFFFFFFFu) {
+        kprintf("net:  %s at %02x:%02x.%u: its registers read as all ones; "
+                "it is not answering\n", k->name, dev->bus, dev->device, dev->function);
+        return false;
+    }
+
+    /* On the round that only wants a card with a cable in it: look at
+     * the link the firmware left. Where it is down, ask the wire's chip
+     * once to agree a speed and give it a moment -- that is a word to
+     * the chip, not a reset, and a card left by its firmware with a
+     * cable in it but no link is a real thing. A card that is about to
+     * be passed over is never reset on the way past. */
+    if (need_link && !(rr(R_STATUS) & STATUS_LU)) {
+        phy_at = MDIC_PHY1;
+        if (!k->old_rings) {
+            u32 addr = (rr(R_MDICNFG) >> 21) & 0x1Fu;
+            if (addr) phy_at = addr << 21;
+        }
+        kprintf("net:  %s at %02x:%02x.%u: no link; asking the wire's chip at address %u\n",
+                k->name, dev->bus, dev->device, dev->function, phy_at >> 21);
+        u16 pc = phy_read(PHY_CTRL);
+        if (pc != 0xFFFF) phy_write(PHY_CTRL, (u16)(pc | PHY_AUTONEG | PHY_RESTART));
+        for (u32 i = 0; i < 30 && !(rr(R_STATUS) & STATUS_LU); i++) wait_ms(50);
+        if (!(rr(R_STATUS) & STATUS_LU)) {
+            kprintf("net:  %s: still no link; passed over for now\n", k->name);
+            return false;
+        }
+    }
+
+    kprintf("net:  %s at %02x:%02x.%u: taking it\n",
+            k->name, dev->bus, dev->device, dev->function);
 
     wr(R_IMC, 0xFFFFFFFFu);
     (void)rr(R_ICR);
@@ -259,10 +297,26 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
     wait_ms(10);
     for (u32 i = 0; i < 100 && (rr(R_CTRL) & CTRL_RST); i++) wait_ms(1);
     wait_ms(20);                      /* the card reloads itself from its own memory */
+    if (rr(R_STATUS) == 0xFFFFFFFFu) {
+        kprintf("net:  %s: did not come back from its reset\n", k->name);
+        return false;
+    }
+    kprintf("net:  %s: reset\n", k->name);
     wr(R_IMC, 0xFFFFFFFFu);
     (void)rr(R_ICR);
     wr(R_RCTL, 0);
     wr(R_TCTL, 0);
+
+    /* Where the second chip answers. The 82576 keeps its own at address
+     * one; the 82580 and everything after it say where in a register
+     * of their own, and asking at the wrong address gets a silence that
+     * looks like a broken wire. */
+    phy_at = MDIC_PHY1;
+    if (!k->old_rings) {
+        u32 cfg = rr(R_MDICNFG);
+        u32 addr = (cfg >> 21) & 0x1Fu;
+        if (addr) phy_at = addr << 21;
+    }
 
     /* The address the card answers to; hardware copies it up out of its
      * own memory while it resets, so there is nothing to read out. */
@@ -285,20 +339,20 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
      * the link stays down however long anyone waits, and a card with a
      * link down keeps its rings and throws every frame away. */
     u16 pc = phy_read(PHY_CTRL);
-    if (pc != 0xFFFF) phy_write(PHY_CTRL, (u16)(pc | PHY_AUTONEG | PHY_RESTART));
+    if (pc != 0xFFFF) {
+        phy_write(PHY_CTRL, (u16)(pc | PHY_AUTONEG | PHY_RESTART));
+        kprintf("net:  %s: the wire's chip answers at address %u; asked to agree a speed\n",
+                k->name, phy_at >> 21);
+    } else {
+        kprintf("net:  %s: the wire's chip did not answer at address %u; "
+                "the link is whatever the firmware left\n", k->name, phy_at >> 21);
+    }
 
     /* Agreeing takes a moment even between two ends that are only
      * pretending to be far apart. */
     for (u32 i = 0; i < 60 && !(rr(R_STATUS) & STATUS_LU); i++) wait_ms(50);
-
-    if (need_link) {
-        bool linked = false;
-        for (u32 i = 0; i < 40 && !linked; i++) {
-            if (rr(R_STATUS) & STATUS_LU) linked = true;
-            else wait_ms(50);
-        }
-        if (!linked) return false;
-    }
+    kprintf("net:  %s: %s; setting up the rings\n", k->name,
+            (rr(R_STATUS) & STATUS_LU) ? "link up" : "no link yet");
 
     phys_addr rxp = pmm_alloc();
     phys_addr txp = pmm_alloc();
