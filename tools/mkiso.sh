@@ -1,17 +1,8 @@
 #!/bin/sh
-# mkiso.sh -- build/erebus.iso: the system as an iso, bootable the way
-# any other is.
-#
-# UEFI boots an iso through El Torito: a FAT image inside the iso is
-# handed to the firmware as if it were a small disk, and the firmware
-# runs \EFI\BOOT\BOOTX64.EFI from it. The same FAT image is marked as
-# an EFI system partition in a GPT written into the iso's first
-# sectors, so the file written whole onto a usb stick -- dd, Rufus in
-# dd mode, balenaEtcher -- boots too. There is no BIOS half: the
-# machine has to boot the UEFI way, with Secure Boot off.
-#
-# A machine booted from the iso runs without a memory and says so;
-# 'disks' and 'settle' in the terminal make one.
+# mkiso.sh -- build/erebus.iso, hybrid cd/usb image.
+# - El Torito EFI boot image (FAT16, 16 MiB) with \EFI\BOOT\BOOTX64.EFI and \erebus\kernel.elf
+# - the same image is an EFI system partition in a GPT at the iso's front, so a raw write to a stick boots too
+# - UEFI only, Secure Boot off; a machine booted from it has no store until it settles
 
 cd "$(dirname "$0")/.."
 make -s >/dev/null || exit 1

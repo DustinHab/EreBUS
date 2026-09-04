@@ -1,18 +1,8 @@
 #!/bin/sh
-# selfbuild.sh -- the kernel, built with the machine's own tools on
-# the host, and booted.
-#
-# Every kernel source goes through cchost: c through the compiler and
-# the assembler, .S through the gnu translation, and all the objects
-# through the linker in the kernel's shape. The result replaces
-# kernel.elf on a copy of the boot disk, and QEMU boots it; what the
-# kernel says on the serial line is the measure of how far the tools
-# carry.
-#
+# selfbuild.sh -- the kernel built with the machine's own tools (cchost) on the host, then booted.
 #   selfbuild.sh                 build and boot
 #   selfbuild.sh build           build only
-#   KERNEL=path selfbuild.sh     boot that kernel.elf instead (one the
-#                                machine itself made, say)
+#   KERNEL=path selfbuild.sh     boot that kernel.elf instead
 #   TRACE=1                      QEMU logs every exception, stops at a reset
 
 cd "$(dirname "$0")/.."

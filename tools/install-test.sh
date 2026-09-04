@@ -1,21 +1,8 @@
 #!/bin/sh
-# install-test.sh -- a kernel installed from inside the system, and
-# the loader's way back when one does not come up.
-#
-# Part one: the kernel built by the machine's own tools (from
-# tools/selfbuild.sh) rides in on the exchange disk; the terminal
-# installs it and restarts; the next start says it was built here.
-#
-# Part two: a kernel that cannot come up (its first instruction is
-# ud2) is installed the same way. It faults before it has an
-# interrupt table of its own, so the firmware's handler catches it
-# and halts -- on a real machine the person turns it off and on
-# again, and QEMU's monitor does the same here with system_reset.
-# Two such starts, and the loader puts the previous kernel back and
-# boots it, and that kernel says so.
-#
-# Both run on a copy of the boot disk: the shared esp.img stays as
-# it is.
+# install-test.sh -- 'install' from inside the system, and the loader's fallback.
+# - part 1: the self-built kernel (tools/selfbuild.sh) arrives on the exchange disk, is installed, restarted; the next start says it was built here
+# - part 2: a kernel whose first instruction is ud2 is installed; after two failed starts (system_reset via the monitor) the loader restores kernel.old
+# - both run on a copy of the boot disk
 
 cd "$(dirname "$0")/.."
 BUILD=build

@@ -1,18 +1,8 @@
 #!/bin/sh
-# installtest.sh -- the offer made at start-up, on a disk that is not empty.
-#
-# This is the case a person actually has: a machine booted from the
-# stick, and a disk in it with somebody else's system on it. The kernel
-# refuses such a disk as a store on its own, correctly, and so the
-# machine comes up with no memory -- and until now the only way on was
-# to already know the words "settle on disk 1".
-#
-# So the machine asks while it starts. Here it is answered with the
-# number of the disk and then the word "yes", both typed through the
-# keyboard the same way a person would; the disk is emptied, given a
-# boot volume with this system and a store, and adopted on the spot. A
-# text is made afterwards so there is something to keep, and the second
-# boot runs from that disk with no stick present at all and finds it.
+# installtest.sh -- the boot-time offer, on a disk that already holds data.
+# - boot from the stick beside a disk with a partition table and data
+# - answer the offer with the disk number and "yes" through the keyboard
+# - a text is made; the second boot from the disk alone must find it
 
 cd "$(dirname "$0")/.."
 BUILD=build

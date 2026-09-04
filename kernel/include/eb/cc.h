@@ -1,13 +1,6 @@
 /*
- * cc.h -- the compiler: c, the way this machine speaks it.
- *
- * A text of c becomes a text of assembly in the assembler's own
- * words, and that becomes an image the loader runs. The middle step
- * is kept, as an object beside the source: what the compiler made is
- * there to be read, which is the difference between a tool and a
- * trick. No library comes with it -- main is called with the two
- * handles a program starts holding, and syscall(nr, ...) is the door
- * to the kernel, the same eight calls as everywhere.
+ * cc.h -- compiler interface: c text -> assembly text (kept beside the source) -> image.
+ * - no library: main gets the two starting handles, syscall(nr, ...) is the door to the kernel
  */
 #ifndef EB_CC_H
 #define EB_CC_H

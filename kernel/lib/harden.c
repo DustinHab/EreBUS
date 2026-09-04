@@ -1,11 +1,6 @@
 /*
- * harden.c -- the runtime half of the compiler hardening.
- *
- * -fstack-protector-strong places a guard value in front of every
- * return address and checks it on the way out. A mismatch means
- * something wrote past the end of a buffer -- the classic route to
- * taking over the return pointer. The compiler expects these two
- * symbols to exist.
+ * harden.c -- stack protector runtime: the guard value and the failure handler
+ * required by -fstack-protector-strong.
  */
 #include <eb/types.h>
 #include <eb/panic.h>

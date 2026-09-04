@@ -1,8 +1,5 @@
 /*
- * base64.h -- bytes as letters, RFC 4648.
- *
- * Keys travel as text: in a settings line, in a fingerprint on the
- * screen, in a file another machine wrote. This turns the two ways.
+ * base64.h -- bytes as letters, RFC 4648, both directions.
  */
 #ifndef EB_BASE64_H
 #define EB_BASE64_H

@@ -1,24 +1,10 @@
 /*
- * ssh.c -- the door: the terminal reached over the network.
- *
- * Real ssh, version 2, in one profile: curve25519-sha256 for the
- * exchange, ssh-ed25519 for the host's name and the visitor's,
- * aes128-gcm@openssh.com on the wire, publickey the only way in. The
- * transport, the login and the one session channel live here in
- * order, each a few functions; the stream underneath is the door in
- * net.c, and the words at the top go to a terminal session of the
- * visitor's own.
- *
- * Who may come in: the keys written as "door |" lines in the
- * settings. The login proves the visitor holds one of them, by a
- * signature over the session's own id, and nothing else is asked --
- * no name, no password, no table of users. The name the client
- * sends is kept only to say who came in.
- *
- * Honest limits: one visitor at a time, no rekeying (a client that
- * asks after its hour is let go), no compression, no forwarding of
- * anything -- a session channel with a shell or one command, and
- * that is the whole door.
+ * ssh.c -- ssh version 2 server: the terminal reached over the network.
+ * - curve25519-sha256, ssh-ed25519 (host and visitor), aes128-gcm@openssh.com, publickey only
+ * - allowed keys: "door |" lines in the settings; the client's user name is only recorded
+ * - stream from net.c; words go to a terminal session of the visitor's own
+ * - limits: one visitor at a time, no rekeying, no compression, no forwarding; shell or one command
+ * - while the session takes bytes ("receive"), channel data goes to it unread and the window is refilled per chunk
  */
 #include <eb/ssh.h>
 #include <eb/net.h>

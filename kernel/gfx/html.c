@@ -1,19 +1,8 @@
 /*
- * html.c -- markup in, a page out.
- *
- * One pass with a small mind. Text gathers into words; words wrap at
- * the window's edge; tags change the mood -- headings brighten and are
- * ruled off, lists indent and count, quotes step in, preformatted runs
- * keep their spaces, tables set their cells beside one another, links
- * take colour, and form controls become boxes to type in and a button
- * to send. Scripts, styles and comments are swallowed whole; anything
- * unrecognised is ignored rather than shown, because markup a reader
- * cannot use is only noise wearing angle brackets.
- *
- * There is no layout engine here and no stylesheet. Width comes from
- * the window, not the page; emphasis is a brighter ink, not a font.
- * That is the honest boundary of a text browser, and everything below
- * stays inside it.
+ * html.c -- text browser lens: one pass over markup.
+ * - headings, paragraphs, lists, quotes, pre, tables, links, forms (text fields, submit)
+ * - scripts, styles, comments and unknown tags are dropped
+ * - no CSS, no JavaScript, no images; width from the window
  */
 #include <eb/html.h>
 

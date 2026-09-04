@@ -1,11 +1,5 @@
 /*
- * rtl8139.c -- Realtek's old warhorse, spoken to through io ports.
- *
- * Simpler than the e1000 by a generation: four fixed transmit slots
- * used in rotation, and one continuous receive buffer the card writes
- * packets into head to tail, each behind a little header saying how
- * long it is. The driver walks behind, reading and advancing a
- * pointer. Nothing here is fast and nothing needs to be.
+ * rtl8139.c -- Realtek 8139 over io ports: four transmit slots in rotation, one continuous receive buffer.
  */
 #include <eb/net.h>
 #include <eb/pci.h>

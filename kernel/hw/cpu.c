@@ -1,11 +1,6 @@
 /*
- * cpu.c -- read processor features through CPUID.
- *
- * CPUID always exists on x86_64 (long mode requires it), so there is no
- * need to test for the instruction. Care is needed with leaf numbers
- * only: asking for a leaf the processor does not implement returns
- * garbage rather than zeros. That is what leaf 0 and leaf 0x80000000
- * are for -- each reports the highest leaf it supports.
+ * cpu.c -- processor features via CPUID.
+ * - leaf 0 and 0x80000000 give the highest supported leaves; unsupported leaves return garbage
  */
 #include <eb/cpu.h>
 

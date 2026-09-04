@@ -1,10 +1,6 @@
 #!/bin/sh
-# termtest.sh -- the terminal, driven end to end.
-#
-# Boots one machine, walks into the terminal mode, and does a day's
-# small work there: makes a text, writes a script into it, runs it,
-# searches for the words, reads the journal. The screen at the end
-# and the serial log carry the proof.
+# termtest.sh -- the terminal through the screen: make a text, write a script, run it, find, journal.
+# - proof: the final screenshot and the serial log
 
 cd "$(dirname "$0")/.."
 BUILD=build

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Half-path diagnosis: does a datagram from the host reach machine A?
+# pipe-diag.sh -- does a datagram from the host reach machine A? (test-rig diagnosis)
 cd "$(dirname "$0")/.."
 BUILD=build
 

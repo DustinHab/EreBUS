@@ -1,14 +1,7 @@
 #!/bin/sh
-# wifitest.sh -- the wireless station against the virtual access point.
-#
-# The machine's only wire leads to tools/wifi-ap.py, which is the air:
-# an access point named "erebus test" with a passphrase. Through the
-# terminal: 'networks' lists it; a join with the wrong passphrase is
-# turned away and says so; 'join erebus test' asks for the passphrase,
-# which is typed unseen; the handshake finishes, the frames are
-# sealed, an address arrives by lease through the seal, and the
-# access point's pings are answered. The access point's own log is
-# the other half of the proof.
+# wifitest.sh -- the WPA2 station against tools/wifi-ap.py (802.11 frames inside Ethernet).
+# - 'networks' lists the AP; a wrong passphrase is refused; 'join' asks and takes the passphrase unseen
+# - handshake, sealed frames, DHCP lease through the seal, pings answered; second boot auto-joins
 
 cd "$(dirname "$0")/.."
 BUILD=build

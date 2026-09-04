@@ -1,13 +1,8 @@
 #!/bin/sh
-# sshtest.sh -- the door, knocked on from outside.
-#
-# Boots one machine with its port 22 reachable from the host, writes
-# a fresh client key into the settings through the screen's terminal
-# (the honest way: a "door |" line, typed), and then uses the host's
-# own ssh client against it: one command by exec, two lines through a
-# pipe, one through a forced pty. A second key that was never written
-# into the settings must be turned away. The serial log names the
-# host key's fingerprint; the client's first-visit line must match.
+# sshtest.sh -- the ssh door with the host's own ssh client.
+# - a fresh key is typed into the settings as a "door |" line through the screen
+# - exec, piped shell, forced pty; a second unknown key must be refused
+# - the host key fingerprint in the serial log must match the client's first-visit line
 
 cd "$(dirname "$0")/.."
 BUILD=build

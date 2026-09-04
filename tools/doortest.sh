@@ -1,9 +1,6 @@
 #!/bin/sh
-# doortest.sh -- the compiler's proof, driven through the door.
-#
-# The same proof cctest2.sh types on the screen, run over ssh: no
-# key timings, no coordinates, and the terminal's own answers come
-# back as text. proof.c and words.h ride in on the exchange disk.
+# doortest.sh -- cctest2's compiler checks, driven over ssh instead of the screen.
+# - proof.c and words.h arrive on the exchange disk; answers come back as text
 
 cd "$(dirname "$0")/.."
 BUILD=build

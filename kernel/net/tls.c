@@ -1,24 +1,8 @@
 /*
- * tls.c -- TLS 1.3, client side, one suite: X25519 + AES-128-GCM-SHA256.
- *
- * The one modern handshake, reduced to its spine. We offer a single
- * group and a single cipher, send a ClientHello, take the server's
- * hello and its encrypted flight, derive the schedule RFC 8446 lays
- * out, check the server's Finished, send ours, and then the channel
- * is a sealed pipe the http request rides through.
- *
- * What is honestly missing is identity. The server's certificate and
- * its signature are read past and NOT verified: there is no RSA or
- * ECDSA here and no store of trusted roots, so this proves that the
- * bytes on the wire are private and unaltered between us and whoever
- * answered -- not that whoever answered is who the name claims. That
- * last step is its own milestone, and until it lands the channel is
- * sealed but unauthenticated, which the shell says in plain words.
- *
- * One record's worth of state, one connection at a time, borrowing
- * net.c's tcp stream and the crypto below it. Nothing here is fast;
- * a handshake is a handful of public-key operations and the rest is
- * bookkeeping.
+ * tls.c -- TLS 1.3 client, one suite: X25519 + AES-128-GCM-SHA256.
+ * - ClientHello, server flight, RFC 8446 schedule, Finished both ways; then a sealed pipe for http
+ * - certificate and signature are read past and NOT verified (no RSA/ECDSA, no root store); the shell says so
+ * - one connection at a time on net.c's tcp stream
  */
 #include <eb/net.h>
 #include <eb/crypto.h>

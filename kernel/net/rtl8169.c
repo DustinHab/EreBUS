@@ -1,15 +1,7 @@
 /*
- * rtl8169.c -- the Realtek gigabit family: 8168, 8169, 8101 and kin,
- * which is to say most machines with a cable socket.
- *
- * Descriptor rings like the e1000's, spoken to through io ports like
- * the 8139's. The family has a decade of revisions with their own
- * initialisation folklore; this driver does only what the common
- * programming model promises -- reset, rings, enable -- and refuses
- * quietly if the silicon does not come up. Written against the
- * documentation and the emulator has no model of it, so until it has
- * met real hardware it should be read as a considered attempt, and
- * says so in the boot log.
+ * rtl8169.c -- Realtek gigabit family (8168, 8169, 8101) over io ports, descriptor rings.
+ * - common programming model only: reset, rings, enable; refuses quietly if the silicon does not come up
+ * - written against documentation, no emulator model; unproven on hardware and says so in the boot log
  */
 #include <eb/net.h>
 #include <eb/pci.h>

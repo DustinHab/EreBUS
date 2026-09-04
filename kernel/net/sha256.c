@@ -1,11 +1,6 @@
 /*
- * sha256.c -- the one hash, with its keyed and derived forms.
- *
- * FIPS 180-4 SHA-256, HMAC over it, and the two HKDF steps TLS 1.3
- * builds its whole key schedule from. Nothing clever: the compression
- * function as published, a copyable context so a transcript can be
- * snapshotted mid-stream, and lengths counted in bytes until the
- * final bit-length is written.
+ * sha256.c -- SHA-256 (FIPS 180-4), HMAC, and the two HKDF steps of TLS 1.3.
+ * - copyable context so a transcript can be snapshotted mid-stream
  */
 #include <eb/crypto.h>
 

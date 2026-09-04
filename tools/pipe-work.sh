@@ -1,12 +1,7 @@
 #!/bin/sh
-# pipe-work.sh -- two machines, one lends its processor.
-#
-# A welcomes work in its settings; B writes a recipe in the language,
-# stands on it, presses ask, and the answer comes home: 6 times 7,
-# computed over there, journalled here as "job 1 answers: 42". A
-# second recipe loops forever and proves the budget: the interpreter
-# on A ends it, and B hears "it ran out of time". No machine trusts
-# the other with anything but a text and a way home.
+# pipe-work.sh -- far work: A lends its processor to B.
+# - A sets "work | welcomed"; B asks a recipe; the journal shows "job 1 answers: 42"
+# - a second recipe loops forever; A's time budget ends it; B hears "it ran out of time"
 
 cd "$(dirname "$0")/.."
 BUILD=build

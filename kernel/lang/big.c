@@ -1,9 +1,5 @@
 /*
- * big.c -- room for the language tools' large tables.
- *
- * Contiguous frames through the direct map: a run of pages the
- * compiler or the assembler keeps for the life of the system. Nothing
- * here is freed; the tables are asked for once.
+ * big.c -- contiguous frames for the language tools' tables; allocated once, never freed.
  */
 #include <eb/lang.h>
 #include <eb/pmm.h>

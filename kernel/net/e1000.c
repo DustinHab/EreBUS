@@ -1,27 +1,9 @@
 /*
- * e1000.c -- Intel's cabled cards, the ones that speak in plain
- * descriptors: the 8254x family, the PCI Express parts that followed
- * it, and the ones built into a chipset.
- *
- * The card is two rings of descriptors in memory: one it fills with
- * frames from the wire, one it drains onto it. The driver hands over
- * physical buffers, moves two tail pointers, and that is the whole
- * conversation. No interrupts are taken: the one thread that speaks
- * to the network polls between its own waits, so a quiet card costs a
- * register read and nothing else.
- *
- * Three generations, one driver, because the part that matters did not
- * change. The rings live at the same addresses and the descriptors
- * have the same shape from the 82540 of 2002 to the I219 of today.
- * What did change is small and named here: where the little serial
- * memory holding the address is read from, and whether the card may be
- * reset at all -- one built into a chipset shares its wire with the
- * firmware's own management, and pulling the reset line can take the
- * link down in a way nothing here could put back.
- *
- * Everything here is deliberately below the protocols: this file
- * knows frames, not addresses. What travels in them is net.c's
- * business.
+ * e1000.c -- Intel cabled cards with legacy descriptors: 8254x, the PCIe parts, chipset-integrated ones.
+ * - two descriptor rings, polled by the network thread; no interrupts
+ * - three families in one ID table: EEPROM read register differs, the chipset family is never reset
+ * - PCIe family: GIO master disable before reset
+ * - frames only; protocols live in net.c
  */
 #include <eb/net.h>
 #include <eb/pci.h>

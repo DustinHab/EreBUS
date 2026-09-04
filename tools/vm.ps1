@@ -1,15 +1,7 @@
-# vm.ps1 -- the live machine, in a native window on the desktop.
-#
-# Runs the Windows build of QEMU rather than the one inside WSL: WSLg
-# opens windows for Linux programs and then, some days, never paints
-# into them. A native window has no such moods.
-#
-# One instance at a time: a new start replaces the old. The store is
-# kept unless "fresh" is asked for, so the machine that appears is the
-# machine that was left.
-#
+# vm.ps1 -- the live machine in a native Windows QEMU window (WSLg windows are unreliable).
 #   powershell -File tools\vm.ps1          start with the existing store
 #   powershell -File tools\vm.ps1 fresh    start with an empty store
+# - one instance; a new start replaces the old; the ssh door is host port 22222
 
 param([string]$mode = "")
 
@@ -63,5 +55,5 @@ if (Test-Path $exchange) {
     @xchgArgs `
     -device "e1000,netdev=n0" `
     -netdev "user,id=n0,hostfwd=udp::7801-:7800,hostfwd=tcp::8080-:80,hostfwd=tcp::22222-:22" `
-    -name "Erebus" `
+    -name "EreBUS" `
     -serial "file:$(Join-Path $build 'vm-serial.log')"

@@ -1,20 +1,7 @@
 /*
- * pmm.c -- physical frame allocator.
- *
- * A bitmap: one bit per 4 KiB frame, set when the frame is in use.
- *
- * A bitmap rather than a free list because a free list stores its links
- * inside the free pages themselves, which means every allocation and
- * every release writes to memory that is, by definition, not owned by
- * anyone. That is fast and it is also a place where a stray write is
- * invisible until the allocator hands out the same frame twice. The
- * bitmap keeps its bookkeeping in one known region that can be checked,
- * and costs one bit per frame -- 16 KiB for half a gigabyte of memory.
- *
- * The bitmap only covers real memory. Device windows sit at addresses
- * far above installed RAM (a PCIe window can start at a terabyte), and
- * spanning those would inflate the bitmap by megabytes to describe
- * frames that will never be handed out.
+ * pmm.c -- physical frame allocator: one bit per 4 KiB frame.
+ * - bookkeeping in one known region instead of inside the free pages (checkable; 16 KiB per 512 MiB)
+ * - covers installed RAM only; device windows above it are not tracked
  */
 #include <eb/pmm.h>
 #include <eb/mm.h>

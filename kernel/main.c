@@ -1,13 +1,7 @@
 /*
- * main.c -- kernel entry point.
- *
- * Milestone 2: validate the handover, take over the display and the
- * serial port, start the clock, install descriptor and interrupt
- * tables, and report the machine we found.
- *
- * The output is a terse start-up log, not a demonstration: one line per
- * finding, prefixed by the part that reported it. Anything long-winded
- * goes to the serial port only.
+ * main.c -- kernel entry: handover check, console, clock, tables, memory, objects,
+ * devices, network, boot-time install offer, standard programs, shell.
+ * - start-up log: one line per finding, prefixed by the reporting part
  */
 #include <eb/types.h>
 #include <eb/io.h>
@@ -1168,7 +1162,7 @@ void kmain(eb_boot_info *bi)
     if (clock_ok) kout_set_clock(time_ns);
     time_read_rtc();
 
-    kprintf("\n\nErebus %s (x86_64)\n", erebus_version);
+    kprintf("\n\nEreBUS %s (x86_64)\n", erebus_version);
     kprintf("boot: handover verified, version %u\n", bi->version);
     if (bi->version >= 3 && bi->loader_file && bi->kernel_file) {
         loader_file = (const u8 *)phys_to_virt(bi->loader_file);

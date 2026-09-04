@@ -1,22 +1,7 @@
 /*
- * time.c -- time stamp counter and the periodic tick.
- *
- * Two sources, on purpose:
- *
- * The time stamp counter is a register that increments with the core
- * clock. Reading it is a single instruction and costs nothing, which is
- * what makes per-line timestamps affordable. What it does not know is
- * how fast it counts -- no register reports that.
- *
- * The programmable interval timer does know: it is driven by a crystal
- * running at a fixed 1.193182 MHz, a number inherited from the colour
- * subcarrier of NTSC television by way of the original IBM PC. So we
- * let the PIT run for a known span and count how far the TSC got.
- *
- * Channel 2 is used for that, not channel 0. Channel 2 was wired to the
- * speaker and can be gated by software, which means it can be polled
- * without any interrupt being configured yet. Channel 0 is then left
- * free for the actual tick.
+ * time.c -- TSC for timestamps, PIT for the tick.
+ * - TSC rate measured against PIT channel 2 (software-gated, pollable before interrupts exist)
+ * - PIT channel 0 drives the periodic tick
  */
 #include <eb/time.h>
 #include <eb/thread.h>

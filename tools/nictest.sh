@@ -1,17 +1,7 @@
 #!/bin/sh
-# nictest.sh -- every cabled card this system drives, one boot each.
-#
-# A card is working when an address arrives by lease: the machine put a
-# request on the wire and read the answer back off it, which is both
-# rings proven in one go. Each card is also given an address of its own
-# on the command line, so the log shows whether the driver read the
-# card's name out of the right register rather than a plausible wrong
-# one.
-#
-# The last boot is the case a real desktop board actually presents: two
-# Intel cards of different families, and one cable. The card with the
-# cable in it is the one worth having, and the machine has to choose it
-# without being told which.
+# nictest.sh -- every cabled NIC family, one boot each: e1000, e1000e, igb, rtl8139.
+# - pass: a DHCP lease arrives (both rings work) and the MAC given on the command line is read back
+# - last boot: two Intel cards, one with its link set off; the linked one must be taken
 
 cd "$(dirname "$0")/.."
 BUILD=build

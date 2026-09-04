@@ -1,8 +1,6 @@
 #!/bin/sh
-# pipe-foreman.sh -- point a task at the foreman; the rest is nobody's
-# click. The foreman hands the task to the desk through the wire, the
-# desk deals the parts to the willing machine, and the answer appears
-# inside the task -- the foreman watching it says so aloud.
+# pipe-foreman.sh -- a task pointed at the foreman is dealt out and answered without a click.
+# - the foreman hands it to the desk over the wire; the answer is written into the task
 
 cd "$(dirname "$0")/.."
 BUILD=build

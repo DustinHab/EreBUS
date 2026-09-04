@@ -1,10 +1,7 @@
 /*
- * fb.c -- framebuffer and screen console.
- *
- * Everything draws straight into the linear buffer the firmware handed
- * us. A proper compositor with double buffering comes later; for start-
- * up the direct route is enough, and it has the advantage that a crash
- * is still visible on screen.
+ * fb.c -- framebuffer, back buffer with a damage box, 8x16 console.
+ * - draws straight to the screen until fb_enable_backbuffer(); then presents per line
+ * - the back buffer is never read from the screen: fill colour and painted height are remembered
  */
 #include <eb/fb.h>
 #include <eb/fmt.h>

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Watch the host wire while B sends: does slirp let the datagram out?
+# pipe-tap.sh -- watches the host wire while B sends: does slirp pass the datagram? (test-rig diagnosis)
 cd "$(dirname "$0")/.."
 BUILD=build
 

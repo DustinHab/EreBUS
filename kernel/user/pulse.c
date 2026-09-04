@@ -1,14 +1,6 @@
 /*
- * pulse.c -- the machine's vitals, drawn instead of listed.
- *
- * Point pulse at a picture and at the activity page, and once a
- * second it paints one column: the used memory as a blue bar from
- * the bottom, the processor's busy share as a red mark, a grey
- * cursor walking ahead. The picture is the history; the activity
- * page stays the numbers. Which gift is which is not declared -- the
- * one pulse may write into is the canvas, the readable one is the
- * page, found out the way every program here finds things out: by
- * trying.
+ * pulse.c -- ring-3 program: paints one column per second into a picture (memory as blue bar, processor share as red mark, grey cursor).
+ * - inputs: a writable picture and the readable activity page; which is which is found out by trying
  */
 #include <eb/types.h>
 

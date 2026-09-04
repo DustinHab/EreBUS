@@ -1,14 +1,6 @@
 /*
- * term.h -- the terminal: the system spoken to in lines.
- *
- * The core knows nothing of screens. A session holds a standpoint in
- * the graph -- the same kind of walk the shell makes with clicks --
- * takes one line at a time, and appends what it has to say to its
- * transcript. The screen's terminal view is one feeder of one
- * session; a visitor who came in through the door over the network
- * gets a session of their own and speaks through exactly this
- * interface. That is the whole design: the terminal is a place words
- * go, not a place pixels come from.
+ * term.h -- terminal interface: a session holds a standpoint in the graph, takes lines, appends to its transcript.
+ * - the screen's terminal view and the door are two feeders of the same interface; nothing here draws
  */
 #ifndef EB_TERM_H
 #define EB_TERM_H

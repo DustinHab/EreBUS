@@ -1,16 +1,7 @@
 /*
- * runner.c -- the program that runs what a text says.
+ * runner.c -- ring-3 program that runs a text as a script; the text is read line by line and stays live.
  *
- * This is how programs are written inside the system: an ordinary text
- * object, handed to an ordinary process. The runner is the process; the
- * text is the program. The first thing the runner is given is its
- * words, held read-only, and it reads them line by line as it goes --
- * which means the text stays live. Edit a running script and the next
- * pass through a line runs the new words. There is no build step, no
- * load step, and nothing installed: cut the reference and the program
- * is words again.
- *
- * The language is one page. A line is a word and its operands:
+ * Language, one line = word + operands:
  *
  *   note ...         a remark; the line does nothing
  *   say <words>      speak up to 24 letters to the console
@@ -29,28 +20,9 @@
  *   back <n>         jump n lines back
  *   stop             the end
  *
- * "it" is the latest thing the runner was given after its words. The
- * outcome of get, put, tell and answer lands in r: zero for done,
- * below zero for refused -- and refusal is not an error, it is the
- * kernel declining to produce an object for a right the script does
- * not hold. A script finds out what it may do the same way every
- * other program here does: by trying.
- *
- * A script may arrive with a time budget: the first gift's second
- * word says how many seconds it has. When they are spent, the runner
- * says so and ends the script -- resting, waiting and looping
- * included. Scripts sent by other machines always carry one, which
- * is why a visiting script cannot outstay its welcome: the language
- * is the jail, and the clock is on its wall.
- *
- * This file is compiled into the kernel image but never runs as the
- * kernel: the section pragma below puts it among the user programs,
- * mapped read-and-execute into ring 3. Hence its two disciplines. No
- * globals -- the mapping is read-only, so all state lives on the
- * stack. And no string literals -- they would land in the kernel's
- * rodata, outside the mapped window; every message is packed into
- * plain integer constants instead, the same way the assembly
- * programs carry theirs.
+ * - "it" = the latest thing given after the words; get/put/tell/answer set r (0 done, below 0 refused)
+ * - time budget: the first gift's second word, in seconds; scripts from other machines always carry one
+ * - lives in the user section, mapped read-and-execute into ring 3: no globals, no string literals (messages packed into integer constants)
  */
 #include <eb/types.h>
 

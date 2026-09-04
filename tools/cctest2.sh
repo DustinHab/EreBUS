@@ -1,10 +1,7 @@
 #!/bin/sh
-# cctest2.sh -- the compiler's list, checked on the machine.
-#
-# The test program and the text it includes ride in on an exchange
-# disk: they come in as objects on "the disk" under system, the
-# terminal compiles them there, and the image runs. Every check says
-# ok or bad on the console.
+# cctest2.sh -- compiler feature checks on the machine.
+# - proof.c and words.h arrive on the exchange disk as objects under "the disk"
+# - compiled and run through the terminal; each check prints ok or bad
 
 cd "$(dirname "$0")/.."
 BUILD=build

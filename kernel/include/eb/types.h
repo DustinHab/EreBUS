@@ -1,9 +1,5 @@
 /*
- * types.h -- the kernel's base types.
- *
- * Erebus has no C library. Everything that would otherwise come from
- * <stdint.h> lives here, with short names, because these types appear
- * in every other line.
+ * types.h -- base types; there is no C library, so <stdint.h>'s names live here in short form.
  */
 #ifndef EB_TYPES_H
 #define EB_TYPES_H

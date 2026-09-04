@@ -1,12 +1,7 @@
 /*
- * journal.c -- what has happened, kept where everything else is kept.
- *
- * The journal is an ordinary text object. That one decision does all
- * the work: the shell shows it through the lenses it already has, the
- * snapshot writes it out because it is reachable, and time travel shows
- * the journal as it stood then -- a record that is itself part of the
- * history it records. The kernel holds the only writable path to it;
- * the graph holds it read-only.
+ * journal.c -- the event log as an ordinary text object.
+ * - shown through the lenses, written by the snapshot, seen as it stood in time travel
+ * - the kernel holds the only writable path; the graph holds it read-only
  */
 #include <eb/journal.h>
 #include <eb/string.h>

@@ -1,14 +1,7 @@
 /*
- * nic.c -- whichever card answered, and the air above it.
- *
- * The drivers probe in turn and the first that finds its silicon
- * registers here. Everything above -- frames, protocols, the fetch
- * service -- speaks through these calls and never learns which
- * family it is talking to, which is exactly as much as it needs to
- * not know. Nor does it learn whether its frames go down a cable or
- * into the air: while the wireless station is joined to a network,
- * the frames go through it, sealed, and what it unseals comes back
- * up the same way.
+ * nic.c -- the one driven card, and the wireless station above it.
+ * - drivers probe in turn (cards with link first, then any); the first that finds its silicon registers here
+ * - while joined to a wireless network, frames go sealed through wifi.c
  */
 #include <eb/net.h>
 #include <eb/wifi.h>

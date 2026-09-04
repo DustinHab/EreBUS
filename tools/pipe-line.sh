@@ -1,13 +1,7 @@
 #!/bin/sh
-# pipe-line.sh -- two machines, one conversation.
-#
-# A listens, B connects; the same cable as pipe-two.sh. B names A as
-# its peer and speaks first: standing on the line, the letters gather
-# in the bottom row, enter says them. No seal stands yet, so the say
-# knocks first and the word follows the seal. A is already standing
-# on its own line, sees the word arrive, and answers. Both screens
-# are kept, and the wire dump must hold no clear word -- a talk one
-# can read off the cable is not a talk, it is a broadcast.
+# pipe-line.sh -- two machines, one sealed conversation on "the line".
+# - same cable as pipe-two.sh; B names A as peer and speaks first (knock, then the word)
+# - A answers; both screens are kept; the wire dump must contain no clear word
 
 cd "$(dirname "$0")/.."
 BUILD=build

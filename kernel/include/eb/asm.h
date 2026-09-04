@@ -1,27 +1,8 @@
 /*
- * asm.h -- the assembler: a text of instructions becomes an object.
- *
- * This is what makes the machine programmable on itself without a
- * ceiling. The script language is a jail by design; this is the
- * opposite -- anything the processor can do, written in the ordinary
- * words for it, laid into bytes and run through the same eight system
- * calls every program has. The kernel's rules still hold from the
- * outside: a program made here holds what it is given, and nothing
- * else.
- *
- * What the assembler makes is an OBJECT: the bytes of each section
- * (text, rodata, data, bss, user), the names it lays down and the
- * names it only uses, and every place in the bytes where a name's
- * address belongs. The linker (ld.h) joins objects, gives every name
- * its address, and writes those places -- into an image the loader
- * runs, or into the kernel's own shape.
- *
- * The image: a head -- "EBX2", the code's length, the data's, how
- * much zeroed room follows the data, and where in the code to begin
- * -- then the code and the data. The loader in proc.c lays the code
- * at USER_LOAD_CODE, read and execute, and the data at USER_LOAD_DATA,
- * read and write, never both. The older "EBX1" head, without the
- * entry, is still read: it begins at the code's first byte.
+ * asm.h -- assembler interface: a text of instructions becomes an object.
+ * - object: bytes per section (text, rodata, data, bss, user), names laid down and names used, every place wanting an address
+ * - image head "EBX2": code length, data length, zeroed room, entry offset; code at USER_LOAD_CODE (rx), data at USER_LOAD_DATA (rw)
+ * - "EBX1" (no entry) is still read: entry = first code byte
  */
 #ifndef EB_ASM_H
 #define EB_ASM_H

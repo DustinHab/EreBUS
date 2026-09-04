@@ -1,11 +1,5 @@
 /*
- * tally.S -- a program that counts what it is shown.
- *
- * Hand it something readable and it walks the text, counts the words
- * and the lines, and says what it found. It needs nothing but the
- * right to read, changes nothing, and keeps nothing -- the counting
- * program you would want to be handed a document you do not entirely
- * trust, because there is no way for it to do anything else.
+ * tally.S -- ring-3 program: counts words and lines of a readable text; needs the read right only.
  */
 
     .section .user, "ax"

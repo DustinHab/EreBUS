@@ -1,13 +1,7 @@
 /*
- * ccmp.c -- AES in counter mode with a cbc mac, the way 802.11 frames
- * are sealed, and the unwrapping of a wrapped key.
- *
- * CCM is two uses of one key: a mac over the header and the plaintext
- * computed as a cbc chain, and a counter stream that hides the
- * plaintext and the mac both. The frame's nonce is thirteen bytes --
- * the sender's address and a packet number that never repeats under
- * one key -- and the tag is eight bytes, which is what the standard
- * settled on for the air.
+ * ccmp.c -- AES-CCM as 802.11 seals frames, and AES key unwrap.
+ * - one key: CBC-MAC over header and plaintext, counter stream over both
+ * - nonce 13 bytes (sender address + packet number), tag 8 bytes
  */
 #include <eb/crypto.h>
 #include <eb/string.h>

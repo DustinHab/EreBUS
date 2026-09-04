@@ -1,12 +1,8 @@
 #!/bin/sh
-# foreigndisk.sh -- a disk that is not ours is left exactly as found.
-#
-# The store disk is written from sector 1024 up with nothing around
-# it, which on a real machine could be somebody's system disk. Here
-# the machine is booted with a disk that carries a partition table
-# and data in its first sectors. The kernel must refuse it as a
-# store, write nothing to it -- the image is compared byte for byte
-# afterwards -- and come up without a memory all the same.
+# foreigndisk.sh -- a disk with a partition table and data is never written.
+# - boot beside such a disk; the kernel must refuse it as a store
+# - the boot-time offer is declined with escape; the machine must still come up
+# - the image is compared byte for byte afterwards
 
 cd "$(dirname "$0")/.."
 BUILD=build

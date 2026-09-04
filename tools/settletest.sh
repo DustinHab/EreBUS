@@ -1,14 +1,7 @@
 #!/bin/sh
-# settletest.sh -- settling on a disk, from a machine that runs off a stick.
-#
-# The stick image is put on a usb storage device and the machine boots
-# from it; the only sata disk is blank. Without a boot disk on the bus
-# the kernel offers the blank disk instead of taking it. Through the
-# terminal: 'disks', 'settle on disk 1', 'yes' -- the disk gets a boot
-# volume with the loader and the kernel, and a store -- then a text is
-# made, so there is something to keep. The second boot has no stick at
-# all: the machine comes up from the disk it settled on and finds the
-# text.
+# settletest.sh -- 'settle on disk N' from the stick onto a blank sata disk.
+# - boot from the usb stick; decline the boot-time offer; 'disks', 'settle on disk 1', 'yes'; make a text
+# - second boot from the disk alone must find the text
 
 cd "$(dirname "$0")/.."
 BUILD=build

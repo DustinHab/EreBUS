@@ -1,10 +1,5 @@
 #!/bin/sh
-# vm.sh -- start the live VM in a window on the Windows desktop.
-#
-# One instance at a time: a new start replaces the old. The store is
-# kept unless "fresh" is asked for, so the machine that appears is the
-# machine that was left -- which is the whole point of the system.
-#
+# vm.sh -- the live VM in a window; one instance, a new start replaces the old.
 #   tools/vm.sh          start (or restart) with the existing store
 #   tools/vm.sh fresh    start with an empty store
 cd "$(dirname "$0")/.."
@@ -35,5 +30,5 @@ exec qemu-system-x86_64 \
   -device ide-hd,drive=store,bus=ide.1 \
   -net none \
   -display sdl \
-  -name "Erebus" \
+  -name "EreBUS" \
   -serial file:build/vm-serial.log

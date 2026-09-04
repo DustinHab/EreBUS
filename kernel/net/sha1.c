@@ -1,11 +1,5 @@
 /*
- * sha1.c -- SHA-1 and what wireless security builds on it.
- *
- * SHA-1 is not a hash to sign anything with any more; WPA2 keeps it
- * only inside keyed constructions -- the passphrase derivation, the
- * key expansion, the handshake's integrity check -- where the known
- * weaknesses do not reach. So it is here, for that, and nothing else
- * should reach for it.
+ * sha1.c -- SHA-1 and HMAC-SHA1, for WPA2's keyed constructions only.
  */
 #include <eb/crypto.h>
 #include <eb/string.h>

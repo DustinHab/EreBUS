@@ -1,19 +1,8 @@
 /*
- * igb.c -- Intel's later cabled cards: the 82575 and 82576, the 82580
- * and I350, and the I210 and I211 that sit on a great many desktop
- * boards.
- *
- * Same idea as e1000.c and a different shape of descriptor, which is
- * why it is a separate file rather than another branch in that one.
- * These cards were built for many queues at once, so the rings moved
- * out of the fixed addresses the older family used into a block per
- * queue, and the descriptors grew a second form: what the driver
- * writes into one and what the card writes back over it are no longer
- * the same layout. One queue is used here. A machine that needs
- * sixteen of them is not this machine yet, and pretending otherwise
- * would be sixteen times the code for none of the benefit.
- *
- * No interrupts, as everywhere here: the network thread polls.
+ * igb.c -- Intel 82575/82576, 82580/I350, I210/I211: advanced descriptors, one queue.
+ * - per-queue register blocks; descriptors written and written back in different layouts
+ * - polled by the network thread; no interrupts
+ * - PHY over MDIC (address from MDICNFG on parts after the 82575); PHPM says whether the PHY sleeps
  */
 #include <eb/net.h>
 #include <eb/pci.h>

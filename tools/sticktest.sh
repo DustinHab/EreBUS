@@ -1,9 +1,6 @@
 #!/bin/sh
-# sticktest.sh -- the whole system on one disk, twice booted.
-#
-# build/stick.img alone: no second disk, no exchange disk. The kernel
-# must find the store partition on the disk it booted from, keep what
-# is typed on the first boot, and have it back on the second.
+# sticktest.sh -- build/stick.img as the only disk, booted twice.
+# - the store partition on the boot disk must be found; what is typed on boot 1 must be back on boot 2
 
 cd "$(dirname "$0")/.."
 BUILD=build

@@ -1,16 +1,6 @@
 /*
- * cipher.S -- a program that turns writing over.
- *
- * Hand it something it may change and it walks the whole payload,
- * rotating every letter thirteen places. The rotation is its own
- * inverse: hand it the same thing again and the writing comes back.
- * Nothing is stored, no key is kept -- the transformation is the whole
- * of it, applied in place to the one object everyone is looking at.
- *
- * It makes the rights legible in the plainest way there is. Held with
- * writing, it changes what everyone sees, immediately. Held without,
- * it changes nothing and says so -- not because it checked a rule, but
- * because the kernel would not produce the object for a write.
+ * cipher.S -- ring-3 program: rotates every letter of the payload by thirteen, in place; its own inverse.
+ * - without the write right it changes nothing and says so
  */
 
     .section .user, "ax"

@@ -1,15 +1,7 @@
 /*
- * trap.c -- interrupt descriptor table, dispatch, and crash reporting.
- *
- * Three jobs live here:
- *   - building the table that points every vector at its entry stub
- *   - routing what arrives: exceptions one way, device interrupts the
- *     other
- *   - turning an unhandled exception into something a person can read
- *
- * The last one matters more than it looks. Without it, a mistake in the
- * kernel shows up as a machine that reboots silently, and one is left
- * guessing. With it, the fault says where it happened and why.
+ * trap.c -- interrupt descriptor table, dispatch, crash reporting.
+ * - the table points every vector at its stub; exceptions and device interrupts are routed apart
+ * - an unhandled exception is printed with place and cause instead of a silent reboot
  */
 #include <eb/trap.h>
 #include <eb/gdt.h>

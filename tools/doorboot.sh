@@ -1,15 +1,9 @@
 #!/bin/sh
-# doorboot.sh -- a machine started for a door test, in the background.
-#
+# doorboot.sh -- starts a machine for a door test in the background (sourced).
 #   DOOR_EXTRA="<more qemu arguments>" . tools/doorboot.sh
-#
-# Boots a copy of the door store (tools/door.sh makes it) with port 22
-# reachable as 2222 on the host, waits until the door is open, and
-# leaves QEMU running as $DOOR_PID with its serial log in
-# $DOOR_SERIAL. door_say "<line>" runs one terminal line through ssh
-# and prints the answer; door_stop ends the machine. The extra
-# arguments travel in a variable: a sourced script has no arguments
-# of its own under a plain sh.
+# - boots a copy of build/door-store.img, port 22 forwarded to host 2222
+# - sets $DOOR_PID and $DOOR_SERIAL; door_say "<line>" runs one line over ssh; door_stop ends it
+# - extra arguments go through DOOR_EXTRA: a sourced script has no arguments under plain sh
 
 cd "$(dirname "$0")/.."
 BUILD=build

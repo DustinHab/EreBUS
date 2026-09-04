@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------
-# Erebus -- build system
+# EreBUS -- build system
 #
 # Deliberately a single, top-to-bottom makefile: no generator, no
 # configuration layer, no third-party libraries. What is here can be

@@ -1,22 +1,8 @@
 /*
- * foreman.c -- the program that keeps far work moving.
- *
- * Point a task at the foreman and it is handled without another
- * click: the foreman hands the task to the desk through the wire,
- * watches the task's own text until the answer is written into it,
- * and says so. A task whose first line carries "again N" is handed
- * in again every N seconds -- the desk strips the old answers off,
- * so a standing task accumulates its history of results.
- *
- * The foreman holds what it was given and nothing else: the wire,
- * send-only, wired at birth like fetch's; and whatever tasks are
- * pointed at it. It cannot read the network, the disk, or anything
- * it was not handed -- it is a clerk with an out-tray, and the
- * out-tray is the only door.
- *
- * The same two disciplines as the runner: this file is mapped
- * read-only into ring 3, so no globals and no string literals --
- * every said line is packed into integer constants.
+ * foreman.c -- ring-3 program: hands tasks to the desk over the wire and watches the task's text for the answer.
+ * - "again N" in a task's first line repeats it every N seconds; the desk strips old answers
+ * - holds the wire (send-only, given at start) and the tasks pointed at it, nothing else
+ * - mapped read-only into ring 3: no globals, no string literals
  */
 #include <eb/types.h>
 

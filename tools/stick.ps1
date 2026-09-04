@@ -1,11 +1,8 @@
-# stick.ps1 -- writes build\stick.img onto a usb stick. Run as administrator.
-#
+# stick.ps1 -- writes build\stick.img onto a usb stick (run as administrator).
 #   powershell -File tools\stick.ps1            lists the disks
 #   powershell -File tools\stick.ps1 <number>   writes the stick
-#
-# Everything on that disk is lost. The script refuses anything that is
-# not on usb, anything larger than 128 GB, and anything but the disk
-# number typed back at the prompt.
+# - refuses non-usb disks, disks over 128 GB, and any answer but the disk number at the prompt
+# - everything on the stick is lost
 
 param([int]$Disk = -1)
 

@@ -1,24 +1,8 @@
 /*
- * wifi.c -- a wireless station.
- *
- * Above it the stack sees the same frames a cable would carry. Below
- * it a radio: three verbs, send a frame into the air, hand up what
- * arrived, name the antenna. In between, here: hearing the networks
- * around, joining one the WPA2 way, and sealing every data frame.
- *
- * The WPA2 way, in full: the passphrase and the network's name become
- * a 32-byte master key by 4096 rounds of HMAC-SHA1; the four-way
- * handshake mixes that with two fresh nonces and both addresses into
- * the session keys -- one to check the handshake itself, one to
- * unwrap the group key the access point sends, one to seal the data;
- * and every frame after that is AES-CCM with a packet number that
- * never repeats, so a frame recorded cannot be played back.
- *
- * The radio the machine has today is the test bench's: 802.11 frames
- * carried inside ethernet frames down the wire to a virtual access
- * point on the host. It is a radio in every way but the antenna. A
- * real chip's driver -- and every chip needs its own, with the
- * maker's firmware -- plugs in under the same three verbs.
+ * wifi.c -- wireless station: scan, WPA2 join, seal every data frame.
+ * - radio interface, three verbs: send a frame, hand up what arrived, name the antenna
+ * - WPA2: 4096 rounds HMAC-SHA1 master key, four-way handshake, group key unwrap, AES-CCM with a packet number that never repeats
+ * - current radio: 802.11 frames inside ethernet frames to the test bench's virtual access point; a real chip's driver plugs in under the same verbs
  */
 #include <eb/wifi.h>
 #include <eb/net.h>

@@ -1,13 +1,6 @@
 /*
- * x25519.c -- the key agreement, RFC 7748.
- *
- * This is the TweetNaCl arrangement of Curve25519: the field element
- * is sixteen 16-bit limbs carried in 64-bit words, and the scalar
- * multiply is a Montgomery ladder that takes the same steps and makes
- * the same swaps whatever the secret bits are. It is chosen for being
- * small enough to read in one sitting and known correct against the
- * published vectors -- the reference the whole world checks against.
- * One handshake needs two of these, and two are nothing.
+ * x25519.c -- key agreement, RFC 7748, TweetNaCl arrangement.
+ * - field elements as sixteen 16-bit limbs in 64-bit words; Montgomery ladder with constant steps and swaps
  */
 #include <eb/crypto.h>
 #include "gf25519.h"

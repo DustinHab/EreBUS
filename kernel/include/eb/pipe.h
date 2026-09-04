@@ -4,7 +4,7 @@
 #include <eb/types.h>
 #include <eb/object.h>
 
-/* The object pipe: how an object travels to another Erebus.
+/* The object pipe: how an object travels to another EreBUS.
  *
  * A system function, not a thing in the graph: the shell offers
  * "send" on any readable data object, the kernel carries it to the

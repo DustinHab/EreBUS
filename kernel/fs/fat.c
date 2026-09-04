@@ -1,16 +1,9 @@
 /*
- * fat.c -- the exchange disk and the boot disk, spoken in the world's
- * own format.
- *
- * FAT32 because that is what sticks and cards actually wear, and what
- * the firmware reads the kernel from. The reader takes a directory's
- * files in as objects; the writer lays objects down as files with
- * plain 8.3 names; the installer turns the names in \erebus so that
- * the next start runs a kernel built here. Nothing here mounts,
- * caches or defers beyond one sector of the fat: every operation
- * walks the disk when it runs, and the honest limits -- 4 MiB per
- * file coming in and 16 MiB going out, long names read but not
- * written -- are stated rather than papered over.
+ * fat.c -- FAT32: the exchange disk and the boot volume.
+ * - read: directory files become objects (take in); write: objects become 8.3 files (write out)
+ * - install: kernel.new -> kernel.elf with kernel.old kept; loader replaced via BOOTX64.NEW
+ * - boot volume found on the store's disk (GPT EFI partition, MBR, or LBA 0), else the first port
+ * - one FAT sector cached; limits: 4 MiB in, 16 MiB out, long names read only
  */
 #include <eb/fat.h>
 #include <eb/blk.h>

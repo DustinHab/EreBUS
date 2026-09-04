@@ -1,16 +1,7 @@
 /*
- * ssh.h -- the door: the terminal reached over the network.
- *
- * Real ssh, so that any client anyone already has can knock: version
- * 2, curve25519-sha256 for the exchange, ssh-ed25519 for the host's
- * name and the visitor's, aes128-gcm@openssh.com on the wire. One
- * profile, because every algorithm beyond the needed ones is attack
- * surface wearing a feature's clothes.
- *
- * Who may come in is not a user table: it is the "door |" lines in
- * the settings, each one a public key. The key is the person. A
- * visitor who proves they hold one gets a terminal session of their
- * own, walking the same graph from the same beginning as the screen.
+ * ssh.h -- the door: ssh version 2 into a terminal session of the visitor's own.
+ * - one profile: curve25519-sha256, ssh-ed25519, aes128-gcm@openssh.com
+ * - who may come in: "door |" lines in the settings, one public key each
  */
 #ifndef EB_SSH_H
 #define EB_SSH_H

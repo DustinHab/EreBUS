@@ -1,18 +1,5 @@
 /*
- * switch.S -- the context switch.
- *
- * Only the callee-saved registers are touched. Everything else the ABI
- * already treats as destroyed across a call, so whoever called us has
- * either saved it or does not care -- and a switch is, from the running
- * code's point of view, a function call that happens to take a very
- * long time.
- *
- * The flags go too, because they carry the interrupt enable bit. A
- * thread suspended inside an interrupt handler was running with
- * interrupts off and has to come back that way; one that yielded
- * voluntarily comes back with them on. Restoring the wrong one would
- * either drop interrupts for good or re-enable them halfway through a
- * handler.
+ * switch.S -- context switch: callee-saved registers and the flags (interrupt enable bit) only.
  *
  * switch_stack(u64 *save_rsp, u64 load_rsp)
  *   rdi: where to write the outgoing thread's stack pointer

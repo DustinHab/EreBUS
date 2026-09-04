@@ -1,15 +1,7 @@
 /*
  * gdt.c -- global descriptor table and task state segment.
- *
- * In long mode segments are largely meaningless: base and limit are
- * ignored, leaving privilege level, code/data and the L bit for 64-bit.
- * They still cannot be left out -- the hardware needs valid descriptors
- * for every ring transition, and the task state segment is the only
- * place emergency stacks can live.
- *
- * The descriptors are written as finished numbers. Assembling them from
- * bitfields looks tidier but only moves the place where a mistake can
- * hide, and a typo here means a silent reboot.
+ * - descriptors written as finished numbers
+ * - the TSS holds the emergency stacks
  */
 #include <eb/gdt.h>
 #include <eb/fmt.h>

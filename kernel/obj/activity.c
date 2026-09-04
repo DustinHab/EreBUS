@@ -1,16 +1,7 @@
 /*
- * activity.c -- what the machine is doing, kept where everything is.
- *
- * The same trick as the time and the journal: one ordinary text
- * object, one writer. The kernel rewrites it every second, the lenses
- * show it, the snapshot takes it along, and whoever is handed the
- * reference sees the machine's pulse without gaining a single right
- * beyond reading a text.
- *
- * The processor shares are not estimates. Every handover of the
- * processor books the interval to the thread that held it, so a row
- * saying 3% means three hundredths of the last second, clock-measured.
- * The boot thread only halts; its share is the idle in the summary.
+ * activity.c -- the machine's load as one text object, rewritten every second.
+ * - processor shares are clock-measured per handover, not estimated; the boot thread's share is the idle
+ * - shown through the lenses, taken along by the snapshot; the reference grants no more than reading a text
  */
 #include <eb/activity.h>
 #include <eb/proc.h>

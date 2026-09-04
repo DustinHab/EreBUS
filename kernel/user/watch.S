@@ -1,12 +1,5 @@
 /*
- * watch.S -- a program that notices.
- *
- * Hand it something readable and it keeps looking at the opening of
- * it. When what it sees is no longer what it saw, it says so -- once
- * per second at most, so a burst of typing is one remark and not a
- * chorus. It cannot say what changed or who changed it; it holds the
- * right to read and nothing else, and everything it will ever know is
- * what anyone holding that right could know by looking.
+ * watch.S -- ring-3 program: says when the opening of a readable object changes, at most once a second.
  */
 
     .section .user, "ax"

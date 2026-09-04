@@ -1,13 +1,6 @@
 #!/bin/sh
-# cctrial.sh -- kernel files through the machine's compiler, on the host.
-#
-# Measures the distance to a kernel built on the machine: each file is
-# included whole under a borrowed main and pushed through cchost. Three
-# outcomes are told apart: an image (the file stands on its own), a
-# compile that only lacks other files' names at the assembling step
-# (the linking question, not the compiler's), and a file the compiler
-# cannot read yet, with the line it names.
-#
+# cctrial.sh -- kernel files through the machine's compiler (cchost), on the host.
+# - each file is compiled on its own; outcome: image, missing names only, or compile error with line
 #   cctrial.sh            a handful of files
 #   cctrial.sh all        every kernel file
 #   cctrial.sh <files>    those

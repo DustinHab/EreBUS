@@ -1,9 +1,5 @@
 /*
- * start.S -- the first kernel code after the jump out of the loader.
- *
- * The loader calls us using the SysV ABI, which means RDI already
- * points at the eb_boot_info. So all we need is our own stack -- the
- * loader's stack sits in memory we are about to reclaim.
+ * start.S -- first kernel code after the loader: RDI = eb_boot_info (SysV), switch to the kernel's own stack.
  */
 
     .section .text.boot, "ax"

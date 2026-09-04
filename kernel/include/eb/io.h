@@ -1,8 +1,5 @@
 /*
- * io.h -- access to the x86 I/O address space.
- *
- * A separate I/O space is a leftover from 1978, but the serial port and
- * the PS/2 controller hang off it, so here we are.
+ * io.h -- x86 port I/O (serial port, PS/2 controller, PIT).
  */
 #ifndef EB_IO_H
 #define EB_IO_H

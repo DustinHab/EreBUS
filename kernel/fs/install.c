@@ -1,24 +1,8 @@
 /*
- * install.c -- the offer to take a disk, made while the machine starts.
- *
- * This is the same work "disks", "settle" and "yes" do from the
- * terminal, and it calls exactly those; nothing here knows what a
- * partition table looks like. What it adds is the asking. A person who
- * has just written the image to a stick and started a machine with it
- * should not have to already know the words.
- *
- * The rules it keeps are the ones that make an offer safe to accept:
- *
- *   - it is only made when there is nothing to lose by making it, which
- *     means no store yet and at least one disk that is not the one the
- *     machine is running from;
- *   - it is only made when somebody can answer, so a machine with no
- *     keyboard boots straight through instead of waiting at a question
- *     nobody will ever see;
- *   - it names the disk, its size, and what is on it before anything is
- *     written, and it takes no answer but the word "yes", typed out;
- *   - it gives up on its own after a while, so a machine that is merely
- *     restarting unattended does not stop here forever.
+ * install.c -- boot-time offer to take a disk; calls settle_disks/settle_plan/settle_yes.
+ * - only with no store, at least one disk, and a keyboard present
+ * - lists the disks, takes a digit, shows what is lost, requires "yes" typed out
+ * - escape or two minutes of silence: continues without a store
  */
 #include <eb/install.h>
 #include <eb/settle.h>

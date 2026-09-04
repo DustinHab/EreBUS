@@ -1,18 +1,8 @@
 /*
- * ahci.c -- SATA through an AHCI controller.
- *
- * The controller is told what to do by writing structures into memory
- * and then setting one bit: a list of command headers, each pointing at
- * a command table holding the ATA command and a list of memory regions
- * to move the data through. Setting the matching bit in the issue
- * register hands it over; the bit clears when it is done.
- *
- * Everything here polls rather than waiting for an interrupt. Storage
- * interrupts are worth having once something else is competing for the
- * processor, but polling has one property worth keeping for now: it
- * works identically during early start-up and inside a fault handler,
- * and a snapshot written while the system is coming apart is exactly
- * when it matters most.
+ * ahci.c -- SATA disks through AHCI, polled (works in early start-up and fault handlers).
+ * - up to 8 disks; roles: boot disk (port 0), store, exchange disk
+ * - store: GPT partition of the store type on the boot disk or the next, else a marked or blank next disk
+ * - foreign disks are never written
  */
 #include <eb/blk.h>
 #include <eb/pci.h>

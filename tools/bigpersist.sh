@@ -1,12 +1,8 @@
 #!/bin/sh
 # bigpersist.sh -- big objects across a boot.
-#
-# Three files ride in on the exchange disk: a source of some 150 KiB, a
-# header below the size at which payloads leave the generation, and a
-# kernel image of two megabytes. The first boot takes them in and
-# writes a generation; the second boot has no exchange disk at all and
-# must still hold all three, byte for byte in length, read through the
-# door.
+# - exchange disk carries a 150 KiB source, a small header, a 2 MiB kernel image
+# - boot 1 takes them in and writes a generation
+# - boot 2 without the exchange disk: all three present with the same lengths, read through the door
 
 cd "$(dirname "$0")/.."
 BUILD=build

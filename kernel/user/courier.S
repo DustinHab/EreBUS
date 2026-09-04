@@ -1,18 +1,6 @@
 /*
- * courier.S -- a program that gives things away.
- *
- * It waits, like the agent. What makes it different is what it does
- * with what arrives. A capability that lets it speak -- a letter box --
- * it keeps: that is somebody it can now reach. Anything else it treats
- * as cargo, and the moment it holds cargo and knows somebody, it passes
- * the cargo on -- read-only, whatever it was handed itself.
- *
- * That last part is the point of its existence. The attenuation is not
- * chosen by the shell and not chosen by the kernel; a program decided,
- * on its own, to give away less than it holds, and the kernel's only
- * involvement is making sure it could not have given away more. The
- * receiving side cannot tell and cannot argue: what arrives is what
- * arrives.
+ * courier.S -- ring-3 program: keeps a letter box it is given, passes any other cargo on read-only.
+ * - the attenuation is the program's decision; the kernel only prevents giving away more than held
  */
 
     .section .user, "ax"

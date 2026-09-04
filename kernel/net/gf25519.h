@@ -1,7 +1,5 @@
 /*
- * gf25519.h -- the field under both curves, shared between x25519.c
- * and ed25519.c. Private to the net directory: nothing above the
- * two curve files needs a field element.
+ * gf25519.h -- the field shared by x25519.c and ed25519.c; private to the net directory.
  */
 #ifndef EB_GF25519_H
 #define EB_GF25519_H

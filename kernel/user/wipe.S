@@ -1,16 +1,6 @@
 /*
- * wipe.S -- a program that blanks what it is given.
- *
- * It writes zeroes across the whole payload, and that is all it does.
- * On most systems this would be the dangerous one; here it is barely
- * dangerous at all, because the generations on the disk still hold
- * what stood before -- wiping clears the present and leaves the past
- * alone, which is what its parting words point at.
- *
- * It is also the one program that needs no right to read. Blanking
- * something is possible without ever seeing it, and the kernel lets
- * exactly that distinction stand: hand it write-only and it works,
- * none the wiser about what it destroyed.
+ * wipe.S -- ring-3 program: zeroes the whole payload; needs the write right only, no read.
+ * - earlier generations on the disk keep what stood before
  */
 
     .section .user, "ax"

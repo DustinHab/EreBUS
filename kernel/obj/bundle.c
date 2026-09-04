@@ -1,12 +1,7 @@
 /*
- * bundle.c -- a list folded into one plain thing, and back.
- *
- * The format is a stream, not a table: a magic word, then entries.
- * Each entry says what it is, what it was called, and -- for the
- * plain kinds -- how many bytes follow. A list opens a nested run of
- * entries and a closing mark ends it. Nothing in the stream is an
- * address or a right; a bundle is substance the way the pipe's wire
- * is, which is exactly why the two fit together.
+ * bundle.c -- a list folded into one byte stream, and back.
+ * - magic word, then entries: kind, name, byte count for plain kinds; a list opens a nested run, a closing mark ends it
+ * - no addresses and no rights in the stream
  */
 #include <eb/bundle.h>
 #include <eb/cap.h>

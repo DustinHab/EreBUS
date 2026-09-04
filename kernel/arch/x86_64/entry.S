@@ -1,9 +1,5 @@
 /*
-* entry.S -- the ring 3 boundary, in both directions.
- *
- * Crossing into the kernel and back is the one place where a mistake is
- * not a bug but a hole, so both paths are written out rather than left
- * to a compiler.
+ * entry.S -- the ring 3 boundary, both directions, written out by hand.
  */
 
     .section .text

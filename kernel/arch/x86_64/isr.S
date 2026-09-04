@@ -1,14 +1,6 @@
 /*
- * isr.S -- interrupt entry stubs.
- *
- * The processor gives the handler almost nothing: a few registers on
- * the stack and, for some exceptions, an error code. It does not say
- * which vector fired. So every vector needs its own entry point that
- * records the number and then joins a common path.
- *
- * Rather than writing 256 labels, the stubs are generated as a table of
- * fixed 16-byte slots. Entry n therefore lives at isr_stubs + n * 16,
- * which the C side can compute without any symbol lookup.
+ * isr.S -- interrupt entry stubs: 256 fixed 16-byte slots, entry n at isr_stubs + n * 16.
+ * - each stub records its vector (and a dummy error code where the processor pushes none) and joins the common path
  */
 
     .section .text

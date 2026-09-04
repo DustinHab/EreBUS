@@ -1,20 +1,8 @@
 #!/bin/sh
-# renewtest.sh -- a newer system put onto an installed machine, and the
-# machine's memory kept.
-#
-# The case: Erebus was settled on a disk some time ago, and a stick with
-# a newer build arrives. Booting the stick beside that disk brings up
-# the newer kernel with the disk's store -- the same graph, the same
-# desktop, and no way to tell from looking that anything is new. The
-# person wants the disk to start with the new system from now on, and
-# wants nothing they made to be lost. 'settle' cannot do it: it empties
-# the disk, and refuses the disk whose store is in use anyway.
-#
-# So: build one system and settle it onto a disk from a stick. Build a
-# second that calls itself "renewed" and put it on the stick. Boot the
-# stick beside the disk, make something, say 'install this kernel'.
-# Then boot the disk alone: it must call itself "renewed", find the
-# graph, and find the thing that was made.
+# renewtest.sh -- 'install this kernel': a newer stick updates a settled disk, store kept.
+# - build "settled", settle it onto a disk from the stick
+# - build "renewed" onto the stick, boot beside the disk, make a text, 'install this kernel'
+# - boot the disk alone: must say "renewed" and restore the graph; no loader fallback
 
 cd "$(dirname "$0")/.."
 BUILD=build
@@ -59,7 +47,7 @@ cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/renew-vars.fd
   -drive id=disk,file=$BUILD/renew.img,format=raw,if=none \
   -device ide-hd,drive=disk,bus=ide.1 \
   -serial file:$BUILD/renew-1.log >/dev/null 2>&1
-grep -a 'Erebus \|laying down\|generation 1 written' $BUILD/renew-1.log | cut -c1-100
+grep -a 'EreBUS \|laying down\|generation 1 written' $BUILD/renew-1.log | cut -c1-100
 
 echo "--- second: the new system on the stick, beside the settled disk ---"
 export VERSION=renewed
@@ -82,7 +70,7 @@ cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/renew-vars.fd
   -drive id=disk,file=$BUILD/renew.img,format=raw,if=none \
   -device ide-hd,drive=disk,bus=ide.1 \
   -serial file:$BUILD/renew-2.log >/dev/null 2>&1
-grep -a 'Erebus \|store partition\|graph restored\|are installed\|generation . written' $BUILD/renew-2.log | cut -c1-100
+grep -a 'EreBUS \|store partition\|graph restored\|are installed\|generation . written' $BUILD/renew-2.log | cut -c1-100
 
 echo "--- third: the disk alone, no stick ---"
 cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/renew-vars.fd
@@ -93,7 +81,7 @@ cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/renew-vars.fd
   -drive id=disk,file=$BUILD/renew.img,format=raw,if=none \
   -device ide-hd,drive=disk,bus=ide.0 \
   -serial file:$BUILD/renew-3.log >/dev/null 2>&1
-grep -a 'Erebus \|store partition\|graph restored\|fell back\|previous one' $BUILD/renew-3.log | cut -c1-100
+grep -a 'EreBUS \|store partition\|graph restored\|fell back\|previous one' $BUILD/renew-3.log | cut -c1-100
 
 # leave the tree calling itself what git says
 unset VERSION
@@ -104,11 +92,11 @@ grep -a 'boot:\|fat:' $BUILD/renew-2.log | cut -c1-100
 
 echo "--- the checks ---"
 ok=1
-grep -aq 'Erebus settled' $BUILD/renew-1.log && echo "the old system settled onto the disk" || { echo "FAILED: the old system did not settle"; ok=0; }
-grep -aq 'Erebus renewed' $BUILD/renew-2.log && grep -aq 'graph restored' $BUILD/renew-2.log \
+grep -aq 'EreBUS settled' $BUILD/renew-1.log && echo "the old system settled onto the disk" || { echo "FAILED: the old system did not settle"; ok=0; }
+grep -aq 'EreBUS renewed' $BUILD/renew-2.log && grep -aq 'graph restored' $BUILD/renew-2.log \
   && echo "the new system booted from the stick and took up the disk's graph" || { echo "FAILED: the stick did not boot beside the disk"; ok=0; }
 grep -aq 'are installed on the boot disk' $BUILD/renew-2.log && echo "it installed itself onto the disk" || { echo "FAILED: install this kernel did not install"; ok=0; }
-grep -aq 'Erebus renewed' $BUILD/renew-3.log && echo "the disk alone now starts the new system" || { echo "FAILED: the disk still starts the old system"; ok=0; }
+grep -aq 'EreBUS renewed' $BUILD/renew-3.log && echo "the disk alone now starts the new system" || { echo "FAILED: the disk still starts the old system"; ok=0; }
 grep -aq 'graph restored' $BUILD/renew-3.log && echo "and the graph is still there" || { echo "FAILED: the graph was lost"; ok=0; }
 grep -aq 'previous one' $BUILD/renew-3.log && { echo "FAILED: the loader fell back to the old kernel"; ok=0; } || echo "and the loader did not fall back"
 [ $ok = 1 ] && echo "an installed machine takes a newer system and keeps its memory" || echo "renewing an installed machine FAILED"

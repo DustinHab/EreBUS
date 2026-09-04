@@ -1,17 +1,6 @@
 /*
  * thread.c -- threads and the round-robin scheduler.
- *
- * Stacks get a guard page.
- *
- * A kernel stack taken from the heap has heap blocks either side of it,
- * so running off the end quietly rewrites somebody else's allocation
- * and the damage surfaces somewhere unrelated, much later. Here each
- * stack sits in its own slot of address space with an unmapped page
- * below it. Running off the end is then a page fault at the exact
- * instruction that did it -- and one that lands on the double fault
- * stack from the TSS, so it gets reported rather than triple faulting.
- * The cost is one page of address space per thread, of which there is
- * an unlimited supply.
+ * - each kernel stack in its own address-space slot with an unmapped guard page below; an overrun is a page fault reported from the double fault stack
  */
 #include <eb/thread.h>
 #include <eb/vmm.h>

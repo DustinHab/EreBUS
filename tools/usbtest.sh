@@ -1,11 +1,6 @@
 #!/bin/sh
-# usbtest.sh -- a keyboard and a mouse on usb, and no PS/2 at all.
-#
-# The machine is booted with its i8042 switched off and an xHCI
-# controller carrying QEMU's usb keyboard and mouse. The keys typed
-# through the monitor can only arrive by usb. The terminal is walked
-# into and a text made and run, as termtest does; the mouse is moved
-# and the screen at the end shows where the pointer went.
+# usbtest.sh -- USB keyboard and mouse on xHCI, i8042 off.
+# - keys can only arrive over usb; a text is made and run; the mouse is moved; screenshot at the end
 
 cd "$(dirname "$0")/.."
 BUILD=build

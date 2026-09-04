@@ -1,12 +1,8 @@
 #!/bin/sh
-# asmtest.sh -- the machine programmed on itself.
-#
-# Through the screen's terminal: assemble the page that describes the
-# machine (it is written to assemble as it stands), run the image it
-# made, and hear it speak. Then a text with a mistake in it, to see
-# the assembler say which line. Then the machine boots again on the
-# same store: the program a person built must come back the way a
-# script does.
+# asmtest.sh -- assembler on the machine, through the screen's terminal.
+# - assembles "the machine" page, runs the image, checks its output
+# - assembles a text with an error, checks the reported line
+# - second boot on the same store: the built program must return
 
 cd "$(dirname "$0")/.."
 BUILD=build

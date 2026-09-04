@@ -5,7 +5,7 @@
 
 /* The object store.
  *
- * This is the part that makes Erebus not a Unix. There are no files and
+ * This is the part that makes EreBUS not a Unix. There are no files and
  * no paths. There is a graph of typed objects, and the only way to
  * reach one is to already hold a reference to it.
  *

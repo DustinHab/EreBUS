@@ -1,15 +1,7 @@
 /*
- * reckon.c -- the calculator, spoken as this system speaks.
- *
- * There is no window with buttons. Point a text at reckon and every
- * line that ends in "=" gets its answer written after it: whole
- * numbers, + - * / %, parentheses, unary minus. A line that already
- * has its answer no longer ends in "=", so pointing the same text
- * again computes only what is newly asked. A line that does not
- * parse gets a "?" -- an honest shrug beats a wrong number.
- *
- * The same two disciplines as every ring-3 C here: no globals, no
- * string literals.
+ * reckon.c -- ring-3 program: appends the answer to every text line ending in "=".
+ * - whole numbers, + - * / %, parentheses, unary minus; a line that does not parse gets "?"
+ * - no globals, no string literals
  */
 #include <eb/types.h>
 

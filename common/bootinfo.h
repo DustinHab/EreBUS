@@ -1,9 +1,6 @@
 /*
- * bootinfo.h -- handover structure from the UEFI loader to the kernel.
- *
- * Included by BOTH sides: the loader (PE/COFF, MS ABI) and the kernel
- * (ELF, SysV ABI). Therefore fixed-width types only and no bitfields --
- * the memory layout must be identical on both sides.
+ * bootinfo.h -- loader-to-kernel handover structure.
+ * - included by loader (MS ABI) and kernel (SysV ABI): fixed-width types only, no bitfields
  */
 #ifndef EREBUS_BOOTINFO_H
 #define EREBUS_BOOTINFO_H

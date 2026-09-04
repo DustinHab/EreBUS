@@ -1,21 +1,9 @@
 /*
- * ld.h -- the linker: objects become one thing that runs.
- *
- * An object (asm.h) knows its own bytes and the names it uses; it
- * does not know where it will lie or where anyone else's names are.
- * The linker lays every object's sections in order, gives each name
- * one address, refuses a name laid down twice or never, and writes
- * every place that wanted an address.
- *
- * Two shapes come out. A PROGRAM is the image the loader runs: code
- * at USER_LOAD_CODE, data at USER_LOAD_DATA, the entry at _start when
- * something lays that name down and otherwise the first byte of code.
- * A KERNEL is the ELF the boot loader reads: linked at -2 GiB, loaded
- * at 2 MiB, text then rodata (with the ring-3 programs in their own
- * page-aligned room) then data and bss, and the names the kernel
- * expects the layout to provide (__kernel_start and its kin). Which
- * shape is wanted is said by the caller; a text that lays down kmain
- * is a kernel.
+ * ld.h -- linker interface: objects -> one thing that runs.
+ * - sections laid in order, one address per name; a name laid down twice or never stops the link
+ * - PROGRAM: code at USER_LOAD_CODE, data at USER_LOAD_DATA, entry = _start if laid down, else the first code byte
+ * - KERNEL: ELF linked at -2 GiB, loaded at 2 MiB; text, rodata (ring-3 programs page-aligned), data, bss; __kernel_start and kin provided
+ * - a text that lays down kmain is a kernel
  */
 #ifndef EB_LD_H
 #define EB_LD_H

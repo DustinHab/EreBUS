@@ -1,16 +1,6 @@
 /*
- * aes_gcm.c -- the one cipher: AES-128 in Galois/Counter mode.
- *
- * Software AES, byte for byte, because the kernel keeps the vector
- * units switched off and there is no SSE state to save for anyone.
- * GCM sits on top: counter mode for the secrecy, a carry-less
- * multiply in GF(2^128) for the seal that proves nobody edited the
- * bytes on the wire.
- *
- * The table lookups leak timing, which on a shared machine would be a
- * real worry. This one speaks outward for one person; the channel it
- * builds is the point, the leak is noted, and a constant-time AES is
- * work for the day the machine serves others.
+ * aes_gcm.c -- AES-128 in Galois/Counter mode, software only (vector units stay off).
+ * - table lookups are not constant-time; noted, single-user machine
  */
 #include <eb/crypto.h>
 #include <eb/cpu.h>

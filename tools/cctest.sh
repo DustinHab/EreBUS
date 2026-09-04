@@ -1,10 +1,7 @@
 #!/bin/sh
-# cctest.sh -- c, compiled on the machine, run on the machine.
-#
-# Through the screen's terminal: compile the compiler's own page (it
-# is a program), run the image, and hear it say hello and the sum it
-# worked out. Then a text with a mistake, to see the compiler say
-# which line.
+# cctest.sh -- C compiler on the machine, through the screen's terminal.
+# - compiles "the compiler" page, runs the image, checks hello and the sum
+# - compiles a text with an error, checks the reported line
 
 cd "$(dirname "$0")/.."
 BUILD=build

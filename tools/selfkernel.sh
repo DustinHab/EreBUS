@@ -1,19 +1,9 @@
 #!/bin/sh
-# selfkernel.sh -- the kernel, built by the machine itself from sources
-# handed in through the door, installed, and booted.
-#
-# This is the whole loop a person at a distance needs: no exchange
-# disk, no stick, no hands on the machine. The door's key goes in
-# through the screen once, as a person would type it. Then one shell
-# session without a pty carries every source in as bytes; 'build' runs
-# in the background and the journal is asked until it names kernel.elf
-# or a failure; 'install kernel.elf' puts it on the boot disk beside
-# the old one; 'restart' boots it. The kernel that comes up must say
-# what the version text handed in with the sources said.
-#
-# Run it under KVM -- sh build/kvm.sh tools/selfkernel.sh -- because
-# the machine's own compiler over the whole tree is minutes on a real
-# processor and an afternoon under emulation.
+# selfkernel.sh -- kernel built on the machine from sources sent through the door, installed, booted.
+# - door key typed through the screen once; sources streamed over one ssh shell session (tools/mkupload.sh)
+# - 'build kernel' in the background; the list is polled for kernel.elf; 'install kernel.elf'; 'restart'
+# - the booted kernel must report the version text sent with the sources
+# - run under KVM: sh build/kvm.sh tools/selfkernel.sh (minutes on a real processor, hours under TCG)
 cd "$(dirname "$0")/.."
 BUILD=build
 KEY=$HOME/.ssh/erebus_remote
@@ -117,11 +107,11 @@ wait
 rm -f $BUILD/selfk-quit $BUILD/selfk-mon
 
 echo "--- what the machine said about itself, each boot ---"
-grep -a 'Erebus .* (x86_64)\|the installed kernel\|previous one' $BUILD/selfk.log | cut -c1-100
+grep -a 'EreBUS .* (x86_64)\|the installed kernel\|previous one' $BUILD/selfk.log | cut -c1-100
 echo "--- the checks ---"
 ok=1
 [ "$(grep -c 'lies here now' $BUILD/selfk-up.txt)" -ge 139 ] && echo "every source went in through the door" || { echo "FAILED: sources missing"; ok=0; }
 [ "$outcome" = built ] && echo "the machine built a kernel from them with its own tools" || { echo "FAILED: no kernel came of it ($outcome)"; ok=0; }
-grep -aq "Erebus $SAYS" $BUILD/selfk.log && echo "and booted it: it says it was $SAYS" || { echo "FAILED: the self-built kernel did not come up"; ok=0; }
+grep -aq "EreBUS $SAYS" $BUILD/selfk.log && echo "and booted it: it says it was $SAYS" || { echo "FAILED: the self-built kernel did not come up"; ok=0; }
 [ $ok = 1 ] && echo "the machine builds, installs and boots its own kernel through the door" || echo "the self-built kernel FAILED"
 echo DONE

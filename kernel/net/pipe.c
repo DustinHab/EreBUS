@@ -1,33 +1,9 @@
 /*
- * pipe.c -- objects crossing between machines, sealed.
- *
- * The wire format is small datagrams over udp. Discovery speaks
- * plainly: a SEEK asks who is there, a HERE answers with a name --
- * names are claims either way, so there is nothing in them to
- * protect. Everything that carries substance travels sealed.
- *
- * The seal is a knock: HELLO carries a fresh x25519 public key and a
- * session number, WELCOME answers with the other side's fresh key,
- * and both ends derive AES-128-GCM keys from the shared secret --
- * one key per direction, a counter per record, replay refused. From
- * then on OFFER, CHUNK and TAKEN ride inside SEALED envelopes; a
- * plain one arriving is turned away. The honest limit, same as the
- * one https carries here: the knock proves privacy against the road,
- * not the identity of who answered it. Keys are fresh at every
- * knock and kept nowhere.
- *
- * An OFFER names the transfer: what kind of thing, what it calls
- * itself, how many bytes. CHUNKs carry the payload in order. When
- * the last byte is in, the receiver answers TAKEN, and the sender
- * stops worrying. No answer means the whole offer is made again, a
- * few times, and then the journal says so; a pipe that loses
- * something silently would be worse than no pipe.
- *
- * Only three kinds cross: text, bytes, pictures. The kinds are named
- * on the wire by their own small numbers rather than by this kernel's
- * type ids, so two machines of different ages still understand one
- * another. Nothing that runs and nothing that grants can be sent,
- * because the wire carries substance, never authority.
+ * pipe.c -- objects between machines, UDP datagrams.
+ * - SEEK/HERE plain (names are claims); HELLO/WELCOME fresh x25519 keys, AES-128-GCM one key per direction, counter per record, replay refused
+ * - OFFER names kind, name, size; CHUNKs in order; TAKEN closes; no answer = offer repeated, then journaled
+ * - kinds on the wire by their own numbers: text, bytes, pictures; nothing that runs or grants
+ * - limit: privacy against the road, not identity of the answerer
  */
 #include <eb/pipe.h>
 #include <eb/net.h>

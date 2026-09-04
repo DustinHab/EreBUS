@@ -1,19 +1,7 @@
 /*
- * ld.c -- the linker.
- *
- * Every object brings its sections, its names and the places that
- * want a name's address. The linker lays the sections one after
- * another -- all the text, then the read-only data, then the data,
- * then the room without values -- gives every public name one
- * address, looks each wanted name up, and writes the addresses in.
- * A name laid down twice, or wanted and laid down by nobody, stops
- * the link with both parties named.
- *
- * Two shapes: the image a program is (asm.h describes its head), and
- * the ELF the boot loader reads for the kernel, with the layout the
- * kernel's own linker script had: linked at -2 GiB, loaded at 2 MiB,
- * three loadable segments, and the names __kernel_start and its kin
- * that the kernel asks the layout for.
+ * ld.c -- linker: objects -> program image (asm.h head) or kernel ELF.
+ * - sections laid text, rodata, data, bss; one address per public name; duplicates and missing names stop the link
+ * - kernel shape: linked at -2 GiB, loaded at 2 MiB, three segments, __kernel_start and kin, symbol table
  */
 #include <eb/ld.h>
 #include <eb/asm.h>

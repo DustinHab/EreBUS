@@ -1,18 +1,6 @@
 #!/bin/sh
-# usbplug.sh -- a mouse pulled out and put back in.
-#
-# A machine that only finds what was already plugged in when it started
-# is a machine you have to restart to change a mouse. The port watch
-# has always been there; what it lacked was the pause the standard asks
-# for between a plug touching its socket and the port being reset. A
-# device is not ready to answer the instant it is electrically present,
-# and one asked too early answers nothing -- which on an emulator never
-# shows, because there the device is ready before the plug is in.
-#
-# So: boot with a keyboard and a mouse, take the mouse away, put it
-# back, and then use it. The pointer moving at the end is the proof
-# that the second enumeration produced a working device and not merely
-# a hopeful log line.
+# usbplug.sh -- a mouse unplugged (device_del) and plugged back in (device_add), then used.
+# - checks: found twice, "is gone" logged, pointer self-test passed, wheel found in the descriptor
 
 cd "$(dirname "$0")/.."
 BUILD=build

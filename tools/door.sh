@@ -1,16 +1,7 @@
 #!/bin/sh
-# door.sh -- a store with the door already told about the test key.
-#
-# Tests that drive the terminal through the ssh door need a machine
-# whose settings carry a "door |" line for the key they hold. Typing
-# that line through the screen is done once here, the honest way, and
-# the store it lands in is kept as build/door-store.img: every door
-# test starts from a copy of it and knocks with the same key.
-#
-# The key lives under the home directory, on a filesystem that knows
-# what 0600 means and keeps its files: a key on the shared drive would
-# be world-readable there, and ssh rightly refuses to touch one, and
-# /tmp does not always survive a restart of the subsystem.
+# door.sh -- makes build/door-store.img: a store whose settings hold the test key.
+# - types the "door |" line once through the screen; door tests copy this store
+# - key under $HOME: the shared drive is world-readable (ssh refuses), /tmp does not persist
 
 cd "$(dirname "$0")/.."
 BUILD=build

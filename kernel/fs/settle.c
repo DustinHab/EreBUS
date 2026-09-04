@@ -1,12 +1,9 @@
 /*
- * settle.c -- making a home for the graph on a disk.
- *
- * A machine booted from a stick, or one whose disks are somebody
- * else's, runs without a memory and says so. These words make one:
- * they show what is on the bus, say exactly what taking a disk, a
- * partition or a gap would cost, and do nothing until told "yes".
- * When they are done the running machine adopts the new store on the
- * spot, and a disk taken whole boots the machine the next time.
+ * settle.c -- 'disks', 'settle on disk N', 'settle in partition P of disk N',
+ * 'settle in the free space of disk N', 'yes'.
+ * - each plan says what is lost; nothing is written before 'yes' (offer valid 180 s)
+ * - whole disk: GPT with EFI boot volume (loader + kernel) and store partition
+ * - the running machine adopts the new store at once
  */
 #include <eb/settle.h>
 #include <eb/blk.h>

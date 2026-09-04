@@ -1,12 +1,8 @@
 #!/bin/sh
-# pipe-identity.sh -- an impostor at a known address is turned away.
-#
-# First, pipe-two.sh: A and B meet, B sends its notes, and B writes
-# A's key into its settings as a "known |" line. Then A comes back
-# with a fresh store -- a fresh door key, the same address -- while B
-# keeps its store, stands where it stood, and presses send again. B's
-# knock is answered with a key that is not the one remembered, and B
-# must refuse: nothing crosses, and the journal says why.
+# pipe-identity.sh -- a peer with a changed key at a known address is refused.
+# - run pipe-two.sh: A and B meet, B remembers A's key as a "known |" line
+# - A returns with a fresh store (new door key, same address); B sends again
+# - B must refuse: nothing crosses, the journal names the reason
 
 cd "$(dirname "$0")/.."
 BUILD=build

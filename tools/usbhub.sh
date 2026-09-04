@@ -1,18 +1,7 @@
 #!/bin/sh
-# usbhub.sh -- a keyboard and a mouse behind a hub, and nothing on the
-# machine's own ports.
-#
-# This is the shape most desks actually have: the ports on the back of
-# the machine carry a hub -- a front panel, a monitor, a box on the
-# desk -- and the keyboard and mouse hang off that. A driver that only
-# walks the controller's own ports finds the hub, names it, and then
-# finds no keyboard anywhere.
-#
-# So: one hub on the controller, a keyboard on its first port and a
-# mouse on its second, the machine's i8042 switched off so nothing can
-# arrive any other way, and a text typed and run to prove the keys got
-# through. The mouse is moved at the end and the screen shows where the
-# pointer went.
+# usbhub.sh -- keyboard and mouse behind a USB hub, i8042 off.
+# - hub on the root port, keyboard on hub port 1, mouse on hub port 2
+# - a text is typed and run; the mouse is moved; screenshot at the end
 
 cd "$(dirname "$0")/.."
 BUILD=build

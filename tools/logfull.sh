@@ -1,12 +1,7 @@
 #!/bin/sh
-# logfull.sh -- the log of big objects running full.
-#
-# A store cut to nineteen megabytes leaves the log two. A source of
-# 160 KiB comes in on the exchange disk and gets a line written to it
-# fourteen times, a generation saved after each; a dozen versions fill
-# the log. The machine must compact it, let the oldest generations go
-# as far as needed and never the newest, and after a second boot still
-# hold the latest text, every line of it.
+# logfull.sh -- the blob log running full.
+# - store of 19 MiB leaves a 2 MiB log; a 160 KiB source gets 14 edits, one generation each
+# - the log must compact, drop the oldest generations only, and keep the latest text after a second boot
 
 cd "$(dirname "$0")/.."
 BUILD=build

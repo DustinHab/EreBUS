@@ -1,9 +1,5 @@
 /*
- * string.c -- the memory routines the compiler takes for granted.
- *
- * clang emits calls to memset/memcpy/memmove/memcmp even where they are
- * never written out (struct assignments, initialisers). Without this
- * file the linker stops with undefined symbols.
+ * string.c -- memset/memcpy/memmove/memcmp and string helpers; clang emits calls to these implicitly.
  */
 #include <eb/types.h>
 

@@ -1,17 +1,8 @@
 #!/bin/sh
-# mkusb.sh -- build/stick.img: the whole system on one disk.
-#
-# A GPT image with two partitions: an EFI system partition holding the
-# loader and the kernel, and a partition of the store's kind -- the
-# type is a GUID of this system's own -- which the kernel finds on any
-# disk and keeps the graph in. Written whole to a usb stick it boots a
-# UEFI machine (Secure Boot off); written to an ssd it is the machine.
-#
+# mkusb.sh -- build/stick.img: GPT with an EFI system partition (loader, kernel) and a store partition.
 #   SIZE_MB=400 sh tools/mkusb.sh
-#
-# On a real machine the stick's own store partition is not reached
-# yet: usb disks are not driven. The store is then a partition of this
-# kind, or a blank disk, on SATA -- or the machine runs without one.
+# - store partition type: E2EB0500-5354-4F52-4552-454255530001
+# - on real hardware usb disks are not driven: the stick boots, its store partition is out of reach
 
 cd "$(dirname "$0")/.."
 make -s >/dev/null || exit 1

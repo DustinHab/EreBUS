@@ -1,26 +1,8 @@
 /*
- * net.c -- enough of the internet to fetch a page.
- *
- * This is a client, not a stack. One thread, one conversation at a
- * time, and only the protocols the errand needs: ARP to find the
- * gateway, DNS over UDP to turn a name into an address, TCP carrying
- * one HTTP/1.0 request and its answer. Nothing listens. Nothing runs
- * concurrently. A lost packet is retransmitted a few times and then
- * the errand fails with its reason written where the answer would
- * have gone.
- *
- * The machine's own address is asked for, not assumed: DHCP runs
- * once when the service comes up, and whatever network answers --
- * the emulator's built-in landlord or a real router -- decides who
- * this machine is, where the way out stands, and who answers names.
- * A network that stays silent gets the emulator's well-known
- * defaults, so the tests neither wait nor lie.
- *
- * Security is the shape of the thing, not a check inside it: the one
- * way to reach this code is a capability to its port, requests name
- * their object by capability, and the service writes only where that
- * capability may write. TLS is honestly absent -- what travels here
- * travels readable, and the page says "http" so nobody mistakes it.
+ * net.c -- client-side network: ARP, DHCP, DNS over UDP, TCP, HTTP/1.0; one conversation at a time.
+ * - one thread; lost packets retried a few times, then the errand fails with its reason where the answer would go
+ * - address by DHCP at start; a silent network gets the emulator defaults
+ * - reachable only through a capability to its port; writes only where that capability may write
  */
 #include <eb/net.h>
 #include <eb/wifi.h>
@@ -101,7 +83,7 @@ static bool have_gw;
 
 /* Neighbours answered for directly: a machine on our own street is
  * spoken to by its own door, not sent through the gateway -- which is
- * what lets two Erebus machines on one wire find each other with no
+ * what lets two EreBUS machines on one wire find each other with no
  * router in between. */
 #define ARP_CACHE 4
 static struct {

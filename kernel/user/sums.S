@@ -1,12 +1,5 @@
 /*
- * sums.S -- a program that fingerprints what it is shown.
- *
- * It reads the whole payload and says one number about it. The number
- * is worthless on its own and precious in a pair: the same thing shown
- * twice answers the same, anything changed answers differently. Hand
- * the same object to sums before and after it travelled through other
- * hands, and the two lines in the journal say whether the journey
- * changed it -- no trust in the couriers required.
+ * sums.S -- ring-3 program: says one checksum of the payload; equal before and after a journey = unchanged.
  */
 
     .section .user, "ax"

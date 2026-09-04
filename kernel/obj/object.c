@@ -1,21 +1,7 @@
 /*
- * object.c -- the object store.
- *
- * Every object is a header followed by its payload and its outgoing
- * reference slots, in one allocation. One allocation rather than three
- * because an object is a unit: it is created whole, destroyed whole,
- * and will one day be written to disk whole.
- *
- * Lifetime is by reference count. An object exists as long as somebody
- * holds a reference to it -- a capability in some domain, or a slot in
- * another object. When the last one goes, so does the object.
- *
- * Reference counting cannot collect a cycle: two objects pointing at
- * each other keep each other alive after everything else has let go.
- * The counts stay -- they free almost everything, immediately and
- * predictably -- and obj_collect() below walks the graph now and then
- * to catch the rest. Between runs a cycle costs memory; it never costs
- * authority, which is the property that actually matters here.
+ * object.c -- the object store: header, payload and reference slots in one allocation.
+ * - lifetime by reference count (capabilities and slots)
+ * - cycles are caught by obj_collect(); between runs a cycle costs memory, never authority
  */
 #include <eb/object.h>
 #include <eb/cap.h>

@@ -1,6 +1,5 @@
 #!/bin/sh
-# probe.sh -- one boot, one screendump, monitor chatter kept visible.
-# For diagnosing the test rig itself, not the system.
+# probe.sh -- one boot, one screendump, monitor output shown (test-rig diagnosis).
 cd "$(dirname "$0")/.."
 cp /usr/share/OVMF/OVMF_VARS_4M.fd build/OVMF_VARS.fd
 rm -f build/screen.ppm

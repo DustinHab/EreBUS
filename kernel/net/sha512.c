@@ -1,10 +1,5 @@
 /*
- * sha512.c -- the wider hash, FIPS 180-4.
- *
- * Not for its own sake: Ed25519 is defined over SHA-512 and nothing
- * else, so a machine that wants to sign the way every ssh client
- * expects needs this one too. The shape is the same as sha256.c with
- * the words doubled and the schedule lengthened.
+ * sha512.c -- SHA-512 (FIPS 180-4); Ed25519 is defined over it.
  */
 #include <eb/crypto.h>
 #include <eb/string.h>

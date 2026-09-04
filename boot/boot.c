@@ -1,20 +1,9 @@
 /*
- * boot.c -- Erebus boot loader (UEFI application, x86_64).
- *
- * In order:
- *   1. find the graphics output and pick a usable mode
- *   2. open the file system we were loaded from
- *   3. read \erebus\kernel.elf and place its segments
- *   4. take the ACPI root pointer from the firmware configuration table
- *   5. get the memory map and shut the firmware down (ExitBootServices)
- *   6. translate the map into our own format and jump into the kernel
- *
- * From step 5 on there are no firmware services left: no AllocatePool,
- * no text output. Everything the kernel needs must already be in place.
- *
- * The loader stays silent while things go well. What the machine can do
- * is the kernel's job to report; printing it twice would only bury the
- * user in start-up text.
+ * boot.c -- EreBUS UEFI loader (x86_64).
+ * - GOP mode, file system of the loaded image, \erebus\kernel.elf placed, ACPI root pointer
+ * - kernel.old fallback after two starts that never cleared \erebus\tries
+ * - memory map, ExitBootServices, handover (bootinfo v3: loader and kernel files included)
+ * - silent unless something fails; after step 5 no firmware services exist
  */
 #include "efi.h"
 #include "../common/bootinfo.h"

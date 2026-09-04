@@ -1,23 +1,8 @@
 /*
- * blob.c -- the log of big objects on the store.
- *
- * The generation ring keeps the graph, a megabyte per generation. What
- * does not fit that scale -- a source text, an image, a kernel -- lies
- * here instead, once, under the hash of its contents, and the
- * generations refer to it. The log is a plain sequence of entries, each
- * a header sector followed by the bytes, growing at the end. When it is
- * full it is compacted: whatever no generation refers to any more is
- * dropped, and the rest moves down.
- *
- * The hash is the name. Nothing here knows which object an entry
- * belongs to or how many generations point at it; the snapshot code
- * knows that, and hands the set of names still wanted to blob_compact.
- *
- * Crash safety follows the ring's rule: bytes first, header last. An
- * entry whose header never landed is not there, and the next write
- * takes its place. A compaction cut short can lose entries that only
- * older generations referred to; the generation being written next
- * stores anew whatever it needs and is whole.
+ * blob.c -- log of big objects on the store, addressed by content hash.
+ * - entries: header sector + bytes, appended; a full log is compacted to what the generations still refer to (blob_compact gets the wanted set)
+ * - bytes first, header last: an entry without its header is not there
+ * - a compaction cut short can lose entries only older generations referred to; the next generation stores anew what it needs
  */
 #include <eb/blob.h>
 #include <eb/blk.h>

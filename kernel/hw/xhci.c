@@ -1,26 +1,10 @@
 /*
- * xhci.c -- USB keyboards and mice, through the host controller.
- *
- * The PS/2 driver reaches a USB keyboard only where the firmware
- * pretends there is a PS/2 one, and a machine booted the UEFI way
- * often stops pretending the moment the loader hands over. This is
- * the real thing: the xHCI controller on the PCI bus, its rings in
- * memory, and the devices at its root ports set up far enough to
- * speak the boot protocol -- eight bytes per keyboard report, three
- * or four per mouse report.
- *
- * The controller is driven by rings of 16-byte blocks: a command
- * ring we write and it reads, an event ring it writes and we read,
- * and a transfer ring per endpoint. Nothing here uses an interrupt;
- * a thread reads the event ring every few milliseconds, which is
- * more often than a finger moves. The reports are turned into the
- * bytes a PS/2 keyboard would have sent and handed to the PS/2
- * driver's queues, so the layout tables and the modifier rules live
- * once, and the shell never learns which wire a key came down.
- *
- * What is not here, and said so: devices behind external hubs, USB
- * disks, isochronous anything. A hub is seen and named; a disk is
- * seen and named; neither is driven.
+ * xhci.c -- USB keyboards and mice via xHCI, polled by a thread.
+ * - firmware handoff, port power, Intel port routing, root ports, hubs (route string, TT), hotplug
+ * - keyboards: boot protocol, 8-byte reports, repeat in the driver
+ * - mice: report descriptor parsed (buttons, axes, wheel, report id); boot protocol as fallback
+ * - reports are fed into the PS/2 queues as scancode set 1 / mouse packets
+ * - not driven: USB disks, isochronous endpoints
  */
 #include <eb/xhci.h>
 #include <eb/pci.h>

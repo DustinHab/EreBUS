@@ -1,15 +1,7 @@
 #!/bin/sh
-# selfbuild-machine.sh -- the kernel, built ON the machine.
-#
-# Every kernel source and header rides in on the exchange disk. The
-# terminal takes them in as "the disk", builds the list -- every c
-# text through the machine's compiler, every .S through its gnu
-# translation, all of it through its linker in the kernel's shape --
-# and writes kernel.elf back out. The host then boots what the machine
-# made. That is the whole distance: a kernel that builds itself.
-#
-# The build runs under emulation and takes minutes; the script waits
-# for the kernel's own report on the serial line.
+# selfbuild-machine.sh -- the kernel built on the machine from the exchange disk.
+# - sources and headers arrive on the exchange disk; 'take in', 'build', 'write out'
+# - the host boots the kernel.elf the machine wrote; minutes under emulation
 
 cd "$(dirname "$0")/.."
 BUILD=build

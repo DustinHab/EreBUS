@@ -1,29 +1,12 @@
 /*
- * cc.c -- the compiler: c, the way this machine speaks it.
- *
- * One pass over the text to read it, one walk over each function's
- * tree to say it in the assembler's words. Nothing clever: every
- * integer value passes through rax and every floating one through
- * xmm0, every variable lives in memory, every operator is the
- * handful of instructions it plainly is. What comes out is meant to
- * be read -- it lies beside the source as a text -- and the
- * assembler is the only thing that ever encodes a byte.
- *
- * The language is c, in the shape a person writes it: char, short,
- * int and long, signed or not; float and double; pointers, arrays,
- * structs and unions, bit fields, typedefs, enums; functions with up
- * to six parameters, variadic ones, and pointers to them; the
- * operators with their precedence; if, while, for, do, switch, goto;
- * sizeof and casts; initializers with braces and designators; the
- * preprocessor with function-like macros, #if arithmetic, #include
- * of a text lying beside this one, and the handful of standard
- * headers a program leans on. Integer arithmetic is done in 64 bits
- * and cut to size on the way into a variable.
- *
- * Structs travel by value in both directions under a convention of
- * this compiler's own: the caller keeps a nameless copy and hands its
- * address over, the callee works on that copy. Not here, and said so
- * on the compiler's own page: a 128-bit type, and va_arg of a struct.
+ * cc.c -- C compiler: text of C -> text of assembly (asm.c dialect).
+ * - one parse pass, one code walk per function; values through rax/xmm0, variables in memory
+ * - C11 subset: integer and floating types, pointers, arrays, structs/unions, bit fields, typedefs, enums,
+ *   functions (16 params, variadic), full operator set, control flow, initializers, preprocessor with
+ *   macros/#if/#include, inline asm in GNU form; integer arithmetic in 64 bits
+ * - structs by value: caller keeps a copy and passes its address (own convention)
+ * - not supported: 128-bit types, va_arg of a struct
+ * - peephole optimizer switches: OPT_* defines, CC_NOPEEP, CC_PEEP_ONLY
  */
 #include <eb/cc.h>
 #include <eb/lang.h>

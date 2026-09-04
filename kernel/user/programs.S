@@ -1,31 +1,17 @@
 /*
- * programs.S -- the first programs that run outside the kernel.
+ * programs.S -- the ring-3 programs: own section of the kernel image, mapped read-and-execute, position-independent.
  *
- * These live in their own section of the kernel image and are mapped
- * into a process's low half as read-and-execute. They are written in
- * assembly and reference nothing absolute, so the same bytes work
- * wherever they are mapped.
- *
- * The system call convention:
- *
+ * System call convention:
  *   rax  the call number
  *   rdi rsi rdx r10 r8   the arguments
  *   rax  the result
- *
- * r10 rather than rcx for the fourth argument because the syscall
- * instruction puts the return address in rcx, and the flags in r11.
- * Both are gone by the time the kernel sees the call.
+ * - r10 instead of rcx: syscall leaves the return address in rcx and the flags in r11
  *
  *   0  exit(code)
  *   1  yield()
  *   2  send(handle, tag, word0, word1, word2)
  *   3  receive(handle, buffer)
- *
- * That is the entire interface. There is nothing here to open a file
- * with, no way to ask for a resource by name, and no call that grants
- * anything. A program starts holding whatever capabilities it was
- * handed -- the first of them arrives in rdi -- and that is the extent
- * of what it can ever do.
+ * - no open, no lookup by name, no granting call; the first capability arrives in rdi
  */
 
     .section .user, "ax"

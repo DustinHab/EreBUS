@@ -1,19 +1,7 @@
 /*
- * gnu.c -- the gnu dialect, translated into the machine's own.
- *
- * The kernel's own assembly files are written the way the gnu
- * assembler reads them: AT&T order with the source first, registers
- * with a %, immediates with a $, a size letter on the mnemonic,
- * memory as disp(%base), and .directives. So that the machine can
- * read them too, this turns such a text, line by line, into the
- * assembler's dialect and hands it on. The little language of the
- * directives that matters here -- .set, .rept, .if, .align, .skip,
- * .quad and their kin, sections and .globl -- is carried out; what
- * only tells a debugger something (.type, .size) is let go.
- *
- * Numbered labels (1: and 1f, 2b) become ordinary local labels once
- * the whole text has been seen, since 1f means the next 1 and only
- * the text as a whole knows which that is.
+ * gnu.c -- AT&T/GNU assembly translated line by line into asm.c's dialect.
+ * - handles %reg, $imm, size suffixes, disp(%base), .set .rept .if .align .skip .quad, sections, .globl
+ * - .type/.size dropped; numbered labels (1:, 1f, 2b) resolved after the whole text is seen
  */
 #include <eb/asm.h>
 #include <eb/lang.h>

@@ -1,14 +1,7 @@
 /*
- * ed25519.c -- the signature, RFC 8032.
- *
- * The same TweetNaCl arrangement as the key agreement, on the same
- * field: the twisted Edwards curve in extended coordinates, a
- * ladder that takes the same steps whatever the secret is, and the
- * scalar arithmetic modulo the group order done in bytes. What it
- * buys is the one thing the seal never had: a name. A host key that
- * signs the exchange proves which machine answered; a client key that
- * signs the login proves who is knocking. Checked against the RFC's
- * own vector at start-up, like everything else under the seal.
+ * ed25519.c -- signatures, RFC 8032, TweetNaCl arrangement on the shared field.
+ * - twisted Edwards curve in extended coordinates, constant-step ladder, scalar arithmetic modulo the group order in bytes
+ * - checked against the RFC vector at start-up
  */
 #include <eb/crypto.h>
 #include <eb/string.h>

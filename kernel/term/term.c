@@ -1,24 +1,9 @@
 /*
- * term.c -- the system spoken to in lines.
- *
- * The terminal is a walk, the same walk the shell makes with clicks:
- * it stands somewhere in the graph, holds exactly the rights the
- * references on the way granted, and can only narrow them by going
- * further. There are no paths and no lookup by name from nowhere --
- * "go" follows a reference the standpoint can see, or it goes
- * nowhere.
- *
- * The grammar is one sentence shape, everywhere: a verb, then a
- * name, and when a second thing is involved, "to" or "at" joins it.
- * Names may contain spaces, which is why the joiner is a word and
- * not a character. Numbers count slots. There are no flags, no
- * options, no punctuation to remember.
- *
- * Nothing in here touches a screen. A session's transcript is a byte
- * ring and the commands come in as lines; the shell's terminal view
- * feeds keys into the screen session's gathering line, and a visitor
- * through the door feeds whole lines into a session of their own.
- * Both read their transcripts back the same way.
+ * term.c -- the terminal: the system spoken to in lines.
+ * - a session is a standpoint in the graph with the rights the references on the way granted; "go" follows visible references only
+ * - grammar: verb, name, optionally "to"/"at" and a second name; names may contain spaces; numbers count slots; no flags
+ * - no screen here: the transcript is a byte ring; lines come from the shell's terminal view or from a door session
+ * - "receive N bytes as NAME" switches the session to taking raw bytes into a new text (term_taking / term_take_bytes)
  */
 #include <eb/term.h>
 #include <eb/cap.h>

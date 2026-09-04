@@ -1,17 +1,6 @@
 /*
- * fetch.S -- the program that asks the network for pages.
- *
- * It holds three things at most: the console, its letter box, and --
- * given to it by the kernel the moment it starts -- a send-only way
- * to the wire. That third capability IS the internet here: whoever
- * holds the fetch program can ask for pages, and whoever does not
- * cannot, and there is no call either could make to change that.
- *
- * The work is one gesture: whatever it is handed after the wire, it
- * passes on to the wire, rights and all. The network service reads
- * the first line of the text, fetches, and writes the page back into
- * the same object. fetch never sees a byte of it -- it is a doorman,
- * not a reader.
+ * fetch.S -- ring-3 program: passes whatever it is handed on to the wire (send-only, given at start), rights and all.
+ * - the network service reads the text's first line and writes the page back; fetch never sees the bytes
  */
 
     .section .user, "ax"

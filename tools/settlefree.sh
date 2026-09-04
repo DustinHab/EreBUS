@@ -1,13 +1,8 @@
 #!/bin/sh
-# settlefree.sh -- settling in the free space of a disk that holds
-# something else, and leaving that something exactly as it was.
-#
-# The disk carries one partition of another kind, filled with random
-# bytes, and free space after it. The machine boots from the stick on
-# usb, settles in the free space, and makes a text. Afterwards the
-# first partition's bytes are compared, the table must show a store
-# partition beside it, and a second boot -- stick and disk again --
-# must find the text.
+# settlefree.sh -- 'settle in the free space of disk N' beside a foreign partition.
+# - disk: one foreign partition full of random bytes, free space after it
+# - boot from the stick, decline the boot-time offer, settle in the free space, make a text
+# - the foreign bytes must be unchanged; a second boot must find the text
 
 cd "$(dirname "$0")/.."
 BUILD=build

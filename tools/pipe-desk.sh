@@ -1,12 +1,8 @@
 #!/bin/sh
-# pipe-desk.sh -- three machines, one task, the desk deals the parts.
-#
-# Two machines welcome work; the third makes a task from the palette
-# -- "split 4 from 1 to 10000" over the summing recipe -- and presses
-# ask. The desk scans, finds both, deals the four parts round-robin,
-# collects the four sums and writes their total into the task:
-# 50005000, computed by other machines' processors. The mcast socket
-# is the shared cable three QEMUs can stand on.
+# pipe-desk.sh -- three machines, one split task.
+# - two machines set "work | welcomed"; the third asks "split 4 from 1 to 10000" over the summing recipe
+# - the desk deals four parts round-robin and writes 50005000 into the task
+# - the three QEMUs share a multicast socket as the cable
 
 cd "$(dirname "$0")/.."
 BUILD=build

@@ -1,11 +1,6 @@
 /*
- * crypto_selftest.c -- the seal proves itself before it is trusted.
- *
- * Every primitive is checked against a vector published by the body
- * that standardised it: FIPS for the hash, RFC 4231 for HMAC, RFC 7748
- * for the curve, the NIST GCM suite for the cipher. If any one fails,
- * TLS does not come up at all -- a channel that cannot demonstrate its
- * own arithmetic is not a secure channel, it is a hope.
+ * crypto_selftest.c -- checks every primitive against a published vector before TLS may come up.
+ * - FIPS (hash), RFC 4231 (HMAC), RFC 7748 (curve), NIST GCM suite (cipher); any failure keeps TLS down
  */
 #include <eb/crypto.h>
 #include <eb/fmt.h>

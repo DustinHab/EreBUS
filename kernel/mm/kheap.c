@@ -1,27 +1,7 @@
 /*
- * kheap.c -- the kernel heap.
- *
- * A doubly linked list of blocks in address order, first fit, with
- * neighbours merged on release. The simplest arrangement that does not
- * fragment itself to death.
- *
- * The header sits immediately in front of every allocation, which is
- * the usual arrangement and also the usual weakness: writing past the
- * end of one allocation lands on the next block's bookkeeping, and an
- * attacker who controls that controls where a later kfree writes. Two
- * things take the edge off it here.
- *
- * Every header carries a magic word, checked on release and on every
- * walk. Overrunning a block by even a few bytes destroys it, so the
- * damage is reported at the next operation instead of turning into a
- * corrupted list. And the magic is mixed with the block's own address,
- * so learning one header's value tells an attacker nothing about the
- * next -- a single constant would be written back trivially.
- *
- * That is detection, not prevention. Moving the metadata out of band
- * entirely is the real answer, and the object store in the next
- * milestone will not use this allocator for anything an untrusted
- * program can influence.
+ * kheap.c -- kernel heap: address-ordered block list, first fit, neighbours merged on free.
+ * - header in front of each block carries a magic word mixed with the block's address; checked on free and on every walk
+ * - detection only: an overrun is reported at the next operation, not prevented
  */
 #include <eb/kheap.h>
 #include <eb/vmm.h>

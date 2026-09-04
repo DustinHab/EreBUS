@@ -1,32 +1,10 @@
 /*
- * asm.c -- the assembler.
- *
- * Intel order, lowercase, one instruction a line, a ';' starts a
- * remark. Labels end in a colon. Numbers are decimal, or hex with
- * 0x, or a letter in single quotes. Memory is written in brackets:
- * [rax], [rbx + 8], [rsp - 16], [name], [name + 8] for something laid
- * down by name, [gs:8] for a fixed place in a segment. When only an
- * immediate says how wide a store is, the width is said first: byte
- * [rdi], dword [rsi + 4], qword [rbp].
- *
- * Sections: "section text" (also "code") is where a text begins;
- * "section rodata", "section data", "section bss" (room without
- * values: res only) and "section user" (the kernel's ring-3
- * programs). db, dw, dd, dq lay down bytes, words, doublewords and
- * quadwords -- strings in double quotes for db, names and name + n
- * for dq -- and res n lays down n zeros.
- *
- * Names are public unless they begin with a dot or are said to be
- * "private name"; "public name" says the opposite for a text in the
- * gnu dialect, where names are private unless said. A name used and
- * never laid down is one another object lays down: the linker finds
- * it, or says that nobody does.
- *
- * What comes out is an object: each section's bytes, the names, and
- * every place that wants a name's address. Two passes: the first
- * learns where the names are, the second writes the bytes; every form
- * that names a label has one fixed length, which is what lets the
- * first pass be right about the second.
+ * asm.c -- x86-64 assembler, own dialect -> object (sections, names, relocations).
+ * - syntax: Intel order, lowercase, one instruction per line, ';' comment, labels with ':'
+ * - numbers: decimal, 0x hex, 'c'; memory: [reg], [reg + n], [name], [gs:n]; width prefix byte/dword/qword
+ * - sections: text/code, rodata, data, bss (res only), user; data: db dw dd dq, res n
+ * - names public unless dotted or "private name"; gnu-dialect texts private unless "public name"
+ * - two passes; every label-naming form has a fixed length
  */
 #include <eb/asm.h>
 #include <eb/lang.h>

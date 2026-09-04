@@ -1,7 +1,6 @@
 #!/bin/sh
-# isotest.sh -- the iso, booted the two ways an iso is used: as a cd
-# in the drive, and written whole onto a usb stick. Both must come up
-# to the shell, without a store, offering to settle.
+# isotest.sh -- build/erebus.iso booted as a cd and as a raw usb stick.
+# - both must reach the shell without a store and offer to settle
 
 cd "$(dirname "$0")/.."
 BUILD=build

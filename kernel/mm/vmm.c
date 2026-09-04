@@ -1,29 +1,8 @@
 /*
- * vmm.c -- the kernel's own page tables, and the protections they carry.
- *
- * The loader left behind a working but deliberately crude address
- * space: everything mapped, everything writable, everything executable.
- * That was enough to get the kernel running at its own addresses. This
- * replaces it with tables that say what each region is actually for.
- *
- * The point is not tidiness. Four hardware mechanisms only mean
- * something once the tables are precise:
- *
- *   NX     a page marked non-executable cannot be jumped into. Data
- *          that an attacker controls -- a buffer, a stack, the heap --
- *          stops being a place to put code.
- *   CR0.WP without it, ring 0 may write to read-only pages regardless
- *          of the tables. Marking the kernel's own code read-only is
- *          decoration until this bit is set.
- *   SMEP   the kernel cannot execute pages marked as user memory. The
- *          classic escalation -- point the kernel at a function the
- *          attacker prepared in their own process -- stops working.
- *   SMAP   the kernel cannot even read user memory except in windows it
- *          opens deliberately. Accidents where a stray kernel pointer
- *          lands in user memory become faults instead of exploits.
- *
- * None of that is possible while one flat mapping covers everything, so
- * the tables come first and the switches come with them.
+ * vmm.c -- kernel page tables and the protections they carry.
+ * - replaces the loader's flat writable+executable mapping with per-region tables
+ * - NX, CR0.WP, SMEP, SMAP switched on once the tables are precise
+ * - PAT slot 1 = write-combining (PTE_PWT), used for the framebuffer
  */
 #include <eb/vmm.h>
 #include <eb/pmm.h>

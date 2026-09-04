@@ -1,19 +1,7 @@
 /*
- * settings.c -- the system, set by a table.
- *
- * The whole configuration machinery is: one text object, and this file
- * reading it. Each row is a matter and its value, split at the bar.
- * The matter is matched exactly against the left column -- a row sets
- * what it names and nothing else, so no value, note or slip of the
- * keyboard can reach a different setting by containing the wrong word.
- * The value stays free wording, because "1 second" and "where i left"
- * are worth more than an enum. Lines without a bar are prose and have
- * no effect. Should a matter appear twice, the later row is believed.
- *
- * Nothing here is privileged about the object itself. It is reachable
- * like anything else, snapshotted like anything else, and shown
- * through the same lenses; hand somebody the reference read-only and
- * they can see how the system is set without being able to set it.
+ * settings.c -- configuration as one text object: "matter | value" rows.
+ * - matter matched exactly against the left column; lines without a bar have no effect; the later row wins
+ * - the object is ordinary: reachable, snapshotted, viewable read-only
  */
 #include <eb/settings.h>
 #include <eb/base64.h>

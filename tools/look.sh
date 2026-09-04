@@ -1,14 +1,7 @@
 #!/bin/sh
-# look.sh -- boot, press a few keys, photograph the screen.
-#
-# The shell has three ways of looking at the same state and they are
-# reached by pressing keys, so seeing them from outside means sending
-# keys from outside. A script rather than a makefile target because the
-# arguments survive being passed through several shells this way.
-#
+# look.sh -- boot, send keys through the monitor, save a screenshot.
 #   tools/look.sh <output.png> [key ...]
-#
-# Key names are QEMU's: tab, down, right, spc, a, b, ...
+# - key names are QEMU's: tab, down, right, spc, a, b, ...
 
 set -e
 OUT=$1

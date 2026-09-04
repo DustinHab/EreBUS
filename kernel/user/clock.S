@@ -1,18 +1,6 @@
 /*
- * clock.S -- a program that keeps the time somewhere.
- *
- * It starts knowing what time it is -- the one fact the kernel answers
- * without any capability, because the time of day belongs to nobody --
- * and holding nowhere to put it. Point it at something writable and it
- * writes the time there, eight characters, once a second, for as long
- * as the reference lasts.
- *
- * What that buys is an object that is alive. Whoever looks at the same
- * object sees the same seconds tick, not because anything is refreshed
- * or fetched but because there is only one object and the clock keeps
- * writing into it. Take the reference away and the time simply stops
- * being kept -- the last written second stands, which is what a stopped
- * clock honestly looks like.
+ * clock.S -- ring-3 program: writes the time of day (eight characters) into the given object once a second.
+ * - the time of day needs no capability; without the reference the last written second stands
  */
 
     .section .user, "ax"

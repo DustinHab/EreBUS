@@ -1,10 +1,7 @@
 /*
- * names.c -- an address, read back to a name.
- *
- * The table's shape is shared with tools/mknames.py and with the
- * linker's kernel layout: u32 count, u32 letters (offset from the
- * table's start), count entries of { u64 addr; u32 name; u32 pad; }
- * sorted by address, then the letters, each name ended by zero.
+ * names.c -- symbol table lookup for crash reports (address -> name + offset).
+ * - layout shared with tools/mknames.py and ld.c: u32 count, u32 letters offset,
+ *   entries { u64 addr; u32 name; u32 pad; } sorted by address, then NUL-terminated names
  */
 #include <eb/names.h>
 

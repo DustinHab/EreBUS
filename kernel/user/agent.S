@@ -1,22 +1,6 @@
 /*
- * agent.S -- a program that waits to be given something.
- *
- * It starts holding two capabilities and nothing else: permission to
- * speak to the console, and its own letter box. It cannot open
- * anything, cannot look for anything, and has no way to name a single
- * object in the system. There is no directory it could consult and no
- * call it could make that would produce one.
- *
- * So it waits. When somebody points the program at something, the
- * capability arrives in its letter box, and only then does it have
- * anything to work with. It reports what it can see and tries to change
- * it -- and whether that succeeds is not its decision, nor a check it
- * performs. It asks, and the kernel either produces the object or does
- * not.
- *
- * That is the whole demonstration. Nothing here is trusted and nothing
- * here is sandboxed; there is no policy anywhere deciding what this
- * program may touch. There is only what it was handed.
+ * agent.S -- ring-3 program: starts with console and letter box, waits for a capability, reports what it sees and tries to change it.
+ * - no policy check anywhere; the kernel produces the object or does not
  */
 
     .section .user, "ax"

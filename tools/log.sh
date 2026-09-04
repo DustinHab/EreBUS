@@ -1,10 +1,6 @@
 #!/bin/sh
-# log.sh -- show the serial log without the firmware's escape sequences.
-#
-# Exists because quoting a grep pattern through PowerShell into WSL into
-# bash loses a layer of quotes somewhere every other time. A script in
-# the tree takes its argument plainly and is repeatable.
-#
+# log.sh -- the serial log without the firmware's escape sequences.
+# - a script because a grep pattern does not survive PowerShell -> WSL quoting
 #   tools/log.sh [pattern] [file]
 
 PATTERN=${1:-.}

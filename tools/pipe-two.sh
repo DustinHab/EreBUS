@@ -1,15 +1,8 @@
 #!/bin/sh
-# pipe-two.sh -- two machines on one cable, one object crossing.
-#
-# QEMU's socket netdev is the cable: no NAT, no landlord, just two
-# cards on a wire -- which is exactly what two real machines in one
-# room would be. Each machine claims its address in its settings by
-# typed keys; then B walks the shortest path there is: it stands on
-# its notes and presses send. Nobody is set, so the chooser opens
-# under the word, the scan goes out by itself, A answers, and one
-# click on the answer sends the notes across. Afterwards, A's serial
-# log says what arrived, and A's store can be opened with look.sh to
-# see the arrival lying in the list.
+# pipe-two.sh -- two machines on one cable (QEMU socket netdev), one object crossing.
+# - each machine claims its address in the settings; B stands on its notes and presses send
+# - no peer set: the chooser scans, A answers, one click sends
+# - A's serial log names the arrival; A's store shows it in arrivals
 
 cd "$(dirname "$0")/.."
 BUILD=build
