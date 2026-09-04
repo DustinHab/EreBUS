@@ -18,7 +18,7 @@
 #include <eb/lang.h>
 #include <eb/fat.h>
 #include <eb/settle.h>
-#include <eb/standard.h>
+#include <eb/version.h>
 #include <eb/wifi.h>
 #include <eb/net.h>
 #include <eb/fmt.h>
@@ -1672,6 +1672,7 @@ static void cmd_help(term_session *s)
     t_say(s, "  leave            leave the wireless network");
     t_say(s, "  wifi             the station: joined where, how, and its address");
     t_say(s, "  address          which card carries the traffic, and the address it holds");
+    t_say(s, "  version          what the running kernel calls itself");
     t_say(s, "  receive <n> bytes as <name>   a text made here, filled with the next n bytes");
     t_say(s, "                   of this session as they are; how a file comes in through the door");
     t_say(s, "  give <name> to <program>   hand it a reference");
@@ -1822,6 +1823,13 @@ static void cmd_address(term_session *s)
     if (wifi_up()) t_say(s, wifi_state(line, sizeof(line)));
 }
 
+/* What the running kernel calls itself: the text the build gave it. */
+static void cmd_version(term_session *s)
+{
+    t_puts(s, "EreBUS ");
+    t_say(s, erebus_version);
+}
+
 bool term_secret(term_session *s) { return s && s->secret; }
 
 void term_line(term_session *s, const char *line)
@@ -1890,6 +1898,7 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "point at", &rest))cmd_point(s, rest);
     else if (word_starts(line, "journal", NULL))  cmd_journal(s);
     else if (word_starts(line, "time", NULL))     cmd_time(s);
+    else if (word_starts(line, "version", NULL))  cmd_version(s);
     else {
         t_puts(s, "i do not know '");
         t_puts(s, line);
