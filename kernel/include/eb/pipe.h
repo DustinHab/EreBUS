@@ -4,22 +4,10 @@
 #include <eb/types.h>
 #include <eb/object.h>
 
-/* The object pipe: how an object travels to another EreBUS.
- *
- * A system function, not a thing in the graph: the shell offers
- * "send" on any readable data object, the kernel carries it to the
- * peer the settings name, and whatever arrives from over there is
- * laid into the arrivals list. There is nothing to wire up and no
- * program in the middle -- moving an object between machines is as
- * much a core duty here as writing one to disk.
- *
- * What travels is the object's substance -- its type, its own name,
- * its payload -- and nothing else: no references, no rights, no
- * reach back. Authority does not cross machines; only data does.
- * And what arrives is deliberately dull: a fresh object of a plain
- * kind -- text, bytes, a picture, never anything that runs -- wearing
- * its sender's name as a claim to weigh, not a fact to trust.
- */
+/* The object pipe: how objects, words, work and kernels travel to another EreBUS.
+ * - a system function, not a thing in the graph: "send" on a readable data object, the kernel carries it, what arrives lies in arrivals
+ * - substance crosses, never authority: type, name, payload; no references, no rights, no reach back
+ * - a node is its key: the knock is signed with the door key, and the nodes table says what each node may do here */
 
 #define PIPE_PORT 7800
 
@@ -27,57 +15,64 @@
 struct domain;
 void pipe_prepare(struct domain *k);
 
-/* Queues one object for the peer. Copies the substance and returns;
- * the network thread does the carrying. False when the pipe is
- * already carrying something, the object is not a plain data kind,
- * or no peer is named. */
+/* Queues one object for the peer the settings name (by address or by
+ * node name). Retains the object and returns; the network thread does
+ * the carrying. False when the pipe is already carrying something, the
+ * object is not a plain data kind, or no peer is named. */
 bool pipe_post(object *o);
 
 /* Hands a task to the desk. A task whose first line says
  * "split P from LO to HI" is divided into parts and dealt to the
  * machines that answered the scan willing, their numeric answers
- * summed; any other text is one recipe, asked of the settings'
- * peer. Either way it runs over there under the interpreter's own
- * time budget, and the result is written back into the task itself
- * when `writable` says the sender may -- otherwise it is laid into
- * arrivals. The far machines refuse unless their settings say
- * "work | welcomed". */
+ * summed; any other text is one recipe, asked of the peer. The result
+ * is written back into the task when `writable` says so, otherwise laid
+ * into arrivals. Far machines refuse unless their settings say
+ * "work | welcomed" or their nodes table lets this machine work. */
 bool pipe_ask(object *o, bool writable);
+
+/* The same, with an object every worker gets ahead of its part: the
+ * script's third gift, after its words and the way home, read-only.
+ * A text, bytes or a picture, up to 8 MiB. */
+bool pipe_ask_with(object *o, bool writable, object *input);
 
 /* The list arrivals are laid in, adopted or created by main. */
 void pipe_arrivals_set(object *list);
+object *pipe_arrivals(void);
 
-/* One arriving datagram, from the pump. The source port matters:
- * the answer that says "taken" goes back exactly there, because the
- * road here may have run through a translator that renamed it. */
+/* One arriving datagram, from the pump. */
 void pipe_input(const u8 src[4], u16 sport, const u8 *data, u32 len);
 
 /* Carrying and housekeeping, called from the net thread's loop. */
 void pipe_service(void);
 
-/* The arrivals list, for the shell to recognise. */
-object *pipe_arrivals(void);
-
-/* The line: one running conversation with whoever else is on the
- * pipe, kept as a text the kernel appends to. Saying a word puts it
- * through every sealed session; with none standing but a peer named,
- * the knock goes out first and the word follows the seal. */
+/* The line: one running conversation, kept as a text the kernel appends to. */
 void    pipe_line_set(object *text);
 object *pipe_line(void);
 bool    pipe_say(const char *text);
 
-/* Looking for company: a scan calls out on the wire, and machines
- * running this same system answer with their names. The found stand
- * in a small table until the next scan; pointing the pipe at one is
- * the shell's single click. */
+/* Looking for company: a scan calls out on the wire; machines running
+ * this system answer with their names. The found are the ones heard
+ * since the last scan began. */
 void pipe_scan(void);
 bool pipe_scanning(void);
 u32  pipe_found_count(void);
-
-/* One found machine: address, claimed name, whether it says it takes
- * far work, and how much memory it says it has free. The last two
- * may be NULL when the caller does not care. */
 bool pipe_found_at(u32 i, u8 ip[4], char name[24],
                    bool *works, u32 *free_mib);
+
+/* Seconds since a machine at that address was last heard; ~0 when never. */
+u64  pipe_seen_ago_s(const u8 ip[4]);
+
+/* The "network" page: what the kernel sees on the wire, rewritten
+ * every two seconds. */
+void pipe_page_set(object *text);
+
+/* A kernel to another node: the one this machine runs (image NULL) or a
+ * built kernel.elf. The node installs it and restarts when its nodes
+ * table lets this machine update it. False with a reason in why. */
+bool pipe_update(const char *node, object *image, char *why, u32 max);
+
+/* The same to every node with an address, one after another. How many
+ * were queued; zero with a reason in why. */
+u32  pipe_update_all(object *image, char *why, u32 max);
 
 #endif /* EB_PIPE_H */

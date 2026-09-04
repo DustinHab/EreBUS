@@ -37,6 +37,14 @@ bool settings_start_home(void);
  * False when no peer is named. */
 bool settings_peer(u8 ip[4], u16 *port);
 
+/* The peer named by a node's name instead of numbers: "peer | bochum".
+ * False when the line holds numbers, "nobody", or nothing. */
+bool settings_peer_name(char *out, u32 max);
+
+/* The "known |" lines of older settings, for carrying them into the
+ * nodes table: the i-th one, or false past the end. */
+bool settings_known_at(u32 i, u8 ip[4], u8 key[32]);
+
 /* An address of our own, claimed instead of leased. False when the
  * machine asks the network (dhcp) as usual. */
 bool settings_address(u8 ip[4]);

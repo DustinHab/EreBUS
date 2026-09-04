@@ -1,11 +1,15 @@
 /*
- * pipe.c -- objects between machines, UDP datagrams.
- * - SEEK/HERE plain (names are claims); HELLO/WELCOME fresh x25519 keys, AES-128-GCM one key per direction, counter per record, replay refused
- * - OFFER names kind, name, size; CHUNKs in order; TAKEN closes; no answer = offer repeated, then journaled
- * - kinds on the wire by their own numbers: text, bytes, pictures; nothing that runs or grants
- * - limit: privacy against the road, not identity of the answerer
+ * pipe.c -- objects, words, work and kernels between machines, UDP datagrams.
+ * - SEEK/HERE plain: name, work flag, free memory, key claim, version, up to four other machines heard
+ * - HELLO/WELCOME: fresh x25519 keys, signed with the door key; a node is its key, one row in the nodes table
+ * - SEALED envelopes: AES-128-GCM, one key per direction, counter per record, replay refused
+ * - OFFER/CHUNK/HAVE/TAKEN: windowed transfer straight from and into objects, up to 8 MiB; kind 4 = a kernel
+ * - a kernel is installed and booted only when the sender's row says "update"; work only with "work | welcomed" or the row's "work"
+ * - heartbeat: SEEK to every node with an address every 30 s; the "network" page is rewritten every 2 s
+ * - limit: identity is trust on first meeting; a key met once must answer again from its address
  */
 #include <eb/pipe.h>
+#include <eb/nodes.h>
 #include <eb/net.h>
 #include <eb/settings.h>
 #include <eb/journal.h>
@@ -19,6 +23,8 @@
 #include <eb/fmt.h>
 #include <eb/io.h>
 #include <eb/ssh.h>
+#include <eb/fat.h>
+#include <eb/version.h>
 
 #define MAGIC     0x58504245u        /* "EBPX", little-endian */
 #define K_OFFER   1
@@ -32,41 +38,59 @@
 #define K_ASK     9                  /* a job: run this text, answer me */
 #define K_ANSWER  10                 /* what became of a job */
 #define K_SAY     11                 /* a word for the person there */
+#define K_HAVE    12                 /* how far a transfer has come */
 
-#define CHUNK_MAX 1024
-#define CARRY_MAX_BYTES 65536
-#define INNER_MAX (40 + CHUNK_MAX)     /* the widest inner packet: an ask */
+/* One chunk fills one datagram: 20 bytes of envelope, 24 of chunk head,
+ * 16 of tag, under the 1400 the wire takes. */
+#define CHUNK_MAX      1336
+#define INNER_MAX      (24 + CHUNK_MAX)
+#define CARRY_MAX_BYTES (8u << 20)
+#define WINDOW_CHUNKS  24            /* chunks in flight beyond the last progress heard */
+#define HAVE_EVERY     8             /* the receiver reports every so many chunks */
+#define KERNEL_MIN     65536
+
+/* What a TAKEN says, and why a refusal. */
+#define T_TAKEN   0
+#define T_REFUSED 1
+#define T_BUSY    2
+#define R_NOT_ALLOWED 1
+#define R_TOO_BIG     2
+#define R_UNKNOWN     3
 
 /* Far work. A recipe fits one sealed datagram; the budget is what the
  * asking side grants and the interpreter over there enforces. */
 #define RECIPE_MAX   1024
 #define ASK_BUDGET_S 20
 
-/* A spoken word: short enough to fit one sealed datagram with room
- * to spare, long enough for a sentence worth saying. */
 #define SAY_MAX 200
 
-/* The desk: how many jobs may queue, how many parts a job may be
- * divided into, how many asks fly at once, how many machines are
- * remembered as candidates. */
 #define DESK_JOBS 4
 #define PART_MAX  8
 #define FASK_MAX  4
 #define CAND_MAX  8
 
-/* What an answer says about its job. */
-#define A_OK     0                   /* here is the result */
-#define A_NOWORK 1                   /* this machine takes no work */
-#define A_LATE   2                   /* it ran out of time */
-#define A_BUSY   3                   /* already working on something */
-#define A_SILENT 4                   /* it ended without answering */
+#define A_OK      0
+#define A_NOWORK  1
+#define A_LATE    2
+#define A_BUSY    3
+#define A_SILENT  4
+#define A_NOINPUT 5                  /* the ask names an input that never arrived */
+
+/* Flags in an OFFER and in an ASK. */
+#define F_FOR_WORK 1                 /* offer: an input for work, held for the ask that follows */
+#define F_HAS_INPUT 1                /* ask: hand the held input to the script as its third gift */
+#define INPUTS_MAX 4                 /* inputs held, one per asking machine */
 
 /* Wire kinds, deliberately not the kernel's type ids. */
 #define W_TEXT    1
 #define W_BYTES   2
 #define W_PICTURE 3
+#define W_KERNEL  4
 
 #define SECOND 1000000000ULL
+#define MS     1000000ULL
+#define BEAT_S  30                   /* the heartbeat to known nodes */
+#define QUIET_S 90                   /* unheard this long: quiet */
 
 static object *arrivals;
 
@@ -79,185 +103,10 @@ void pipe_arrivals_set(object *list)
 
 object *pipe_arrivals(void) { return arrivals; }
 
-/* ------------------------------------------------------------------ */
-/* The line                                                            */
-/* ------------------------------------------------------------------ */
-
-/* One running conversation, kept as an ordinary text: the kernel
- * appends what is said, in the order it was said, and the person
- * holds it read-only -- a talk is a record too. */
-static object *line_obj;
-
-void pipe_line_set(object *t)
-{
-    if (line_obj) obj_release(line_obj);
-    line_obj = t;
-    if (line_obj) obj_retain(line_obj);
-}
-
-object *pipe_line(void) { return line_obj; }
-
-/* Words already heard, so a datagram that arrives twice does not
- * stand on the line twice. */
-static u64 say_heard[8];
-static u32 say_heard_at;
-
-/* A word waiting for a seal that is still being knocked for. */
-static struct {
-    bool active;
-    u64  born_ns;
-    char text[SAY_MAX + 1];
-} saypend;
-
-static void line_append(const char *who, const char *what)
-{
-    if (!line_obj || !who || !what) return;
-
-    char ln[256];
-    u64 at = 0;
-    for (u64 i = 0; who[i] && at < 30; i++) {
-        char c = who[i];
-        ln[at++] = (c >= 0x20 && c < 0x7F) ? c : ' ';
-    }
-    while (at > 0 && ln[at - 1] == ' ') at--;
-    ln[at++] = ':';
-    ln[at++] = ' ';
-    ln[at++] = ' ';
-    for (u64 i = 0; what[i] && at < sizeof(ln) - 2; i++) {
-        char c = what[i];
-        ln[at++] = (c >= 0x20 && c < 0x7F) ? c : ' ';
-    }
-    while (at > 0 && ln[at - 1] == ' ') at--;
-    ln[at++] = '\n';
-
-    u64 flags = irq_save();
-    u8 *d = (u8 *)obj_data(line_obj);
-    u64 size = obj_size(line_obj);
-    if (!d || size < sizeof(ln) + 2) { irq_restore(flags); return; }
-    u64 len = 0;
-    while (len < size && d[len]) len++;
-
-    /* A full page: the older half of the talk makes room, cut at a
-     * line boundary so no word survives torn in the middle. */
-    if (len + at + 1 > size) {
-        u64 from = len / 2;
-        while (from < len && d[from] != '\n') from++;
-        if (from < len) from++;
-        memmove(d, d + from, len - from);
-        len -= from;
-        memset(d + len, 0, size - len);
-    }
-    memcpy(d + len, ln, at);
-    d[len + at] = 0;
-    irq_restore(flags);
-    obj_touch(line_obj);
-}
-
 static u32 rd32(const u8 *p);
 static u64 rd64(const u8 *p);
 static void wr32(u8 *p, u32 v);
 static void wr64(u8 *p, u64 v);
-
-/* ------------------------------------------------------------------ */
-/* Company on the wire                                                 */
-/* ------------------------------------------------------------------ */
-
-#define FOUND_MAX 8
-
-static struct {
-    bool used;
-    u8   ip[4];
-    char name[24];
-    bool works;                      /* says it takes far work */
-    u32  free_mib;                   /* says it has this much air */
-} found[FOUND_MAX];
-
-static u64 scan_until_ns;            /* while set, seeks go out */
-static u64 scan_last_call_ns;
-
-void pipe_scan(void)
-{
-    for (u32 i = 0; i < FOUND_MAX; i++) found[i].used = false;
-    scan_until_ns = time_ns() + 3ULL * 1000000000ULL;
-    scan_last_call_ns = 0;
-    journal_says("pipe", "calling out on the wire");
-}
-
-bool pipe_scanning(void)
-{
-    return time_ns() < scan_until_ns;
-}
-
-u32 pipe_found_count(void)
-{
-    u32 n = 0;
-    for (u32 i = 0; i < FOUND_MAX; i++) if (found[i].used) n++;
-    return n;
-}
-
-bool pipe_found_at(u32 i, u8 ip[4], char name[24],
-                   bool *works, u32 *free_mib)
-{
-    u32 n = 0;
-    for (u32 k = 0; k < FOUND_MAX; k++) {
-        if (!found[k].used) continue;
-        if (n == i) {
-            for (u32 j = 0; j < 4; j++) ip[j] = found[k].ip[j];
-            for (u32 j = 0; j < 24; j++) name[j] = found[k].name[j];
-            if (works) *works = found[k].works;
-            if (free_mib) *free_mib = found[k].free_mib;
-            return true;
-        }
-        n++;
-    }
-    return false;
-}
-
-static bool ip4_same(const u8 *a, const u8 *b)
-{
-    return a[0]==b[0] && a[1]==b[1] && a[2]==b[2] && a[3]==b[3];
-}
-
-static void found_note(const u8 *ip, const u8 *name, u32 nmax,
-                       bool works, u32 free_mib)
-{
-    u32 slot = FOUND_MAX;
-    for (u32 i = 0; i < FOUND_MAX; i++) {
-        if (found[i].used && ip4_same(found[i].ip, ip)) { slot = i; break; }
-        if (!found[i].used && slot == FOUND_MAX) slot = i;
-    }
-    if (slot == FOUND_MAX) return;
-
-    found[slot].used = true;
-    for (u32 i = 0; i < 4; i++) found[slot].ip[i] = ip[i];
-    u32 n = 0;
-    while (n < 23 && n < nmax && name[n]) {
-        char c = (char)name[n];
-        found[slot].name[n] = (c >= 0x20 && c < 0x7F) ? c : ' ';
-        n++;
-    }
-    found[slot].name[n] = 0;
-    found[slot].works = works;
-    found[slot].free_mib = free_mib;
-}
-
-/* magic, kind, pad, the name -- and what the machine offers: whether
- * it takes far work, and how much air it has. Claims like the name,
- * but useful ones: choosing a machine to ask goes better knowing who
- * is willing. */
-static void say_who(u8 kind, const u8 dst[4], u16 dport)
-{
-    u8 pkt[40];
-    wr32(pkt, MAGIC);
-    pkt[4] = kind; pkt[5] = pkt[6] = pkt[7] = 0;
-    char nm[24];
-    settings_name(nm, sizeof(nm));
-    for (u32 i = 0; i < 24; i++) pkt[8 + i] = (u8)nm[i];
-    pkt[32] = settings_work() ? 1 : 0;
-    pkt[33] = pkt[34] = pkt[35] = 0;
-    wr32(pkt + 36, (u32)(pmm_free_frames() / 256));
-    net_udp_send(dst, PIPE_PORT, dport, pkt, 40);
-}
 
 /* ------------------------------------------------------------------ */
 /* Small tools                                                         */
@@ -302,6 +151,36 @@ static u32 put_dec(char *buf, u32 at, u64 v)
     return at;
 }
 
+static u32 put_pad(char *buf, u32 at, const char *s, u32 width)
+{
+    u32 n = 0;
+    while (s[n]) buf[at++] = s[n++];
+    while (n < width) { buf[at++] = ' '; n++; }
+    return at;
+}
+
+static u32 put_ip(char *buf, u32 at, const u8 ip[4])
+{
+    for (u32 i = 0; i < 4; i++) {
+        if (i) buf[at++] = '.';
+        at = put_dec(buf, at, ip[i]);
+    }
+    return at;
+}
+
+static bool ip4_same(const u8 *a, const u8 *b)
+{
+    return a[0]==b[0] && a[1]==b[1] && a[2]==b[2] && a[3]==b[3];
+}
+
+static void copy_why(char *why, u32 max, const char *text)
+{
+    if (!why || !max) return;
+    u32 i = 0;
+    while (text[i] && i + 1 < max) { why[i] = text[i]; i++; }
+    why[i] = 0;
+}
+
 static void lay_answer(u32 no, const u8 *text);
 
 static u8 wire_kind_of(type_id t)
@@ -321,12 +200,254 @@ static type_id local_kind_of(u8 w)
 }
 
 /* ------------------------------------------------------------------ */
+/* The line                                                            */
+/* ------------------------------------------------------------------ */
+
+static object *line_obj;
+
+void pipe_line_set(object *t)
+{
+    if (line_obj) obj_release(line_obj);
+    line_obj = t;
+    if (line_obj) obj_retain(line_obj);
+}
+
+object *pipe_line(void) { return line_obj; }
+
+static u64 say_heard[8];
+static u32 say_heard_at;
+
+static struct {
+    bool active;
+    u64  born_ns;
+    char text[SAY_MAX + 1];
+} saypend;
+
+static void line_append(const char *who, const char *what)
+{
+    if (!line_obj || !who || !what) return;
+
+    char ln[256];
+    u64 at = 0;
+    for (u64 i = 0; who[i] && at < 30; i++) {
+        char c = who[i];
+        ln[at++] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+    }
+    while (at > 0 && ln[at - 1] == ' ') at--;
+    ln[at++] = ':';
+    ln[at++] = ' ';
+    ln[at++] = ' ';
+    for (u64 i = 0; what[i] && at < sizeof(ln) - 2; i++) {
+        char c = what[i];
+        ln[at++] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+    }
+    while (at > 0 && ln[at - 1] == ' ') at--;
+    ln[at++] = '\n';
+
+    u64 flags = irq_save();
+    u8 *d = (u8 *)obj_data(line_obj);
+    u64 size = obj_size(line_obj);
+    if (!d || size < sizeof(ln) + 2) { irq_restore(flags); return; }
+    u64 len = 0;
+    while (len < size && d[len]) len++;
+
+    if (len + at + 1 > size) {
+        u64 from = len / 2;
+        while (from < len && d[from] != '\n') from++;
+        if (from < len) from++;
+        memmove(d, d + from, len - from);
+        len -= from;
+        memset(d + len, 0, size - len);
+    }
+    memcpy(d + len, ln, at);
+    d[len + at] = 0;
+    irq_restore(flags);
+    obj_touch(line_obj);
+}
+
+/* ------------------------------------------------------------------ */
+/* Company on the wire                                                 */
+/* ------------------------------------------------------------------ */
+
+/* Every machine heard, by address: what it claimed and when. The
+ * "found" of a scan are the ones heard since the scan began. */
+#define HEARD_MAX 16
+
+typedef struct {
+    bool used;
+    u8   ip[4];
+    u16  port;
+    char name[24];
+    bool works;
+    u32  free_mib;
+    bool has_key;
+    u8   key[32];
+    char version[24];
+    u64  seen_ns;
+} heardrec;
+
+static heardrec heard[HEARD_MAX];
+
+static u64 scan_until_ns;
+static u64 scan_last_call_ns;
+static u64 scan_started_ns;
+
+void pipe_scan(void)
+{
+    scan_started_ns = time_ns();
+    scan_until_ns = scan_started_ns + 3ULL * SECOND;
+    scan_last_call_ns = 0;
+    journal_says("pipe", "calling out on the wire");
+}
+
+bool pipe_scanning(void)
+{
+    return time_ns() < scan_until_ns;
+}
+
+static bool found_is(const heardrec *h)
+{
+    return h->used && scan_started_ns && h->seen_ns >= scan_started_ns;
+}
+
+u32 pipe_found_count(void)
+{
+    u32 n = 0;
+    for (u32 i = 0; i < HEARD_MAX; i++) if (found_is(&heard[i])) n++;
+    return n;
+}
+
+bool pipe_found_at(u32 i, u8 ip[4], char name[24],
+                   bool *works, u32 *free_mib)
+{
+    u32 n = 0;
+    for (u32 k = 0; k < HEARD_MAX; k++) {
+        if (!found_is(&heard[k])) continue;
+        if (n == i) {
+            for (u32 j = 0; j < 4; j++) ip[j] = heard[k].ip[j];
+            for (u32 j = 0; j < 24; j++) name[j] = heard[k].name[j];
+            if (works) *works = heard[k].works;
+            if (free_mib) *free_mib = heard[k].free_mib;
+            return true;
+        }
+        n++;
+    }
+    return false;
+}
+
+static heardrec *heard_by_ip(const u8 *ip)
+{
+    for (u32 i = 0; i < HEARD_MAX; i++)
+        if (heard[i].used && ip4_same(heard[i].ip, ip)) return &heard[i];
+    return NULL;
+}
+
+u64 pipe_seen_ago_s(const u8 ip[4])
+{
+    heardrec *h = heard_by_ip(ip);
+    if (!h || !h->seen_ns) return ~0ULL;
+    return (time_ns() - h->seen_ns) / SECOND;
+}
+
+static heardrec *heard_note(const u8 *ip, u16 port, const u8 *name, u32 nmax,
+                            bool works, u32 free_mib)
+{
+    heardrec *h = heard_by_ip(ip);
+    if (!h) {
+        for (u32 i = 0; i < HEARD_MAX && !h; i++)
+            if (!heard[i].used) h = &heard[i];
+    }
+    if (!h) {
+        h = &heard[0];
+        for (u32 i = 1; i < HEARD_MAX; i++)
+            if (heard[i].seen_ns < h->seen_ns) h = &heard[i];
+        memset(h, 0, sizeof(*h));
+    }
+    h->used = true;
+    for (u32 i = 0; i < 4; i++) h->ip[i] = ip[i];
+    h->port = port ? port : PIPE_PORT;
+    u32 n = 0;
+    while (n < 23 && n < nmax && name[n]) {
+        char c = (char)name[n];
+        h->name[n] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+        n++;
+    }
+    h->name[n] = 0;
+    h->works = works;
+    h->free_mib = free_mib;
+    h->seen_ns = time_ns();
+    return h;
+}
+
+/* magic, kind, pad, the name; whether we take work from the asker and
+ * how much air we have; our key as a claim, our version, and up to four
+ * other machines heard lately -- so a wire's company spreads past
+ * where a broadcast reaches. An older machine reads the first 40 bytes
+ * and ignores the rest. */
+static void say_who(u8 kind, const u8 dst[4], u16 dport)
+{
+    u8 pkt[128];
+    memset(pkt, 0, sizeof(pkt));
+    wr32(pkt, MAGIC);
+    pkt[4] = kind;
+    char nm[24];
+    settings_name(nm, sizeof(nm));
+    for (u32 i = 0; i < 24; i++) pkt[8 + i] = (u8)nm[i];
+
+    bool works = settings_work();
+    if (!works) {
+        i32 row = nodes_by_address(dst);
+        if (row >= 0 && (nodes_may_at((u32)row) & NODE_MAY_WORK)) works = true;
+    }
+    pkt[32] = works ? 1 : 0;
+    wr32(pkt + 36, (u32)(pmm_free_frames() / 256));
+    ssh_identity(pkt + 40);
+    for (u32 i = 0; i < 23 && erebus_version[i]; i++) pkt[72 + i] = (u8)erebus_version[i];
+
+    u8 self[4] = { 0, 0, 0, 0 };
+    net_own_address(self);
+    u32 n = 0;
+    u64 now = time_ns();
+    for (u32 i = 0; i < HEARD_MAX && n < 4; i++) {
+        heardrec *h = &heard[i];
+        if (!h->used || now - h->seen_ns > QUIET_S * SECOND) continue;
+        if (ip4_same(h->ip, dst) || ip4_same(h->ip, self)) continue;
+        memcpy(pkt + 97 + n * 6, h->ip, 4);
+        pkt[101 + n * 6] = (u8)h->port;
+        pkt[102 + n * 6] = (u8)(h->port >> 8);
+        n++;
+    }
+    pkt[96] = (u8)n;
+    net_udp_send(dst, PIPE_PORT, dport, pkt, 97 + 6 * n);
+}
+
+/* An address another machine says it heard: asked once a minute at
+ * most, and only when we have not heard it ourselves lately. */
+static struct { u8 ip[4]; u64 ns; } gossip_asked[8];
+static u32 gossip_at;
+
+static void gossip_consider(const u8 *ip, u16 port)
+{
+    u8 self[4];
+    if (net_own_address(self) && ip4_same(ip, self)) return;
+    if (ip[0] == 0 || ip[0] == 255) return;
+    heardrec *h = heard_by_ip(ip);
+    u64 now = time_ns();
+    if (h && now - h->seen_ns < QUIET_S * SECOND) return;
+    for (u32 i = 0; i < 8; i++)
+        if (ip4_same(gossip_asked[i].ip, ip) && now - gossip_asked[i].ns < 60 * SECOND)
+            return;
+    memcpy(gossip_asked[gossip_at].ip, ip, 4);
+    gossip_asked[gossip_at].ns = now;
+    gossip_at = (gossip_at + 1) % 8;
+    say_who(K_SEEK, ip, port ? port : PIPE_PORT);
+}
+
+/* ------------------------------------------------------------------ */
 /* The seal                                                            */
 /* ------------------------------------------------------------------ */
 
-/* A session: one knock's worth of keys. Fresh at every knock, gone
- * two minutes after the last word, held nowhere else. */
-#define SEAL_MAX 4
+#define SEAL_MAX 8
 
 typedef struct {
     bool used;
@@ -334,20 +455,24 @@ typedef struct {
     u8   ip[4];
     u16  port;
     u32  sid;
-    u8   my_pub[32];                 /* to answer a repeated knock */
+    u8   my_pub[32];
     u8   key_out[16], iv_out[12];
     u8   key_in[16],  iv_in[12];
-    u64  ctr_out;                    /* starts at one; zero never sent */
+    u64  ctr_out;
     u64  ctr_in_seen;
     u64  last_ns;
-    bool proven;                     /* the other side signed with a key we hold it to */
-    u8   answer[140];                /* our WELCOME, to answer a repeated knock alike */
+    bool proven;                     /* the other side signed with its door key */
+    u8   idkey[32];                  /* that key */
+    u8   answer[188];
     u32  answer_len;
 } sealrec;
 
+#define KNOCK_PLAIN  44              /* a knock without an identity */
+#define KNOCK_SIGNED 140             /* with the door key and a signature */
+#define KNOCK_NAMED  188             /* and the name and version claimed after them */
+
 static sealrec seal[SEAL_MAX];
 
-/* The knock we currently have out, if any. */
 static struct {
     bool active;
     u8   ip[4];
@@ -356,6 +481,7 @@ static struct {
     u8   priv[32], pub[32];
     u32  tries;
     u64  last_ns;
+    i32  expect;                     /* the node row that must answer, or -1 */
 } knock;
 
 static sealrec *seal_find(const u8 *ip, u32 sid)
@@ -377,22 +503,37 @@ static sealrec *seal_by_ip(const u8 *ip)
 
 static sealrec *seal_slot_for(const u8 *ip)
 {
-    /* A new knock from a machine replaces what it had: the freshest
-     * keys are the ones both sides are holding. */
     sealrec *s = seal_by_ip(ip);
     if (s) return s;
     for (u32 i = 0; i < SEAL_MAX; i++)
         if (!seal[i].used) return &seal[i];
-
-    /* All busy: take the longest-quiet one. */
     sealrec *old = &seal[0];
     for (u32 i = 1; i < SEAL_MAX; i++)
         if (seal[i].last_ns < old->last_ns) old = &seal[i];
     return old;
 }
 
-/* Both sides derive the same four secrets from the shared point and
- * the two public keys, then keep the pair that speaks their way. */
+/* Whether the machine behind a session may do this here: proven, and
+ * its row in the nodes table says so. */
+static bool may(const sealrec *s, u32 right)
+{
+    if (!s || !s->proven) return false;
+    i32 i = nodes_by_key(s->idkey);
+    return i >= 0 && (nodes_may_at((u32)i) & right) != 0;
+}
+
+/* A machine's name for the journal: its row's name, else what it
+ * called itself on the wire, else its address. */
+static void name_of(const u8 *ip, const sealrec *s, char out[24])
+{
+    i32 i = (s && s->proven) ? nodes_by_key(s->idkey) : nodes_by_address(ip);
+    if (i >= 0 && nodes_name_at((u32)i, out)) return;
+    heardrec *h = heard_by_ip(ip);
+    if (h && h->name[0]) { memcpy(out, h->name, 24); return; }
+    u32 at = put_ip(out, 0, ip);
+    out[at] = 0;
+}
+
 static void seal_derive(sealrec *s, bool we_knocked,
                         const u8 hello_pub[32],
                         const u8 welcome_pub[32],
@@ -429,9 +570,6 @@ static void seal_nonce(u8 out[12], const u8 iv[12], u64 ctr)
     for (u32 i = 0; i < 8; i++) out[4 + i] ^= (u8)(ctr >> (8 * i));
 }
 
-/* Wraps one inner packet in an envelope and sends it. The header is
- * bound in as associated data, so nothing about the envelope can be
- * bent without the tag saying so. */
 static void seal_send(sealrec *s, const u8 *inner, u32 ilen)
 {
     if (!s || ilen == 0 || ilen > INNER_MAX) return;
@@ -451,12 +589,13 @@ static void seal_send(sealrec *s, const u8 *inner, u32 ilen)
     net_udp_send(s->ip, PIPE_PORT, s->port, pkt, 20 + ilen + 16);
 }
 
-static void knock_begin(const u8 *ip, u16 port)
+static void knock_begin(const u8 *ip, u16 port, i32 expect)
 {
     if (knock.active && ip4_same(knock.ip, ip)) return;
     knock.active = true;
     for (u32 i = 0; i < 4; i++) knock.ip[i] = ip[i];
     knock.port = port;
+    knock.expect = expect;
     rand_bytes((u8 *)&knock.sid, 4);
     rand_bytes(knock.priv, 32);
     x25519_base(knock.pub, knock.priv);
@@ -464,9 +603,6 @@ static void knock_begin(const u8 *ip, u16 port)
     knock.last_ns = 0;
 }
 
-/* What a signature under a knock covers: the session and the fresh
- * key, under a fixed word, so a signature cannot be lifted from one
- * exchange into another. The answer covers both fresh keys. */
 static void hello_message(u8 *m, u32 sid, const u8 *eph)
 {
     memcpy(m, "EBPX hello", 10);
@@ -482,21 +618,34 @@ static void welcome_message(u8 *m, u32 sid, const u8 *their_eph, const u8 *my_ep
     memcpy(m + 48, my_eph, 32);
 }
 
+/* The name and version this machine claims, after a signed knock:
+ * claims, not proven, like the ones in a HERE -- but they let the row a
+ * first meeting writes carry a name from the start. */
+static u32 add_claims(u8 *pkt)
+{
+    memset(pkt + KNOCK_SIGNED, 0, KNOCK_NAMED - KNOCK_SIGNED);
+    char nm[24];
+    settings_name(nm, sizeof(nm));
+    for (u32 i = 0; i < 23 && nm[i]; i++) pkt[KNOCK_SIGNED + i] = (u8)nm[i];
+    for (u32 i = 0; i < 23 && erebus_version[i]; i++) pkt[KNOCK_SIGNED + 24 + i] = (u8)erebus_version[i];
+    return KNOCK_NAMED;
+}
+
 /* A knock or its answer: the fresh key and, when the machine has an
- * identity, that identity's key and a signature over the exchange.
- * 44 bytes without, 140 with; an older machine reads the first 44
- * and ignores the rest. */
+ * identity, that identity's key, a signature over the exchange, and
+ * the name and version it claims. 44 bytes without an identity, 188
+ * with; an older machine reads the first 44 or 140. */
 static u32 build_hello(u8 *pkt)
 {
     wr32(pkt, MAGIC);
     pkt[4] = K_HELLO; pkt[5] = pkt[6] = pkt[7] = 0;
     wr32(pkt + 8, knock.sid);
     memcpy(pkt + 12, knock.pub, 32);
-    if (!ssh_identity(pkt + 44)) return 44;
+    if (!ssh_identity(pkt + 44)) return KNOCK_PLAIN;
     u8 msg[46];
     hello_message(msg, knock.sid, knock.pub);
-    if (!ssh_sign(msg, sizeof(msg), pkt + 76)) return 44;
-    return 140;
+    if (!ssh_sign(msg, sizeof(msg), pkt + 76)) return KNOCK_PLAIN;
+    return add_claims(pkt);
 }
 
 static u32 build_welcome(u8 *pkt, u32 sid, const u8 *their_eph, const u8 *my_eph)
@@ -505,33 +654,62 @@ static u32 build_welcome(u8 *pkt, u32 sid, const u8 *their_eph, const u8 *my_eph
     pkt[4] = K_WELCOME; pkt[5] = pkt[6] = pkt[7] = 0;
     wr32(pkt + 8, sid);
     memcpy(pkt + 12, my_eph, 32);
-    if (!ssh_identity(pkt + 44)) return 44;
+    if (!ssh_identity(pkt + 44)) return KNOCK_PLAIN;
     u8 msg[80];
     welcome_message(msg, sid, their_eph, my_eph);
-    if (!ssh_sign(msg, sizeof(msg), pkt + 76)) return 44;
-    return 140;
+    if (!ssh_sign(msg, sizeof(msg), pkt + 76)) return KNOCK_PLAIN;
+    return add_claims(pkt);
 }
 
 static void knock_send(void)
 {
-    u8 pkt[140];
+    u8 pkt[KNOCK_NAMED];
     u32 n = build_hello(pkt);
     net_udp_send(knock.ip, PIPE_PORT, knock.port, pkt, n);
 }
 
-/* Holds the key a machine came with against what the settings
- * remember for its address. The first meeting is believed and written
- * down; from then on the machine at that address must be the one that
- * proved itself then. -1: not that machine, or no key shown where one
- * is remembered -- turned away. 0: the machine remembered, or nothing
- * remembered and nothing shown. 1: met for the first time, remembered
- * now. */
-static i32 identity_verdict(const u8 *ip, const u8 *idkey)
+/* What a knock claimed beyond its proof, written into the heard cache
+ * so the row and the journal have a name for the machine at once. */
+static void knock_claims(const u8 *ip, u16 port, const u8 *p, u32 len)
 {
-    u8 known[32];
-    bool have = settings_known(ip, known);
+    if (len < KNOCK_NAMED) return;
+    heardrec *h = heard_by_ip(ip);
+    if (!h) h = heard_note(ip, port, p + KNOCK_SIGNED, 24, false, 0);
+    else if (!h->name[0]) {
+        u32 n = 0;
+        while (n < 23 && p[KNOCK_SIGNED + n]) {
+            char c = (char)p[KNOCK_SIGNED + n];
+            h->name[n] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+            n++;
+        }
+        h->name[n] = 0;
+    }
+    if (!h->version[0]) {
+        u32 n = 0;
+        while (n < 23 && p[KNOCK_SIGNED + 24 + n]) {
+            char c = (char)p[KNOCK_SIGNED + 24 + n];
+            h->version[n] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+            n++;
+        }
+        h->version[n] = 0;
+    }
+    h->has_key = true;
+    memcpy(h->key, p + 44, 32);
+}
+
+/* Who a machine is, held against the nodes table. A key met before is
+ * that node, wherever it answers from; the row follows it. A key never
+ * met is a new node -- unless the address it answers from belongs to a
+ * node already, which is the one case turned away: the machine at a
+ * known address must be the one met there, until the person removes
+ * that row. -1: turned away. 0: known, or unproven and unclaimed. 1:
+ * met for the first time. */
+static i32 identity_verdict(const u8 *ip, u16 port, const u8 *idkey)
+{
+    nodes_apply();
+    i32 at = nodes_by_address(ip);
     if (!idkey) {
-        if (!have) return 0;
+        if (at < 0) return 0;
         kprintf("pipe: %u.%u.%u.%u comes without its key, though one is remembered for it; turned away\n",
                 ip[0], ip[1], ip[2], ip[3]);
         journal_says("pipe", "a machine came without the key remembered for it; turned away");
@@ -539,55 +717,73 @@ static i32 identity_verdict(const u8 *ip, const u8 *idkey)
     }
     char fp[64];
     ssh_fingerprint_of(idkey, fp);
-    if (have) {
-        if (memcmp(known, idkey, 32) == 0) return 0;
+    i32 me = nodes_by_key(idkey);
+    if (me < 0 && at >= 0) {
         kprintf("pipe: %u.%u.%u.%u comes with a key that is not the one remembered for it (%s); turned away\n",
                 ip[0], ip[1], ip[2], ip[3], fp);
         journal_says("pipe", "a machine came with a key that is not the one remembered for it; turned away");
         return -1;
     }
-    if (settings_remember(ip, idkey)) {
-        kprintf("pipe: %u.%u.%u.%u is met for the first time; its key %s is remembered now\n",
+    heardrec *h = heard_by_ip(ip);
+    i32 row = nodes_meet(h ? h->name : NULL, idkey, ip, port,
+                         h ? h->version : NULL, false);
+    if (row < 0) {
+        kprintf("pipe: no room in nodes for %u.%u.%u.%u (%s)\n",
                 ip[0], ip[1], ip[2], ip[3], fp);
-        journal_says("pipe", "a machine was met for the first time; its key is remembered");
-    } else {
-        kprintf("pipe: no room in the settings to remember %u.%u.%u.%u\n",
-                ip[0], ip[1], ip[2], ip[3]);
-        journal_says("pipe", "the settings have no room left to remember a machine");
+        journal_says("pipe", "the nodes table has no room left for another machine");
+        return 0;
     }
-    return 1;
+    return me < 0 ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Where the pipe points                                               */
+/* ------------------------------------------------------------------ */
+
+/* The settings' peer: an address and port, or a node's name looked up
+ * in the nodes table -- or among the machines heard, for one not met
+ * yet. `node` is the row that must answer, or -1. */
+static bool target_resolve(u8 ip[4], u16 *port, i32 *node)
+{
+    if (node) *node = -1;
+    if (settings_peer(ip, port)) {
+        if (node) *node = nodes_by_address(ip);
+        return true;
+    }
+    char nm[24];
+    if (!settings_peer_name(nm, sizeof(nm))) return false;
+    nodes_apply();
+    i32 i = nodes_by_name(nm);
+    if (i >= 0) {
+        if (!nodes_address_at((u32)i, ip, port)) return false;
+        if (node) *node = i;
+        return true;
+    }
+    for (u32 k = 0; k < HEARD_MAX; k++) {
+        if (!heard[k].used) continue;
+        u32 j = 0;
+        while (heard[k].name[j] && nm[j] &&
+               ((heard[k].name[j] | 32) == (nm[j] | 32))) j++;
+        if (heard[k].name[j] || nm[j]) continue;
+        memcpy(ip, heard[k].ip, 4);
+        *port = heard[k].port;
+        return true;
+    }
+    return false;
 }
 
 /* ------------------------------------------------------------------ */
 /* Far work: the desk                                                  */
 /* ------------------------------------------------------------------ */
 
-/* A text can be asked of another machine: it travels as a recipe,
- * runs over there in the interpreter with a way home and a clock and
- * nothing else, and what it answers comes back correlated by job.
- * The far machine only works at all when its settings welcome it.
- *
- * The desk is where such asks queue. A task whose first line says
- * "split P from LO to HI" is divided: P parts, each carrying its
- * stretch of the range, handed round-robin to the machines that
- * answered the scan willing -- and the parts' answers, numbers by
- * contract, are summed into one. A task without the line is one
- * part, asked of the settings' peer, its answer taken as it is.
- * Either way the result is written back into the task itself when
- * the task came writable, and laid into arrivals when it did not.
- * Programs reach the desk through the wire, which makes asking far
- * work a capability like everything else here. */
-
 static domain *pipe_kdom;
 
 void pipe_prepare(domain *k) { pipe_kdom = k; }
 
-/* Part states. */
 #define P_PEND 0
 #define P_RUN  1
 #define P_DONE 2
 
-/* Job states. */
 #define DJ_FRESH 0
 #define DJ_SCAN  1
 #define DJ_RUN   2
@@ -595,7 +791,7 @@ void pipe_prepare(domain *k) { pipe_kdom = k; }
 typedef struct {
     bool    used;
     u32     no;
-    object *task;                  /* retained until the job ends */
+    object *task;
     bool    writable;
     u8      state;
     u64     scan_until_ns;
@@ -608,20 +804,27 @@ typedef struct {
 
     u8      pstate[PART_MAX];
     u32     ptries[PART_MAX];
-    u64     pwait_ns[PART_MAX];    /* not before */
+    u64     pwait_ns[PART_MAX];
     i64     presult[PART_MAX];
-    u8      raw[24];               /* a lone part's answer, as said */
+    char    ptext[PART_MAX][25];   /* each part's answer as said */
+    u8      pby[PART_MAX][4];      /* who answered it */
+    u8      raw[24];
 
     u8      cand[CAND_MAX][4];
     u16     cand_port[CAND_MAX];
+    u8      istate[CAND_MAX];      /* the input: 0 not sent, 1 going, 2 there, 3 failed */
+    u8      itries[CAND_MAX];
     u32     cand_count;
     u32     next_cand;
+
+    object *input;                 /* an object every worker gets ahead of its part, or NULL */
+    u8      input_kind;
+    u32     input_len;
 } desk_job;
 
 static desk_job desk[DESK_JOBS];
 static u32 desk_no;
 
-/* The asks in flight, at most one per part. */
 static struct {
     bool active;
     u8   ip[4];
@@ -632,8 +835,6 @@ static struct {
     u64  last_ns, started_ns;
 } fask[FASK_MAX];
 
-/* The job we are running for someone else, if any. One at a time:
- * a worker is a neighbour lending a hand, not a queue. */
 static struct {
     bool       active;
     u64        id;
@@ -645,8 +846,6 @@ static struct {
     cap_handle recv;
 } workj;
 
-/* The last answer given, kept to repeat when the same ask comes
- * again -- a lost answer must cost a resend, never a second run. */
 static struct {
     bool valid;
     u64  id;
@@ -654,7 +853,6 @@ static struct {
     u8   text[24];
 } gave;
 
-/* "job N..." -- the journal's half of the correlation. */
 static void job_says(u32 no, const char *tail)
 {
     char line[48];
@@ -683,8 +881,6 @@ static void answer_send(sealrec *s, u64 id, u8 status, const u8 text[24])
     seal_send(s, pkt, 40);
 }
 
-/* One part's stretch of the job's range: the range is dealt like
- * cards, the first parts taking the leftovers. */
 static void part_range(const desk_job *j, u32 part, i64 *lo, i64 *hi)
 {
     if (j->parts <= 1 || j->hi < j->lo) { *lo = j->lo; *hi = j->hi; return; }
@@ -704,7 +900,7 @@ static void fask_send(sealrec *s, u32 fi)
 
     u8 pkt[40 + RECIPE_MAX];
     wr32(pkt, MAGIC);
-    pkt[4] = K_ASK; pkt[5] = pkt[6] = pkt[7] = 0;
+    pkt[4] = K_ASK; pkt[5] = j->input ? F_HAS_INPUT : 0; pkt[6] = pkt[7] = 0;
     wr64(pkt + 8, fask[fi].id);
     wr32(pkt + 16, j->len);
     wr32(pkt + 20, ASK_BUDGET_S);
@@ -714,9 +910,6 @@ static void fask_send(sealrec *s, u32 fi)
     seal_send(s, pkt, 40 + j->len);
 }
 
-/* Appends "= <answer>" to the task, the way a hand would write the
- * result under the sum. Failing quietly would hide the outcome, so a
- * page with no room says so in the journal instead. */
 static void task_append(object *task, const char *tail)
 {
     u8 *d = (u8 *)obj_data(task);
@@ -778,14 +971,64 @@ static void job_end(desk_job *j, bool ok, const char *text,
 
     desk_clear_fasks((u32)(j - desk));
     if (j->task) obj_release(j->task);
+    if (j->input) obj_release(j->input);
     j->task = NULL;
+    j->input = NULL;
     j->used = false;
 }
 
-/* Takes a task in: parses its first line for a split, strips old
- * answers off its tail, and queues it. The one entry the chip, the
- * wire and the foreman all use. */
+/* Strikes a candidate off a job: its parts go elsewhere. */
+static void cand_strike(desk_job *j, u32 c)
+{
+    for (u32 k = c; k + 1 < j->cand_count; k++) {
+        memcpy(j->cand[k], j->cand[k + 1], 4);
+        j->cand_port[k] = j->cand_port[k + 1];
+        j->istate[k] = j->istate[k + 1];
+        j->itries[k] = j->itries[k + 1];
+    }
+    if (j->cand_count) j->cand_count--;
+}
+
+/* The names of the machines that answered a job's parts, each once:
+ * "alpha, beta". */
+static u32 put_answerers(const desk_job *j, char *buf, u32 at, u32 max)
+{
+    u32 named = 0;
+    for (u32 p = 0; p < j->parts; p++) {
+        bool seen = false;
+        for (u32 q = 0; q < p; q++)
+            if (ip4_same(j->pby[q], j->pby[p])) seen = true;
+        if (seen) continue;
+        char nm[24];
+        name_of(j->pby[p], seal_by_ip(j->pby[p]), nm);
+        if (at + 26 >= max) break;
+        if (named++) at = put(buf, at, ", ");
+        at = put(buf, at, nm);
+    }
+    return at;
+}
+
+static bool ask_take(object *o, bool writable, object *input);
+
 bool pipe_ask(object *o, bool writable)
+{
+    return ask_take(o, writable, NULL);
+}
+
+bool pipe_ask_with(object *o, bool writable, object *input)
+{
+    if (!input || wire_kind_of(obj_type(input)) == 0) {
+        journal_says("pipe", "an input for work is a text, bytes or a picture");
+        return false;
+    }
+    if (obj_size(input) == 0 || obj_size(input) > CARRY_MAX_BYTES) {
+        journal_says("pipe", "that input does not fit through");
+        return false;
+    }
+    return ask_take(o, writable, input);
+}
+
+static bool ask_take(object *o, bool writable, object *input)
 {
     if (!o) return false;
 
@@ -813,8 +1056,6 @@ bool pipe_ask(object *o, bool writable)
     u64 len = 0;
     if (d) while (len < size && d[len]) len++;
 
-    /* Old answers are history, not part of the recipe: trailing lines
-     * that begin "= " are left behind. */
     for (;;) {
         u64 end = len;
         while (end > 0 && d[end - 1] == '\n') end--;
@@ -831,8 +1072,6 @@ bool pipe_ask(object *o, bool writable)
         return false;
     }
 
-    /* The first line may divide the work: "split P from LO to HI".
-     * The numbers are read wherever they stand in the line. */
     u64 eol = 0;
     while (eol < len && d[eol] != '\n') eol++;
 
@@ -886,6 +1125,19 @@ bool pipe_ask(object *o, bool writable)
     j->state = DJ_FRESH;
     j->task = o;
     obj_retain(o);
+    if (input) {
+        j->input = input;
+        obj_retain(input);
+        j->input_kind = wire_kind_of(obj_type(input));
+        u64 isz = obj_size(input);
+        if (obj_type(input) == TYPE_TEXT) {
+            const u8 *id = (const u8 *)obj_data(input);
+            u64 n = 0;
+            while (n < isz && id[n]) n++;
+            isz = n ? n : 1;
+        }
+        j->input_len = (u32)isz;
+    }
     j->used = true;
 
     if (parts > 1) {
@@ -893,13 +1145,15 @@ bool pipe_ask(object *o, bool writable)
         u32 at = put(line, 0, ": divided into ");
         at = put_dec(line, at, parts);
         at = put(line, at, " parts");
+        if (input) at = put(line, at, ", with an input");
         line[at] = 0;
         job_says(j->no, line);
     } else {
-        job_says(j->no, " asked of the peer");
+        job_says(j->no, input ? " asked of the peer, with an input" : " asked of the peer");
     }
-    kprintf("pipe: job %u queued, %u bytes, %u part%s\n",
-            j->no, j->len, parts, parts == 1 ? "" : "s");
+    kprintf("pipe: job %u queued, %u bytes, %u part%s%s\n",
+            j->no, j->len, parts, parts == 1 ? "" : "s",
+            input ? ", with an input" : "");
     return true;
 }
 
@@ -907,20 +1161,77 @@ bool pipe_ask(object *o, bool writable)
 /* Sending                                                             */
 /* ------------------------------------------------------------------ */
 
-/* One thing in flight at a time. The substance is copied here when
- * the shell posts it, so the object itself is free to change or go
- * the moment the click is done. */
+/* One thing in flight at a time, read straight from its source: the
+ * object, retained for the journey, or the running kernel's bytes. */
 static struct {
-    bool busy;
-    u8   kind;
-    char name[OBJ_NAME_MAX];
-    u32  len;
-    u64  id;
-    u32  tries;
-    u64  last_try_ns;
-    bool taken;
-    u8   data[CARRY_MAX_BYTES];
+    bool     busy;
+    u8       kind;
+    char     name[OBJ_NAME_MAX];
+    u32      len;
+    u64      id;
+    object  *obj;
+    const u8 *raw;
+    u8       to[4];
+    u16      to_port;
+    i32      node;
+    bool     offered;
+    u32      acked, sent;
+    u32      stalls, busy_tries;
+    u64      started_ns, last_progress_ns;
+    bool     taken;
+    u8       taken_status, taken_reason;
+    i32      work_job;               /* the desk job this input goes ahead of, or -1 */
+    u32      work_cand;
 } out;
+
+/* Updates waiting their turn: node rows, one kernel image for all. */
+static struct {
+    i32     rows[NODES_MAX];
+    u32     n, at;
+    object *image;
+} upq;
+
+static const u8 *out_bytes(void)
+{
+    return out.obj ? (const u8 *)obj_data(out.obj) : out.raw;
+}
+
+/* A transfer is over, one way or the other. An input that was going
+ * ahead of a job's part tells the desk whether it got there. */
+static void out_end(bool ok)
+{
+    if (out.work_job >= 0 && out.work_job < DESK_JOBS &&
+        desk[out.work_job].used && out.work_cand < CAND_MAX)
+        desk[out.work_job].istate[out.work_cand] = ok ? 2 : 3;
+    if (out.obj) obj_release(out.obj);
+    out.obj = NULL;
+    out.raw = NULL;
+    out.busy = false;
+    out.work_job = -1;
+}
+
+static bool out_begin(u8 kind, const char *name, object *obj, const u8 *raw,
+                      u32 len, const u8 to[4], u16 to_port, i32 node)
+{
+    if (out.busy) return false;
+    memset(&out, 0, sizeof(out));
+    out.work_job = -1;
+    out.kind = kind;
+    out.len = len;
+    out.obj = obj;
+    if (obj) obj_retain(obj);
+    out.raw = raw;
+    memcpy(out.to, to, 4);
+    out.to_port = to_port;
+    out.node = node;
+    u32 ni = 0;
+    if (name) while (name[ni] && ni < OBJ_NAME_MAX - 1) { out.name[ni] = name[ni]; ni++; }
+    out.name[ni] = 0;
+    rand_bytes((u8 *)&out.id, 8);
+    out.started_ns = time_ns();
+    out.busy = true;
+    return true;
+}
 
 bool pipe_post(object *o)
 {
@@ -940,7 +1251,8 @@ bool pipe_post(object *o)
 
     u8 peer[4];
     u16 pp;
-    if (!settings_peer(peer, &pp)) {
+    i32 node;
+    if (!target_resolve(peer, &pp, &node)) {
         journal_says("pipe", "no peer is named in the settings");
         return false;
     }
@@ -965,50 +1277,112 @@ bool pipe_post(object *o)
         len = n ? n : 1;
     }
 
-    out.kind = kind;
-    out.len = len;
-    for (u32 i = 0; i < len; i++) out.data[i] = d[i];
+    return out_begin(kind, obj_name(o), o, NULL, len, peer, pp, node);
+}
 
-    const char *nm = obj_name(o);
-    u32 ni = 0;
-    if (nm) while (nm[ni] && ni < OBJ_NAME_MAX - 1) {
-        out.name[ni] = nm[ni];
-        ni++;
+static bool looks_like_kernel(const u8 *d, u64 len)
+{
+    return d && len >= KERNEL_MIN && len <= CARRY_MAX_BYTES &&
+           d[0] == 0x7F && d[1] == 'E' && d[2] == 'L' && d[3] == 'F';
+}
+
+static bool update_start(i32 row, object *image, char *why, u32 max)
+{
+    u8 ip[4];
+    u16 port;
+    char nm[24];
+    nodes_name_at((u32)row, nm);
+    if (!nodes_address_at((u32)row, ip, &port)) {
+        copy_why(why, max, "no address is known for that node yet; it must be heard on the wire first.");
+        return false;
     }
-    out.name[ni] = 0;
-
-    rand_bytes((u8 *)&out.id, 8);
-    out.tries = 0;
-    out.last_try_ns = 0;
-    out.taken = false;
-    out.busy = true;
+    const u8 *src;
+    u64 len;
+    if (image) {
+        src = (const u8 *)obj_data(image);
+        len = obj_size(image);
+    } else {
+        const u8 *l, *k;
+        u64 ls, ks;
+        if (!system_boot_files(&l, &ls, &k, &ks)) {
+            copy_why(why, max, "the loader did not hand this kernel over at start; 'update <node> with <kernel.elf>' sends a built one.");
+            return false;
+        }
+        src = k;
+        len = ks;
+    }
+    if (!looks_like_kernel(src, len)) {
+        copy_why(why, max, "that is not a kernel: the kernel.elf a build makes is.");
+        return false;
+    }
+    if (!out_begin(W_KERNEL, "kernel.elf", image, image ? NULL : src,
+                   (u32)len, ip, port, row)) {
+        copy_why(why, max, "still carrying the last thing.");
+        return false;
+    }
+    char line[64];
+    u32 at = put(line, 0, "sending the kernel to ");
+    at = put(line, at, nm);
+    line[at] = 0;
+    journal_says("pipe", line);
+    kprintf("pipe: sending a kernel of %u bytes to %s (%u.%u.%u.%u)\n",
+            (u32)len, nm, ip[0], ip[1], ip[2], ip[3]);
     return true;
 }
 
-static void send_offer_and_chunks(sealrec *s)
+bool pipe_update(const char *node, object *image, char *why, u32 max)
+{
+    if (!net_crypto_ok()) { copy_why(why, max, "the seal cannot prove itself; nothing goes."); return false; }
+    nodes_apply();
+    i32 row = nodes_by_name(node);
+    if (row < 0) { copy_why(why, max, "no node of that name in nodes.  'nodes' lists them."); return false; }
+    if (out.busy) { copy_why(why, max, "still carrying the last thing; try again in a moment."); return false; }
+    return update_start(row, image, why, max);
+}
+
+u32 pipe_update_all(object *image, char *why, u32 max)
+{
+    if (!net_crypto_ok()) { copy_why(why, max, "the seal cannot prove itself; nothing goes."); return 0; }
+    nodes_apply();
+    if (upq.image) obj_release(upq.image);
+    upq.image = image;
+    if (image) obj_retain(image);
+    upq.n = upq.at = 0;
+    for (u32 i = 0; i < nodes_count(); i++)
+        if (nodes_address_at(i, NULL, NULL)) upq.rows[upq.n++] = (i32)i;
+    if (upq.n == 0) {
+        copy_why(why, max, "no node with an address in nodes; nobody to send to.");
+        if (upq.image) obj_release(upq.image);
+        upq.image = NULL;
+        return 0;
+    }
+    return upq.n;
+}
+
+static void send_offer(sealrec *s)
 {
     u8 pkt[56];
     wr32(pkt, MAGIC);
-    pkt[4] = K_OFFER; pkt[5] = pkt[6] = pkt[7] = 0;
+    pkt[4] = K_OFFER; pkt[5] = out.work_job >= 0 ? F_FOR_WORK : 0; pkt[6] = pkt[7] = 0;
     wr64(pkt + 8, out.id);
     wr32(pkt + 16, out.kind);
     wr32(pkt + 20, out.len);
     for (u32 i = 0; i < 32; i++)
         pkt[24 + i] = (i < OBJ_NAME_MAX) ? (u8)out.name[i] : 0;
     seal_send(s, pkt, 56);
+}
 
+static void send_chunk(sealrec *s, u32 off)
+{
     u8 cp[24 + CHUNK_MAX];
-    for (u32 off = 0; off < out.len; off += CHUNK_MAX) {
-        u32 dlen = out.len - off < CHUNK_MAX ? out.len - off : CHUNK_MAX;
-        wr32(cp, MAGIC);
-        cp[4] = K_CHUNK; cp[5] = cp[6] = cp[7] = 0;
-        wr64(cp + 8, out.id);
-        wr32(cp + 16, off);
-        wr32(cp + 20, dlen);
-        for (u32 i = 0; i < dlen; i++) cp[24 + i] = out.data[off + i];
-        seal_send(s, cp, 24 + dlen);
-        net_breathe();                    /* let acks and everyone else in */
-    }
+    u32 dlen = out.len - off < CHUNK_MAX ? out.len - off : CHUNK_MAX;
+    wr32(cp, MAGIC);
+    cp[4] = K_CHUNK; cp[5] = cp[6] = cp[7] = 0;
+    wr64(cp + 8, out.id);
+    wr32(cp + 16, off);
+    wr32(cp + 20, dlen);
+    memcpy(cp + 24, out_bytes() + off, dlen);
+    seal_send(s, cp, 24 + dlen);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1016,23 +1390,84 @@ static void send_offer_and_chunks(sealrec *s)
 /* ------------------------------------------------------------------ */
 
 static struct {
-    bool active;
-    u64  id;
-    u8   kind;
-    char name[OBJ_NAME_MAX];
-    u32  total, have;
-    u64  started_ns;
-    u8   from[4];
-    u16  from_port;
-    u8   data[CARRY_MAX_BYTES];
+    bool    active;
+    u64     id;
+    u8      kind;
+    char    name[OBJ_NAME_MAX];
+    u32     total, have;
+    u32     since_have;
+    u64     started_ns, last_have_ns;
+    u8      from[4];
+    u16     from_port;
+    object *obj;
+    bool    for_work;
 } in;
 
-static u64 last_taken_id;            /* to re-ack a lost TAKEN */
+static u64 last_taken_id;
+static u64 restart_at_ns;
 
-/* Lays a finished object into the arrivals list. Read and write,
- * never grant onward by default: what came over the wire is
- * material, and handing it around further stays a decision, not a
- * reflex. Takes over the caller's reference on success. */
+/* Inputs sent ahead of work, one per asking machine, held until the
+ * ask names them -- or five minutes, whichever comes first. */
+static struct {
+    bool    used;
+    u8      from[4];
+    object *obj;
+    u64     ns;
+} inputs[INPUTS_MAX];
+
+static object *input_from(const u8 *ip)
+{
+    for (u32 i = 0; i < INPUTS_MAX; i++)
+        if (inputs[i].used && ip4_same(inputs[i].from, ip)) return inputs[i].obj;
+    return NULL;
+}
+
+static void input_hold(const u8 *ip, object *o)
+{
+    u32 slot = INPUTS_MAX;
+    for (u32 i = 0; i < INPUTS_MAX; i++) {
+        if (inputs[i].used && ip4_same(inputs[i].from, ip)) { slot = i; break; }
+        if (!inputs[i].used && slot == INPUTS_MAX) slot = i;
+    }
+    if (slot == INPUTS_MAX) {
+        slot = 0;
+        for (u32 i = 1; i < INPUTS_MAX; i++)
+            if (inputs[i].ns < inputs[slot].ns) slot = i;
+    }
+    if (inputs[slot].used && inputs[slot].obj) obj_release(inputs[slot].obj);
+    inputs[slot].used = true;
+    memcpy(inputs[slot].from, ip, 4);
+    inputs[slot].obj = o;
+    inputs[slot].ns = time_ns();
+}
+
+static void in_drop(void)
+{
+    if (in.obj) obj_release(in.obj);
+    in.obj = NULL;
+    in.active = false;
+}
+
+static void send_taken(sealrec *s, u64 id, u8 status, u8 reason)
+{
+    u8 ack[16];
+    wr32(ack, MAGIC);
+    ack[4] = K_TAKEN; ack[5] = status; ack[6] = reason; ack[7] = 0;
+    wr64(ack + 8, id);
+    seal_send(s, ack, 16);
+}
+
+static void send_have(sealrec *s, u64 id, u32 have)
+{
+    u8 pkt[20];
+    wr32(pkt, MAGIC);
+    pkt[4] = K_HAVE; pkt[5] = pkt[6] = pkt[7] = 0;
+    wr64(pkt + 8, id);
+    wr32(pkt + 16, have);
+    seal_send(s, pkt, 20);
+    in.last_have_ns = time_ns();
+}
+
 static bool arrivals_place(object *o)
 {
     if (!arrivals) return false;
@@ -1048,12 +1483,10 @@ static bool arrivals_place(object *o)
     return true;
 }
 
-/* A job's answer becomes a small text in arrivals, so the result is
- * material to work with and not only a line that scrolls away. */
 static void lay_answer(u32 no, const u8 *text)
 {
     u32 tl = 0;
-    while (tl < 24 && text[tl]) tl++;
+    while (tl < 400 && text[tl]) tl++;
     if (tl == 0) return;
 
     object *o = obj_create(TYPE_TEXT, tl + 512, 0);
@@ -1075,26 +1508,51 @@ static void lay_answer(u32 no, const u8 *text)
     if (!arrivals_place(o)) obj_release(o);
 }
 
-static void arrival_done(void)
+/* The last byte is in. A kernel is installed for the next start and the
+ * machine restarts in a moment; anything else lies in arrivals. */
+static void arrival_done(sealrec *s)
 {
-    type_id t = local_kind_of(in.kind);
-    if (t == TYPE_NULL || !arrivals) { in.active = false; return; }
+    char who[24];
+    name_of(in.from, s, who);
 
-    /* Texts get a byte of quiet at the end so they stay editable;
-     * bytes and pictures arrive exactly as sent. */
-    u64 room = in.total + (t == TYPE_TEXT ? 512 : 0);
-    object *o = obj_create(t, room, 0);
-    if (!o) { in.active = false; return; }
-
-    u8 *d = (u8 *)obj_data(o);
-    for (u32 i = 0; i < in.total; i++) d[i] = in.data[i];
-    if (in.name[0]) obj_set_name(o, in.name);
-
-    if (!arrivals_place(o)) {
-        obj_release(o);
-        in.active = false;
+    if (in.kind == W_KERNEL) {
+        const u8 *d = (const u8 *)obj_data(in.obj);
+        char why[120];
+        if (!looks_like_kernel(d, in.total)) {
+            kprintf("pipe: what came from %s as a kernel is not one\n", who);
+            journal_says("pipe", "what came as a kernel is not one; dropped");
+        } else if (!fat_install_kernel(d, in.total, why, sizeof(why))) {
+            kprintf("pipe: the kernel from %s could not be installed: %s\n", who, why);
+            journal_says("pipe", "a kernel came, but could not be installed");
+        } else {
+            kprintf("pipe: a kernel of %u bytes came from %s; installed for the next start; restarting in 3 s\n",
+                    in.total, who);
+            char line[80];
+            u32 at = put(line, 0, "a kernel came from ");
+            at = put(line, at, who);
+            at = put(line, at, "; installed; restarting");
+            line[at] = 0;
+            journal_says("pipe", line);
+            restart_at_ns = time_ns() + 3 * SECOND;
+        }
+        in_drop();
         return;
     }
+
+    if (in.name[0]) obj_set_name(in.obj, in.name);
+    object *o = in.obj;
+    in.obj = NULL;
+    in.active = false;
+
+    if (in.for_work) {
+        /* Not material for the person: the input a job will name. */
+        input_hold(in.from, o);
+        kprintf("pipe: an input of %u bytes for work came from %s\n", in.total, who);
+        return;
+    }
+
+    if (!arrivals) { obj_release(o); return; }
+    if (!arrivals_place(o)) { obj_release(o); return; }
 
     kprintf("pipe: %u bytes arrived from %u.%u.%u.%u\n",
             in.total, in.from[0], in.from[1], in.from[2], in.from[3]);
@@ -1112,17 +1570,12 @@ static void arrival_done(void)
     }
     said[sa] = 0;
     journal_says("pipe", said);
-    in.active = false;
 }
 
-/* One plaintext packet out of an opened envelope. Everything with
- * substance in it lands here and nowhere else. */
 /* ------------------------------------------------------------------ */
 /* Saying a word                                                       */
 /* ------------------------------------------------------------------ */
 
-/* Puts one spoken word into every sealed session there is. Answers
- * how many doors it went through -- zero means nobody could hear. */
 static u32 say_wire(const char *text)
 {
     u32 tl = 0;
@@ -1151,17 +1604,14 @@ bool pipe_say(const char *text)
 {
     if (!text || !text[0]) return false;
 
-    /* What was said stands on the line either way; whether anyone
-     * heard it is the journal's to report. */
     line_append("you", text);
 
     if (say_wire(text)) return true;
 
-    /* No seal is standing. With a named peer the knock goes out and
-     * the word waits by the door; without one there is no door. */
     u8 peer[4];
     u16 pp;
-    if (!settings_peer(peer, &pp)) {
+    i32 node;
+    if (!target_resolve(peer, &pp, &node)) {
         journal_says("pipe", "nobody is on the line, and no peer is named");
         return false;
     }
@@ -1170,9 +1620,20 @@ bool pipe_say(const char *text)
     saypend.text[n] = 0;
     saypend.active = true;
     saypend.born_ns = time_ns();
-    knock_begin(peer, pp);
+    knock_begin(peer, pp, node);
     journal_says("pipe", "knocking first; the word will follow");
     return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* What arrives inside an envelope                                     */
+/* ------------------------------------------------------------------ */
+
+static const char *refusal_words(u8 reason)
+{
+    if (reason == R_NOT_ALLOWED) return "it does not let this machine update it";
+    if (reason == R_TOO_BIG)     return "it will not take something that size";
+    return "it declined";
 }
 
 static void inner_input(const u8 src[4], u16 sport, sealrec *s,
@@ -1183,34 +1644,84 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
     u64 id = rd64(p + 8);
 
     if (kind == K_TAKEN) {
-        if (out.busy && id == out.id) out.taken = true;
+        if (out.busy && id == out.id && !out.taken) {
+            out.taken = true;
+            out.taken_status = p[5];
+            out.taken_reason = p[6];
+        }
+        return;
+    }
+
+    if (kind == K_HAVE && len >= 20) {
+        if (!out.busy || id != out.id) return;
+        u32 have = rd32(p + 16);
+        if (have > out.len) return;
+        if (have > out.acked || !out.offered) {
+            out.acked = have;
+            out.last_progress_ns = time_ns();
+            out.stalls = 0;
+        }
+        if (out.sent < out.acked) out.sent = out.acked;
         return;
     }
 
     if (kind == K_OFFER && len >= 56) {
         if (id == last_taken_id && last_taken_id) {
-            /* Already taken; the ack must have gone missing. */
-            u8 ack[16];
-            wr32(ack, MAGIC);
-            ack[4] = K_TAKEN; ack[5] = ack[6] = ack[7] = 0;
-            wr64(ack + 8, id);
-            seal_send(s, ack, 16);
+            send_taken(s, id, T_TAKEN, 0);
+            return;
+        }
+        if (in.active && id == in.id) {
+            /* the same offer again: the sender lost track; say how far */
+            send_have(s, id, in.have);
+            return;
+        }
+        if (in.active) {
+            send_taken(s, id, T_BUSY, 0);
             return;
         }
 
         u32 wk = rd32(p + 16);
         u32 total = rd32(p + 20);
-        if (local_kind_of((u8)wk) == TYPE_NULL) return;
-        if (total == 0 || total > CARRY_MAX_BYTES) return;
+        char who[24];
+        name_of(src, s, who);
 
+        if (wk == W_KERNEL) {
+            if (!may(s, NODE_MAY_UPDATE)) {
+                kprintf("pipe: %s offers a kernel, but may not update this machine; declined\n", who);
+                char line[72];
+                u32 at = put(line, 0, "node ");
+                at = put(line, at, who);
+                at = put(line, at, " offered a kernel; it may not update this machine");
+                line[at] = 0;
+                journal_says("pipe", line);
+                send_taken(s, id, T_REFUSED, R_NOT_ALLOWED);
+                return;
+            }
+            if (total < KERNEL_MIN || total > CARRY_MAX_BYTES) {
+                send_taken(s, id, T_REFUSED, R_TOO_BIG);
+                return;
+            }
+        } else {
+            if (local_kind_of((u8)wk) == TYPE_NULL) { send_taken(s, id, T_REFUSED, R_UNKNOWN); return; }
+            if (total == 0 || total > CARRY_MAX_BYTES) { send_taken(s, id, T_REFUSED, R_TOO_BIG); return; }
+        }
+
+        type_id t = wk == W_KERNEL ? TYPE_BYTES : local_kind_of((u8)wk);
+        u64 room = total + (t == TYPE_TEXT ? 512 : 0);
+        object *o = obj_create(t, room, 0);
+        if (!o) { send_taken(s, id, T_REFUSED, R_TOO_BIG); return; }
+        if (wk == W_KERNEL) obj_set_transient(o, true);
+
+        memset(&in, 0, sizeof(in));
         in.active = true;
         in.id = id;
         in.kind = (u8)wk;
+        in.for_work = (p[5] & F_FOR_WORK) != 0 && wk != W_KERNEL;
         in.total = total;
-        in.have = 0;
         in.started_ns = time_ns();
         for (u32 i = 0; i < 4; i++) in.from[i] = src[i];
         in.from_port = sport;
+        in.obj = o;
         u32 ni = 0;
         while (ni < OBJ_NAME_MAX - 1 && p[24 + ni]) {
             char c = (char)p[24 + ni];
@@ -1218,6 +1729,11 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
             ni++;
         }
         in.name[ni] = 0;
+        if (wk == W_KERNEL) {
+            kprintf("pipe: %s sends a kernel of %u bytes; taking it\n", who, total);
+            journal_says("pipe", "a kernel is coming in from a node that may update this machine");
+        }
+        send_have(s, id, 0);
         return;
     }
 
@@ -1225,27 +1741,30 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         if (!in.active || id != in.id) return;
         u32 off = rd32(p + 16);
         u32 dlen = rd32(p + 20);
-        if (off != in.have) return;          /* in order or not at all */
         if (dlen == 0 || dlen > CHUNK_MAX || 24 + dlen > len) return;
+        if (off != in.have) {
+            /* a gap, or an old chunk again: say where we stand, not too often */
+            if (off > in.have && time_ns() - in.last_have_ns > 100 * MS)
+                send_have(s, id, in.have);
+            return;
+        }
         if (off + dlen > in.total) return;
 
-        for (u32 i = 0; i < dlen; i++) in.data[off + i] = p[24 + i];
+        memcpy((u8 *)obj_data(in.obj) + off, p + 24, dlen);
         in.have = off + dlen;
+        in.since_have++;
 
         if (in.have == in.total) {
-            u8 ack[16];
-            wr32(ack, MAGIC);
-            ack[4] = K_TAKEN; ack[5] = ack[6] = ack[7] = 0;
-            wr64(ack + 8, in.id);
-            seal_send(s, ack, 16);
+            send_taken(s, in.id, T_TAKEN, 0);
             last_taken_id = in.id;
-            arrival_done();
+            arrival_done(s);
+        } else if (in.since_have >= HAVE_EVERY) {
+            in.since_have = 0;
+            send_have(s, id, in.have);
         }
         return;
     }
 
-    /* A word for the person here. It goes on the line under the name
-     * the sender wears; the same datagram said twice lands once. */
     if (kind == K_SAY && len >= 44) {
         u32 tl = rd32(p + 40);
         if (tl == 0 || tl > SAY_MAX || 44 + tl > len) return;
@@ -1278,8 +1797,6 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
 
         line_append(nm, tx);
 
-        /* The bottom row shows the journal's latest word, so this is
-         * how a talk announces itself without a bell. */
         char note[64];
         u32 a = 0;
         while (nm[a] && a < 24) { note[a] = nm[a]; a++; }
@@ -1291,10 +1808,9 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         return;
     }
 
-    /* A job. The same ask asked again is the sender retrying, not a
-     * second job: while it runs it is ignored, once answered the
-     * old answer is repeated. Fresh asks are taken only when the
-     * settings welcome work, and one at a time. */
+    /* A job. Taken when the settings welcome work from everyone, or the
+     * node's row lets this one; one at a time; the same ask again is
+     * the sender retrying. */
     if (kind == K_ASK && len >= 40) {
         u32 rlen = rd32(p + 16);
         u64 budget = rd32(p + 20);
@@ -1309,7 +1825,8 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         }
 
         static const u8 none[24] = { 0 };
-        if (!settings_work()) {
+        nodes_apply();
+        if (!settings_work() && !may(s, NODE_MAY_WORK)) {
             answer_send(s, id, A_NOWORK, none);
             kprintf("pipe: turned away a job (work is refused)\n");
             return;
@@ -1319,6 +1836,17 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
             return;
         }
         if (!pipe_kdom) return;
+
+        /* The input the ask names went ahead of it, or did not. */
+        object *input = NULL;
+        if (p[5] & F_HAS_INPUT) {
+            input = input_from(src);
+            if (!input) {
+                answer_send(s, id, A_NOINPUT, none);
+                kprintf("pipe: a job names an input that never came; said so\n");
+                return;
+            }
+        }
 
         object *script = obj_create(TYPE_TEXT, rlen + 512, 0);
         if (!script) return;
@@ -1330,15 +1858,13 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         cap_handle h = cap_insert(pipe_kdom, reply, CAP_READ);
 
         if (budget == 0 || budget > 60) budget = ASK_BUDGET_S;
-        object *prog = work_launch(script, reply, budget, wlo, whi);
-        obj_release(script);             /* the program holds its words */
+        object *prog = work_launch(script, reply, budget, wlo, whi, input);
+        obj_release(script);
         if (!prog) {
             cap_revoke(pipe_kdom, h);
             obj_release(reply);
             return;
         }
-        /* The launcher's hold on the program object is now the job's;
-         * it goes when the job is cleared. */
 
         workj.active = true;
         workj.id = id;
@@ -1356,7 +1882,6 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         return;
     }
 
-    /* What became of one of our parts. */
     if (kind == K_ANSWER && len >= 40) {
         u32 fi = FASK_MAX;
         for (u32 i = 0; i < FASK_MAX; i++)
@@ -1370,9 +1895,6 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         u8 status = p[5];
 
         if (status == A_OK) {
-            /* The text, and -- for a divided job -- the number it
-             * spells. Parts answer numbers by contract; a part that
-             * answers words ends the job honestly. */
             char tz[25];
             u32 ti = 0;
             while (ti < 24 && p[16 + ti]) {
@@ -1391,14 +1913,10 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
             }
             if (neg) v = -v;
 
-            if (j->parts > 1 && !num) {
-                job_end(j, false, NULL,
-                        "a part answered words, not a number");
-                return;
-            }
-
             j->pstate[part] = P_DONE;
-            j->presult[part] = v;
+            j->presult[part] = num ? v : 0;
+            memcpy(j->ptext[part], tz, 25);
+            memcpy(j->pby[part], fask[fi].ip, 4);
             memcpy(j->raw, p + 16, 24);
 
             u32 done = 0;
@@ -1406,47 +1924,76 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
                 if (j->pstate[i] == P_DONE) done++;
             if (done < j->parts) return;
 
+            /* The result, and who it came from. Parts that all answer
+             * numbers are summed; parts that answer words are gathered
+             * in their order. */
+            static char text[400];
+            u32 at = 0;
             if (j->parts == 1) {
-                job_end(j, true, tz, NULL);
+                at = put(text, at, tz);
+                at = put(text, at, " (by ");
+                at = put_answerers(j, text, at, sizeof(text) - 2);
+                at = put(text, at, ")");
             } else {
-                i64 total = 0;
-                for (u32 i = 0; i < j->parts; i++)
-                    total += j->presult[i];
-
-                char text[48];
-                u32 at = 0;
-                u64 mag = total < 0 ? (u64)-total : (u64)total;
-                char dg[24];
-                u32 nd = 0;
-                if (mag == 0) dg[nd++] = '0';
-                while (mag) { dg[nd++] = (char)('0' + mag % 10); mag /= 10; }
-                if (total < 0) text[at++] = '-';
-                while (nd) text[at++] = dg[--nd];
+                bool all_num = true;
+                for (u32 i = 0; i < j->parts; i++) {
+                    const char *t = j->ptext[i];
+                    u32 k = (t[0] == '-') ? 1 : 0;
+                    if (!t[k]) all_num = false;
+                    for (; t[k]; k++) if (t[k] < '0' || t[k] > '9') all_num = false;
+                }
+                if (all_num) {
+                    i64 total = 0;
+                    for (u32 i = 0; i < j->parts; i++)
+                        total += j->presult[i];
+                    u64 mag = total < 0 ? (u64)-total : (u64)total;
+                    if (total < 0) text[at++] = '-';
+                    at = put_dec(text, at, mag);
+                } else {
+                    for (u32 i = 0; i < j->parts; i++) {
+                        if (i) text[at++] = ' ';
+                        at = put(text, at, j->ptext[i]);
+                    }
+                }
                 at = put(text, at, " (");
                 at = put_dec(text, at, j->parts);
-                at = put(text, at, " parts)");
-                text[at] = 0;
-                job_end(j, true, text, NULL);
+                at = put(text, at, " parts by ");
+                at = put_answerers(j, text, at, sizeof(text) - 2);
+                at = put(text, at, ")");
             }
+            text[at] = 0;
+            job_end(j, true, text, NULL);
+            return;
+        }
+
+        if (status == A_NOINPUT) {
+            /* The input did not get there, or is gone again: once more
+             * ahead of the part, then that machine is struck. */
+            for (u32 c = 0; c < j->cand_count; c++) {
+                if (!ip4_same(j->cand[c], fask[fi].ip)) continue;
+                if (++j->itries[c] >= 2) cand_strike(j, c);
+                else j->istate[c] = 0;
+                break;
+            }
+            if (j->cand_count == 0) {
+                job_end(j, false, NULL, "the input never reached the machines");
+                return;
+            }
+            j->pstate[part] = P_PEND;
+            j->pwait_ns[part] = time_ns();
             return;
         }
 
         if (status == A_BUSY) {
-            /* A busy neighbour is not a failure; the part waits its
-             * turn and the round-robin tries elsewhere meanwhile. */
             j->pstate[part] = P_PEND;
             j->pwait_ns[part] = time_ns() + 2 * SECOND;
             return;
         }
 
         if (status == A_NOWORK) {
-            /* That machine is out. Strike it; with nobody left the
-             * job says so. */
             for (u32 c = 0; c < j->cand_count; c++) {
                 if (!ip4_same(j->cand[c], fask[fi].ip)) continue;
-                for (u32 k = c; k + 1 < j->cand_count; k++)
-                    memcpy(j->cand[k], j->cand[k + 1], 4);
-                j->cand_count--;
+                cand_strike(j, c);
                 break;
             }
             if (j->cand_count == 0) {
@@ -1465,14 +2012,15 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* What arrives on the port                                            */
+/* ------------------------------------------------------------------ */
+
 void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
 {
     if (len < 16 || rd32(p) != MAGIC) return;
     u8 kind = p[4];
 
-    /* Company. A seeker is answered and remembered both -- one scan
-     * and the two machines know each other. Our own voice, come back
-     * around the wire, is not company. */
     if (kind == K_SEEK || kind == K_HERE) {
         if (len < 32) return;
         u8 self[4];
@@ -1480,30 +2028,61 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
 
         bool works = (len >= 40) && (p[32] & 1);
         u32 mib = (len >= 40) ? rd32(p + 36) : 0;
-        found_note(src, p + 8, 24, works, mib);
+        heardrec *h = heard_note(src, sport, p + 8, 24, works, mib);
+
+        if (len >= 96) {
+            bool any = false;
+            for (u32 i = 0; i < 32; i++) if (p[40 + i]) any = true;
+            if (any) { h->has_key = true; memcpy(h->key, p + 40, 32); }
+            u32 n = 0;
+            while (n < 23 && p[72 + n]) {
+                char c = (char)p[72 + n];
+                h->version[n] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+                n++;
+            }
+            h->version[n] = 0;
+        }
+        if (len >= 97) {
+            u32 n = p[96];
+            if (n > 4) n = 4;
+            if (97 + 6 * n <= len)
+                for (u32 i = 0; i < n; i++)
+                    gossip_consider(p + 97 + i * 6,
+                                    (u16)(p[101 + i * 6] | (p[102 + i * 6] << 8)));
+        }
         if (kind == K_SEEK) say_who(K_HERE, src, sport);
+
+        /* A node we know, by the key it claims: at its own address its
+         * news is taken; from a new address it is knocked, and the
+         * answer moves the row when the key proves. */
+        if (h->has_key) {
+            nodes_apply();
+            i32 i = nodes_by_key(h->key);
+            if (i >= 0) {
+                u8 rip[4];
+                u16 rp;
+                bool has = nodes_address_at((u32)i, rip, &rp);
+                if (has && ip4_same(rip, src))
+                    nodes_meet(h->name, h->key, src, h->port, h->version, false);
+                else if (!seal_by_ip(src) && !knock.active && net_crypto_ok())
+                    knock_begin(src, h->port, i);
+            }
+        }
         return;
     }
 
-    /* A knock. Answer it with a fresh key of our own and keep the
-     * session; the same knock asked twice gets the same answer, so a
-     * lost WELCOME costs a retry, not an argument about keys. */
     if (kind == K_HELLO && len >= 44) {
         if (!net_crypto_ok()) return;
         u32 sid = rd32(p + 8);
 
         sealrec *s = seal_find(src, sid);
         if (s && !s->we_knocked) {
-            /* the same knock again gets the same answer, so a lost
-             * WELCOME costs a retry, not an argument about keys */
             net_udp_send(src, PIPE_PORT, sport, s->answer, s->answer_len);
             return;
         }
 
-        /* Who knocks. A signed knock proves the key it carries, and
-         * the key is held against what the settings remember. */
         const u8 *idkey = NULL;
-        if (len >= 140) {
+        if (len >= KNOCK_SIGNED) {
             u8 msg[46];
             hello_message(msg, sid, p + 12);
             if (!ed25519_verify(p + 44, msg, sizeof(msg), p + 76)) {
@@ -1512,8 +2091,9 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
                 return;
             }
             idkey = p + 44;
+            knock_claims(src, sport ? sport : PIPE_PORT, p, len);
         }
-        if (identity_verdict(src, idkey) < 0) return;
+        if (identity_verdict(src, sport ? sport : PIPE_PORT, idkey) < 0) return;
 
         u8 priv[32], pub[32], shared[32];
         rand_bytes(priv, 32);
@@ -1525,6 +2105,7 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         s->port = sport ? sport : PIPE_PORT;
         s->sid = sid;
         s->proven = idkey != NULL;
+        if (idkey) memcpy(s->idkey, idkey, 32); else memset(s->idkey, 0, 32);
         memcpy(s->my_pub, pub, 32);
         seal_derive(s, false, p + 12, pub, shared);
         memset(priv, 0, 32);
@@ -1533,26 +2114,19 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         s->answer_len = build_welcome(s->answer, sid, p + 12, pub);
         net_udp_send(src, PIPE_PORT, sport, s->answer, s->answer_len);
 
-        /* The session's own copy, not src: src points into the card's
-         * receive ring, and sending above may already have let that
-         * slot be filled again. It printed another packet's bytes as
-         * an address once -- the seal itself was never wrong, only
-         * the report of it. */
         kprintf("pipe: sealed with %u.%u.%u.%u, %s\n",
                 s->ip[0], s->ip[1], s->ip[2], s->ip[3],
                 s->proven ? "proven" : "unproven");
         return;
     }
 
-    /* The answer to our knock. */
     if (kind == K_WELCOME && len >= 44) {
         if (!knock.active) return;
         if (rd32(p + 8) != knock.sid) return;
         if (!ip4_same(src, knock.ip)) return;
 
-        /* Who answered. */
         const u8 *idkey = NULL;
-        if (len >= 140) {
+        if (len >= KNOCK_SIGNED) {
             u8 msg[80];
             welcome_message(msg, knock.sid, knock.pub, p + 12);
             if (!ed25519_verify(p + 44, msg, sizeof(msg), p + 76)) {
@@ -1561,15 +2135,28 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
                 return;
             }
             idkey = p + 44;
+            knock_claims(src, knock.port, p, len);
         }
-        i32 verdict = identity_verdict(src, idkey);
+        i32 verdict = identity_verdict(src, knock.port, idkey);
+
+        /* The knock was for one node in particular: whoever else
+         * answers, even a node known, is not who was meant. */
+        if (verdict >= 0 && knock.expect >= 0) {
+            u8 ek[32];
+            if (!idkey || !nodes_key_at((u32)knock.expect, ek) || memcmp(ek, idkey, 32) != 0) {
+                char nm[24];
+                if (!nodes_name_at((u32)knock.expect, nm)) nm[0] = 0;
+                kprintf("pipe: the machine at %u.%u.%u.%u is not %s; nothing goes there\n",
+                        src[0], src[1], src[2], src[3], nm);
+                journal_says("pipe", "the machine that answered is not the node meant; nothing was sent");
+                verdict = -1;
+            }
+        }
         if (verdict < 0) {
-            /* Not the machine we knew. The knock is over, and what
-             * waited on it does not go. */
             knock.active = false;
             memset(knock.priv, 0, 32);
-            if (out.busy) {
-                out.busy = false;
+            if (out.busy && ip4_same(out.to, knock.ip)) {
+                out_end(false);
                 journal_says("pipe", "nothing was sent");
             }
             kprintf("pipe: nothing was sent to %u.%u.%u.%u\n",
@@ -1585,6 +2172,7 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         s->port = knock.port;
         s->sid = knock.sid;
         s->proven = idkey != NULL;
+        if (idkey) memcpy(s->idkey, idkey, 32); else memset(s->idkey, 0, 32);
         memcpy(s->my_pub, knock.pub, 32);
         seal_derive(s, true, knock.pub, p + 12, shared);
         memset(shared, 0, 32);
@@ -1600,8 +2188,6 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         return;
     }
 
-    /* An envelope. Refused unless it opens: wrong keys, a replayed
-     * counter, or a bent header all fail the same quiet way. */
     if (kind == K_SEALED && len >= 36) {
         u32 sid = rd32(p + 8);
         u64 ctr = rd64(p + 12);
@@ -1622,25 +2208,231 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
 
         s->ctr_in_seen = ctr;
         s->last_ns = time_ns();
+        heardrec *h = heard_by_ip(src);
+        if (h) h->seen_ns = s->last_ns;
         inner_input(src, sport, s, inner, ilen);
         return;
     }
 
-    /* Substance without a seal is turned away, not spoken to. */
     if (kind == K_OFFER || kind == K_CHUNK || kind == K_TAKEN)
         kprintf("pipe: a plain offer was turned away\n");
+}
+
+/* ------------------------------------------------------------------ */
+/* The network page                                                    */
+/* ------------------------------------------------------------------ */
+
+static object *page;
+static u64 page_ns;
+
+void pipe_page_set(object *t)
+{
+    if (page) obj_release(page);
+    page = t;
+    if (page) obj_retain(page);
+}
+
+static void page_write(void)
+{
+    if (!page) return;
+    u8 *d = (u8 *)obj_data(page);
+    u64 size = obj_size(page);
+    if (!d || size < 512) return;
+
+    static char buf[4096];
+    u64 now = time_ns();
+    u32 at = put(buf, 0, "node          address            version         seen     free    work  seal\n");
+
+    nodes_apply();
+    u32 n = nodes_count();
+    for (u32 i = 0; i < n && at + 200 < sizeof(buf); i++) {
+        char nm[24], ver[24];
+        u8 ip[4];
+        u16 port;
+        nodes_name_at(i, nm);
+        nodes_version_at(i, ver);
+        bool has = nodes_address_at(i, ip, &port);
+        at = put_pad(buf, at, nm, 14);
+        u32 col = at;
+        if (has) { at = put_ip(buf, at, ip); buf[at++] = ' '; at = put_dec(buf, at, port); }
+        else buf[at++] = '-';
+        while (at < col + 19) buf[at++] = ' ';
+        at = put_pad(buf, at, ver[0] ? ver : "-", 16);
+        heardrec *h = has ? heard_by_ip(ip) : NULL;
+        col = at;
+        if (h && now - h->seen_ns < QUIET_S * SECOND) { at = put_dec(buf, at, (now - h->seen_ns) / SECOND); buf[at++] = 's'; }
+        else at = put(buf, at, h ? "quiet" : "-");
+        while (at < col + 9) buf[at++] = ' ';
+        col = at;
+        if (h) { at = put_dec(buf, at, h->free_mib); buf[at++] = 'M'; } else buf[at++] = '-';
+        while (at < col + 8) buf[at++] = ' ';
+        at = put_pad(buf, at, h ? (h->works ? "yes" : "no") : "-", 6);
+        sealrec *s = has ? seal_by_ip(ip) : NULL;
+        at = put(buf, at, s ? (s->proven ? "proven" : "sealed") : "-");
+        buf[at++] = '\n';
+    }
+    if (n == 0) at = put(buf, at, "(no node met yet)\n");
+
+    bool head = false;
+    for (u32 k = 0; k < HEARD_MAX && at + 120 < sizeof(buf); k++) {
+        heardrec *h = &heard[k];
+        if (!h->used || now - h->seen_ns > QUIET_S * SECOND) continue;
+        if (h->has_key && nodes_by_key(h->key) >= 0) continue;
+        if (nodes_by_address(h->ip) >= 0) continue;
+        if (!head) { at = put(buf, at, "\nheard on the wire, not met:\n"); head = true; }
+        at = put(buf, at, "  ");
+        u32 col = at;
+        at = put_ip(buf, at, h->ip);
+        buf[at++] = ' ';
+        at = put_dec(buf, at, h->port);
+        while (at < col + 21) buf[at++] = ' ';
+        at = put_pad(buf, at, h->name[0] ? h->name : "(no name)", 14);
+        at = put_pad(buf, at, h->version[0] ? h->version : "-", 16);
+        at = put_dec(buf, at, (now - h->seen_ns) / SECOND);
+        at = put(buf, at, "s ago");
+        if (h->works) { at = put(buf, at, ", takes work, "); at = put_dec(buf, at, h->free_mib); at = put(buf, at, "M free"); }
+        buf[at++] = '\n';
+    }
+
+    at = put(buf, at, "\n");
+    u32 queued = 0;
+    for (u32 i = 0; i < DESK_JOBS; i++) if (desk[i].used) queued++;
+    at = put(buf, at, "desk      ");
+    at = put_dec(buf, at, queued);
+    at = put(buf, at, queued == 1 ? " job\n" : " jobs\n");
+    at = put(buf, at, "working   ");
+    if (workj.active) { char who[24]; name_of(workj.from, seal_by_ip(workj.from), who); at = put(buf, at, "for "); at = put(buf, at, who); }
+    else at = put(buf, at, "for nobody");
+    buf[at++] = '\n';
+    at = put(buf, at, "carrying  ");
+    if (out.busy) {
+        at = put(buf, at, out.name[0] ? out.name : "something");
+        at = put(buf, at, " to ");
+        char who[24];
+        name_of(out.to, NULL, who);
+        at = put(buf, at, who);
+        at = put(buf, at, ": ");
+        at = put_dec(buf, at, out.acked);
+        at = put(buf, at, " of ");
+        at = put_dec(buf, at, out.len);
+        at = put(buf, at, " bytes");
+    } else if (in.active) {
+        at = put(buf, at, "in: ");
+        at = put_dec(buf, at, in.have);
+        at = put(buf, at, " of ");
+        at = put_dec(buf, at, in.total);
+        at = put(buf, at, " bytes");
+    } else {
+        at = put(buf, at, "nothing");
+    }
+    buf[at++] = '\n';
+
+    if ((u64)at + 1 > size) at = (u32)size - 1;
+    if (memcmp(d, buf, at) == 0 && d[at] == 0) return;
+    memcpy(d, buf, at);
+    memset(d + at, 0, size - at);
+    obj_touch(page);
+}
+
+/* ------------------------------------------------------------------ */
+/* The carrying                                                        */
+/* ------------------------------------------------------------------ */
+
+static void carry(void)
+{
+    if (!out.busy) return;
+    u64 now = time_ns();
+    char who[24];
+
+    if (out.taken) {
+        name_of(out.to, seal_by_ip(out.to), who);
+        if (out.taken_status == T_TAKEN) {
+            kprintf("pipe: carried %u bytes across, sealed\n", out.len);
+            if (out.kind == W_KERNEL) {
+                char line[72];
+                u32 at = put(line, 0, "node ");
+                at = put(line, at, who);
+                at = put(line, at, " took the kernel; it installs it and restarts");
+                line[at] = 0;
+                journal_says("pipe", line);
+            } else if (out.work_job >= 0) {
+                journal_says("pipe", "the input for the work is there");
+            } else {
+                journal_says("pipe", "carried it across, sealed");
+            }
+            out_end(true);
+        } else if (out.taken_status == T_BUSY) {
+            out.taken = false;
+            out.offered = false;
+            if (++out.busy_tries > 10) {
+                journal_says("pipe", "the far side stayed busy; nothing was sent");
+                kprintf("pipe: %s stayed busy\n", who);
+                out_end(false);
+            } else {
+                out.last_progress_ns = now + 2 * SECOND;   /* wait before the next offer */
+            }
+        } else {
+            kprintf("pipe: %s declined it (%s)\n", who, refusal_words(out.taken_reason));
+            char line[80];
+            u32 at = put(line, 0, "node ");
+            at = put(line, at, who);
+            at = put(line, at, " declined: ");
+            at = put(line, at, refusal_words(out.taken_reason));
+            line[at] = 0;
+            journal_says("pipe", line);
+            out_end(false);
+        }
+        return;
+    }
+
+    sealrec *s = seal_by_ip(out.to);
+    if (!s) {
+        knock_begin(out.to, out.to_port, out.node);
+        return;                              /* the knock's own clock gives up on it */
+    }
+
+    if (!out.offered) {
+        if (now < out.last_progress_ns) return;    /* holding off after a busy answer */
+        out.acked = out.sent = 0;
+        out.stalls = 0;
+        send_offer(s);
+        out.offered = true;
+        out.last_progress_ns = now;
+        return;
+    }
+
+    if (now - out.last_progress_ns > 700 * MS) {
+        if (++out.stalls > 20) {
+            name_of(out.to, s, who);
+            journal_says("pipe", "the far side did not take it");
+            kprintf("pipe: %s went quiet after %u of %u bytes\n", who, out.acked, out.len);
+            out_end(false);
+            return;
+        }
+        out.sent = out.acked;
+        out.last_progress_ns = now;
+        send_offer(s);                       /* the far side answers with how far it is */
+    }
+
+    u32 burst = 0;
+    while (out.sent < out.len &&
+           out.sent < out.acked + WINDOW_CHUNKS * CHUNK_MAX &&
+           burst < WINDOW_CHUNKS) {
+        u32 dlen = out.len - out.sent < CHUNK_MAX ? out.len - out.sent : CHUNK_MAX;
+        send_chunk(s, out.sent);
+        out.sent += dlen;
+        burst++;
+    }
 }
 
 /* ------------------------------------------------------------------ */
 
 void pipe_service(void)
 {
-    /* While a scan runs, the call goes out once a second: to everyone
-     * on the wire, and to the named peer besides -- who may live past
-     * a router where no broadcast reaches. */
-    if (time_ns() < scan_until_ns &&
-        time_ns() - scan_last_call_ns > SECOND) {
-        scan_last_call_ns = time_ns();
+    u64 now = time_ns();
+
+    if (now < scan_until_ns && now - scan_last_call_ns > SECOND) {
+        scan_last_call_ns = now;
         static const u8 everyone[4] = { 255, 255, 255, 255 };
         say_who(K_SEEK, everyone, PIPE_PORT);
 
@@ -1649,27 +2441,45 @@ void pipe_service(void)
         if (settings_peer(peer, &pp)) say_who(K_SEEK, peer, pp);
     }
 
-    /* Sessions go quietly when nobody has spoken through them. */
+    /* The heartbeat: every node with an address is called by name, so
+     * the network page stays current and a node that moved is found. */
+    static u64 beat_ns;
+    if (now - beat_ns > BEAT_S * SECOND) {
+        beat_ns = now;
+        nodes_apply();
+        for (u32 i = 0; i < nodes_count(); i++) {
+            u8 ip[4];
+            u16 port;
+            if (nodes_address_at(i, ip, &port)) say_who(K_SEEK, ip, port);
+        }
+        u8 peer[4];
+        u16 pp;
+        if (settings_peer(peer, &pp) && nodes_by_address(peer) < 0) say_who(K_SEEK, peer, pp);
+    }
+
     for (u32 i = 0; i < SEAL_MAX; i++)
-        if (seal[i].used && time_ns() - seal[i].last_ns > 120 * SECOND)
+        if (seal[i].used && now - seal[i].last_ns > 120 * SECOND)
             seal[i].used = false;
 
-    /* A half-arrived thing whose sender went quiet is let go. */
-    if (in.active && time_ns() - in.started_ns > 10 * SECOND)
-        in.active = false;
+    if (in.active && now - in.started_ns > 60 * SECOND &&
+        now - in.last_have_ns > 15 * SECOND)
+        in_drop();
 
-    /* An unanswered knock is repeated, then given up on. A send that
-     * waited on it goes with it; the desk's parts keep their own
-     * clocks and simply try another machine. */
+    for (u32 i = 0; i < INPUTS_MAX; i++)
+        if (inputs[i].used && now - inputs[i].ns > 300 * SECOND) {
+            if (inputs[i].obj) obj_release(inputs[i].obj);
+            inputs[i].obj = NULL;
+            inputs[i].used = false;
+        }
+
     if (knock.active) {
-        u64 now = time_ns();
         if (!knock.last_ns || now - knock.last_ns >= 2 * SECOND) {
             if (knock.tries >= 3) {
                 knock.active = false;
-                if (out.busy) {
+                if (out.busy && ip4_same(out.to, knock.ip)) {
                     journal_says("pipe", "nobody answered the knock");
                     kprintf("pipe: the knock went unanswered\n");
-                    out.busy = false;
+                    out_end(false);
                 }
             } else {
                 knock.tries++;
@@ -1679,8 +2489,6 @@ void pipe_service(void)
         }
     }
 
-    /* A word that waited for the knock goes the moment any door is
-     * open; one that waited too long is let go, and said so. */
     if (saypend.active) {
         bool door = false;
         for (u32 i = 0; i < SEAL_MAX; i++)
@@ -1688,15 +2496,12 @@ void pipe_service(void)
         if (door) {
             saypend.active = false;
             say_wire(saypend.text);
-        } else if (time_ns() - saypend.born_ns > 10 * SECOND) {
+        } else if (now - saypend.born_ns > 10 * SECOND) {
             saypend.active = false;
             journal_says("pipe", "the word found no open door");
         }
     }
 
-    /* The job we run for someone else: its first told line is the
-     * answer; a script that ends mute, or outstays the budget the
-     * interpreter holds it to, is answered for. */
     if (workj.active) {
         message m;
         u8 text[24];
@@ -1715,9 +2520,6 @@ void pipe_service(void)
                 status = A_OK;
             }
         } else if (!proc_is_running(workj.prog)) {
-            /* The interpreter counts whole seconds of the day, so a
-             * script it ended for time can look a breath early from
-             * here; within a second of the budget is the budget. */
             u64 gone = (time_ns() - workj.started_ns) / SECOND;
             status = (gone + 1 >= workj.budget_s) ? A_LATE : A_SILENT;
         } else if (time_ns() - workj.started_ns >
@@ -1746,22 +2548,19 @@ void pipe_service(void)
         }
     }
 
-    /* The desk walks its first queued job: find hands, deal parts,
-     * keep the deadline. One job at a time -- the ones behind it
-     * wait their turn, which is also what the journal promised. */
     {
         desk_job *j = NULL;
         for (u32 i = 0; i < DESK_JOBS; i++)
             if (desk[i].used) { j = &desk[i]; break; }
 
         if (j && j->state == DJ_FRESH) {
-            u64 now = time_ns();
             j->deadline_ns = now +
                 (60 + (u64)j->parts * (ASK_BUDGET_S + 10)) * SECOND;
             if (j->parts == 1) {
                 u8 peer[4];
                 u16 pp;
-                if (!settings_peer(peer, &pp)) {
+                i32 node;
+                if (!target_resolve(peer, &pp, &node)) {
                     job_end(j, false, NULL,
                             "no peer is named in the settings");
                     j = NULL;
@@ -1772,15 +2571,13 @@ void pipe_service(void)
                     j->state = DJ_RUN;
                 }
             } else {
-                /* Divided work goes to whoever is willing; the scan
-                 * asks the wire who that is. */
                 pipe_scan();
                 j->scan_until_ns = now + 4 * SECOND;
                 j->state = DJ_SCAN;
             }
         }
 
-        if (j && j->state == DJ_SCAN && time_ns() >= j->scan_until_ns) {
+        if (j && j->state == DJ_SCAN && now >= j->scan_until_ns) {
             j->cand_count = 0;
             u32 nf = pipe_found_count();
             for (u32 i = 0; i < nf && j->cand_count < CAND_MAX; i++) {
@@ -1796,7 +2593,8 @@ void pipe_service(void)
             if (j->cand_count == 0) {
                 u8 peer[4];
                 u16 pp;
-                if (settings_peer(peer, &pp)) {
+                i32 node;
+                if (target_resolve(peer, &pp, &node)) {
                     memcpy(j->cand[0], peer, 4);
                     j->cand_port[0] = pp;
                     j->cand_count = 1;
@@ -1818,7 +2616,6 @@ void pipe_service(void)
         }
 
         if (j && j->state == DJ_RUN) {
-            u64 now = time_ns();
             if (now > j->deadline_ns) {
                 job_end(j, false, NULL,
                         "the work did not come back in time");
@@ -1834,6 +2631,27 @@ void pipe_service(void)
                     if (fi == FASK_MAX) break;
 
                     u32 c = j->next_cand % j->cand_count;
+
+                    /* The input goes ahead of the first part a machine
+                     * gets; a machine it cannot reach gets no part. */
+                    if (j->input && j->istate[c] != 2) {
+                        if (j->istate[c] == 3) {
+                            cand_strike(j, c);
+                            if (j->cand_count == 0) {
+                                job_end(j, false, NULL, "the input could not be delivered");
+                                break;
+                            }
+                            continue;
+                        }
+                        if (j->istate[c] == 0 && !out.busy &&
+                            out_begin(j->input_kind, obj_name(j->input), j->input, NULL,
+                                      j->input_len, j->cand[c], j->cand_port[c], -1)) {
+                            out.work_job = (i32)(j - desk);
+                            out.work_cand = c;
+                            j->istate[c] = 1;
+                        }
+                        break;               /* until it is there */
+                    }
                     j->next_cand++;
                     fask[fi].active = true;
                     memcpy(fask[fi].ip, j->cand[c], 4);
@@ -1850,20 +2668,15 @@ void pipe_service(void)
         }
     }
 
-    /* Each flying part: knock while the way is not sealed, repeat
-     * the ask a few times, and give the attempt up when its machine
-     * stays quiet -- the part then waits for another turn, once,
-     * before the job calls it lost. */
     for (u32 i = 0; i < FASK_MAX; i++) {
         if (!fask[i].active) continue;
         desk_job *j = &desk[fask[i].job];
         if (!j->used) { fask[i].active = false; continue; }
-        u64 now = time_ns();
         bool give_up = false;
 
         sealrec *s = seal_by_ip(fask[i].ip);
         if (!s) {
-            knock_begin(fask[i].ip, fask[i].port);
+            knock_begin(fask[i].ip, fask[i].port, -1);
             give_up = (now - fask[i].started_ns > 8 * SECOND);
         } else if (now - fask[i].started_ns >
                    (u64)(ASK_BUDGET_S + 10) * SECOND) {
@@ -1889,36 +2702,28 @@ void pipe_service(void)
         }
     }
 
-    if (!out.busy) return;
-
-    if (out.taken) {
-        kprintf("pipe: carried %u bytes across, sealed\n", out.len);
-        journal_says("pipe", "carried it across, sealed");
-        out.busy = false;
-        return;
+    /* Updates queued for many nodes go one after the other. */
+    if (!out.busy && upq.at < upq.n) {
+        char why[120];
+        i32 row = upq.rows[upq.at++];
+        if (!update_start(row, upq.image, why, sizeof(why))) {
+            char nm[24];
+            if (!nodes_name_at((u32)row, nm)) nm[0] = 0;
+            kprintf("pipe: %s is skipped: %s\n", nm, why);
+        }
+        if (upq.at >= upq.n && upq.image) { obj_release(upq.image); upq.image = NULL; }
     }
 
-    u8 peer[4];
-    u16 pp;
-    if (!settings_peer(peer, &pp)) { out.busy = false; return; }
+    carry();
 
-    sealrec *s = seal_by_ip(peer);
-    if (!s) {
-        knock_begin(peer, pp);
-        return;
+    if (restart_at_ns && now >= restart_at_ns) {
+        restart_at_ns = 0;
+        kprintf("pipe: restarting into the kernel that came through the pipe\n");
+        system_restart();
     }
 
-    u64 now = time_ns();
-    if (out.last_try_ns && now - out.last_try_ns < 2 * SECOND) return;
-
-    if (out.tries >= 3) {
-        journal_says("pipe", "the far side did not take it");
-        kprintf("pipe: gave up after %u tries\n", out.tries);
-        out.busy = false;
-        return;
+    if (now - page_ns > 2 * SECOND) {
+        page_ns = now;
+        page_write();
     }
-
-    out.tries++;
-    out.last_try_ns = now;
-    send_offer_and_chunks(s);
 }

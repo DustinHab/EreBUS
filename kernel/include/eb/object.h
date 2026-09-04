@@ -1,3 +1,13 @@
+/*
+ * object.h -- the object store: EreBUS's core abstraction.
+ *
+ * Copyright (C) 2026  DustinHab
+ * Part of EreBUS. This program is free software: you can redistribute it
+ * and/or modify it under the terms of the GNU Affero General Public License
+ * as published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version. See the LICENSE file in
+ * the project root, or <https://www.gnu.org/licenses/>.
+ */
 #ifndef EB_OBJECT_H
 #define EB_OBJECT_H
 

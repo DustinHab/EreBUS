@@ -13,6 +13,8 @@ Object-based, capability-secured operating system for x86_64 UEFI. Own boot load
 
 Consequence: a program can only reach what it was handed. No root, no lookup by name, no way to acquire authority. `kernel/include/eb/object.h` has no `obj_find()`.
 
+The manual: [MANUAL.md](MANUAL.md) (screen, terminal words, settings, programs, scripts, building, storage, network, nodes). Updated with every release.
+
 ## Building
 
 Requirements (Linux; here WSL2 with Ubuntu):
@@ -90,8 +92,10 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Snapshots: two alternating slots, generation + checksum, 16 generations kept, time travel in the shell
 - [x] Blob log for objects from 4 KiB up, content-addressed (SHA-256), compaction
 - [x] Journal as a read-only text object
-- [x] Settings as a text object, applied as typed (`theme`, `save`, `clock`, `pointer`, `hints`, `slice`, `start`, `name`, `address`, `peer`, `work`, `keys`, `door |`, `known |`, `wlan |`)
+- [x] Settings as a text object, applied as typed (`theme`, `save`, `clock`, `pointer`, `hints`, `slice`, `start`, `name`, `address`, `peer` by address or node name, `work`, `keys`, `door |`, `wlan |`)
 - [x] Activity table rewritten once a second
+- [x] Nodes table `nodes` (`name | key | address | version | may`): one row per machine met through the pipe; the kernel writes key, address, version; the person writes name and `may` (`work`, `update`, `all`)
+- [x] `network` page: every node with address, version, last heard, free memory, work flag, seal state; machines heard but not met; desk and transfer state
 - [x] Program records survive reboots; delegations replayed by name
 
 ### Desktop and terminal
@@ -101,7 +105,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Add palette: text, bytes, list, picture, task, standard programs
 - [x] Bin for let-go references; `turn off`; `restart`
 - [x] German keyboard layout (`keys | german`)
-- [x] Terminal grammar: verb, name, `to`/`at`; words: `help look where go back home find read write make copy rename let go run give end scan found point at send ask say build link compile assemble install take in write out disks settle yes networks join leave wifi address receive restart`
+- [x] Terminal grammar: verb, name, `to`/`at`/`with`; words: `help look where go back home find read write make copy rename let go run give end scan found point at send ask say build link compile assemble install take in write out disks settle yes networks join leave wifi address receive restart version nodes allow update`
 - [x] Boot-time offer: with no store and a keyboard present, the start-up lists the disks and takes a number, then `yes`; escape or 2 minutes of silence continues without a store
 
 ### Programs and languages
@@ -138,7 +142,13 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Card choice: first a card with link, then any card; unknown cards named in the log
 - [x] TLS 1.3 client: X25519, AES-128-GCM, SHA-256; certificates not verified
 - [x] SSH door (server): curve25519-sha256, ssh-ed25519, aes128-gcm@openssh.com; keys from `door |` lines; exec and shell sessions
-- [x] Object pipe between machines: sealed (X25519 + AES-GCM), identity via the door key (TOFU, `known |`), discovery by broadcast, `send`, `ask` (far work), split tasks, foreman
+- [x] Object pipe between machines: sealed (X25519 + AES-GCM), the knock signed with the door key
+- [x] Nodes: a node is its key; first meeting writes a row into `nodes`; a key met once must answer again from its address (an impostor at a known address is turned away); a node that moves is followed by its key
+- [x] Rights per node: `allow <node> work|update|all|nothing`; far work runs for a node when `work | welcomed` or its row says `work`; a kernel is installed only from a node whose row says `update`
+- [x] Transfers straight from and into objects, windowed (HAVE/TAKEN), up to 8 MiB; refusals answered with a reason
+- [x] `update <node>`: this machine's kernel to that node, which installs it and restarts; `update <node> with <kernel.elf>`; `update all`; the loader falls back after two failed starts
+- [x] Discovery: broadcast scan, heartbeat to every known node every 30 s, HERE carries key, version and up to four other machines heard (gossip across routers)
+- [x] Far work: `ask <task>`, `ask <task> with <object>` (the object goes ahead of each part as the script's third gift), split tasks summed or gathered, answers name the machines that gave them (`42 (4 parts by alpha, beta)`), foreman for standing tasks
 - [x] The line: one conversation with the peer, sealed
 - [x] `pack`/`unpack`: a list as one bytes object for the pipe
 
@@ -163,6 +173,9 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/asmtest.sh, cctest.sh, cctest2.sh | assembler and compiler on the machine (24 checks) |
 | tools/sshtest.sh | door: exec, pipe, pty; foreign key refused |
 | tools/pipe-two.sh, pipe-identity.sh | object pipe, sealed, identity enforced |
+| tools/pipe-update.sh | a kernel through the pipe: declined without leave, installed and booted with it |
+| tools/pipe-input.sh | far work with an input object; the answer names the worker |
+| tools/pipe-work.sh, pipe-desk.sh, pipe-foreman.sh | far work, split tasks over three machines, standing tasks |
 | make relay, make agent, make persist | capability passing, delegation, snapshots |
 | tools/sticktest.sh | one disk carries loader, kernel and store |
 | tools/foreigndisk.sh | a foreign disk stays byte-identical |
@@ -186,13 +199,15 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - Installed machine, newer stick: boot the stick, `install this kernel`, remove the stick, `restart`.
 - QEMU: `qemu-system-x86_64 -machine q35 -m 512M -bios /usr/share/OVMF/OVMF.fd -cdrom erebus.iso`
 - Remote: put a public key into the settings (`door | ssh-ed25519 ...`), read the address with `address`, connect with any ssh client.
+- Several machines: `scan`, `point at <name>`, `say hello` (the knock writes both nodes tables); `allow <node> update` on the one to be updated; `update <node>` on the other.
 
 ## Known limits
 
 - No USB mass storage: a stick boots the machine but cannot hold the store.
 - No wireless chip driver.
 - TLS: privacy only, no certificate verification.
-- Results from far work are claims of the answering machine; nothing is cross-checked.
+- Results from far work are claims of the machine named in the answer; nothing is cross-checked.
+- Node identity is trust on first meeting; no third party vouches for a key.
 - One ssh visitor at a time; no rekeying.
 - RTL8168/8169 driver written from documentation, untested on silicon.
 - Two HID inputs on one device: implemented, not tested on a real device.
@@ -201,3 +216,16 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 ## Releases
 
 - EreBUS 0.4.4: first published version.
+- EreBUS 0.5.0: nodes -- identity by key, rights per node, kernel updates through the pipe, network page, work with inputs and provenance.
+
+## License
+
+Copyright (C) 2026  DustinHab
+
+EreBUS is free software, licensed under the **GNU Affero General Public
+License, version 3 or (at your option) any later version** (AGPL-3.0-or-later).
+You may use, study, share and modify it. If you distribute it — or run a
+modified version that people reach over a network — you must pass on the
+complete corresponding source under the same license (see section 13 for the
+network case). There is no warranty. The full text is in the
+[LICENSE](LICENSE) file.

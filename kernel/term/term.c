@@ -19,6 +19,7 @@
 #include <eb/fat.h>
 #include <eb/settle.h>
 #include <eb/version.h>
+#include <eb/nodes.h>
 #include <eb/wifi.h>
 #include <eb/net.h>
 #include <eb/fmt.h>
@@ -1355,16 +1356,44 @@ static void cmd_send(term_session *s, const char *what)
         t_say(s, "the pipe would not take it.  is a peer named?  'scan' and 'point at' set one.");
 }
 
+/* "ask <task>", or "ask <task> with <object>": the object goes ahead
+ * of the work to every machine that gets a part. */
 static void cmd_ask(term_session *s, const char *what)
 {
-    if (!what[0]) { t_say(s, "ask with which task?"); return; }
+    if (!what[0]) { t_say(s, "ask with which task?  'ask <task>', or 'ask <task> with <object>' to send an input along."); return; }
+
+    char task[64];
+    const char *with = NULL;
+    u32 tl = 0;
+    for (u32 i = 0; what[i] && tl < sizeof(task) - 1; i++) {
+        if (what[i] == ' ' && what[i+1] == 'w' && what[i+2] == 'i' && what[i+3] == 't' &&
+            what[i+4] == 'h' && what[i+5] == ' ') {
+            with = what + i + 6;
+            break;
+        }
+        task[tl++] = what[i];
+    }
+    while (tl > 0 && task[tl - 1] == ' ') tl--;
+    task[tl] = 0;
+    while (with && *with == ' ') with++;
+
     spot sp;
-    if (!resolve(s, what, &sp)) return;
+    if (!resolve(s, task, &sp)) return;
     if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "a task is a text."); return; }
-    if (pipe_ask(sp.o, (sp.r & CAP_WRITE) != 0))
+
+    bool ok;
+    if (with && *with) {
+        spot in;
+        if (!resolve(s, with, &in)) return;
+        if (!(in.r & CAP_READ)) { t_say(s, "you may not read that, so it cannot go along."); return; }
+        ok = pipe_ask_with(sp.o, (sp.r & CAP_WRITE) != 0, in.o);
+    } else {
+        ok = pipe_ask(sp.o, (sp.r & CAP_WRITE) != 0);
+    }
+    if (ok)
         t_say(s, "the desk has it.  the answer lands in the task itself, or in arrivals.");
     else
-        t_say(s, "the desk would not take it.");
+        t_say(s, "the desk would not take it.  the journal says why.");
 }
 
 static void cmd_say(term_session *s, const char *words)
@@ -1415,6 +1444,150 @@ static void cmd_found(term_session *s)
         }
         t_end(s);
     }
+}
+
+/* The nodes table, one line each: name, address, version, what it may
+ * do here, and when it was last heard. */
+static void cmd_nodes(term_session *s)
+{
+    nodes_apply();
+    u32 n = nodes_count();
+    if (n == 0) {
+        t_say(s, "no node has been met yet.  'scan' calls out; the first sealed knock writes the first row.");
+        return;
+    }
+    for (u32 i = 0; i < n; i++) {
+        char nm[24], ver[24], may[24];
+        u8 ip[4];
+        u16 port;
+        nodes_name_at(i, nm);
+        nodes_version_at(i, ver);
+        nodes_may_words(nodes_may_at(i), may);
+        bool has = nodes_address_at(i, ip, &port);
+        t_puts(s, "  ");
+        t_puts(s, nm);
+        t_puts(s, "  ");
+        if (has) { put_ip(s, ip); t_putc(s, ' '); t_dec(s, port); }
+        else t_puts(s, "no address");
+        t_puts(s, "  ");
+        t_puts(s, ver[0] ? ver : "version unknown");
+        t_puts(s, "  may: ");
+        t_puts(s, may);
+        if (has) {
+            u64 ago = pipe_seen_ago_s(ip);
+            if (ago == ~0ULL) t_puts(s, "  not heard since the start");
+            else { t_puts(s, "  heard "); t_dec(s, ago); t_puts(s, "s ago"); }
+        }
+        t_end(s);
+    }
+    t_say(s, "the table itself lies in system as 'nodes'; 'allow' writes the may column.");
+}
+
+/* "allow <node> work update", "allow <node> all", "allow <node> nothing":
+ * the rights are the last words, the name is whatever stands before. */
+static void cmd_allow(term_session *s, const char *rest)
+{
+    if (!rest[0]) {
+        t_say(s, "allow whom what?  'allow <node> work', 'allow <node> update', 'allow <node> all', 'allow <node> nothing'.");
+        return;
+    }
+    char name[64];
+    u32 nl = 0;
+    while (rest[nl] && nl < sizeof(name) - 1) { name[nl] = rest[nl]; nl++; }
+    name[nl] = 0;
+
+    u32 may = 0;
+    bool any = false;
+    for (;;) {
+        while (nl > 0 && name[nl - 1] == ' ') nl--;
+        u32 start = nl;
+        while (start > 0 && name[start - 1] != ' ') start--;
+        if (start == nl) break;
+        const char *w = name + start;
+        u32 wl = nl - start;
+        u32 bit = 0;
+        bool nothing = false;
+        if (wl == 4 && memcmp(w, "work", 4) == 0) bit = NODE_MAY_WORK;
+        else if (wl == 6 && memcmp(w, "update", 6) == 0) bit = NODE_MAY_UPDATE;
+        else if (wl == 3 && memcmp(w, "all", 3) == 0) bit = NODE_MAY_WORK | NODE_MAY_UPDATE;
+        else if (wl == 7 && memcmp(w, "nothing", 7) == 0) nothing = true;
+        else if (wl == 3 && memcmp(w, "and", 3) == 0) { nl = start; continue; }
+        else break;
+        may |= bit;
+        (void)nothing;
+        any = true;
+        nl = start;
+    }
+    while (nl > 0 && name[nl - 1] == ' ') nl--;
+    name[nl] = 0;
+    if (!any || !nl) {
+        t_say(s, "say which node and what: 'allow <node> work', 'update', 'all' or 'nothing'.");
+        return;
+    }
+
+    nodes_apply();
+    i32 i = nodes_by_name(name);
+    if (i < 0) {
+        t_puts(s, "no node called '");
+        t_puts(s, name);
+        t_say(s, "' in nodes.  'nodes' lists them.");
+        return;
+    }
+    nodes_allow((u32)i, may);
+    char words[24];
+    nodes_may_words(may, words);
+    t_puts(s, name);
+    t_puts(s, " may now: ");
+    t_say(s, may ? words : "nothing");
+}
+
+/* "update <node>", "update <node> with <kernel.elf>", "update all". */
+static void cmd_update(term_session *s, const char *rest)
+{
+    if (!rest[0]) {
+        t_say(s, "update which node?  'update <node>' sends the kernel this machine runs;");
+        t_say(s, "'update <node> with <kernel.elf>' a built one; 'update all' every node with an address.");
+        return;
+    }
+    char who[64];
+    const char *with = NULL;
+    u32 wl = 0;
+    for (u32 i = 0; rest[i] && wl < sizeof(who) - 1; i++) {
+        if (rest[i] == ' ' && rest[i+1] == 'w' && rest[i+2] == 'i' && rest[i+3] == 't' &&
+            rest[i+4] == 'h' && rest[i+5] == ' ') {
+            with = rest + i + 6;
+            break;
+        }
+        who[wl++] = rest[i];
+    }
+    while (wl > 0 && who[wl - 1] == ' ') wl--;
+    who[wl] = 0;
+    while (with && *with == ' ') with++;
+
+    object *image = NULL;
+    if (with && *with) {
+        spot sp;
+        if (!resolve(s, with, &sp)) return;
+        if (obj_type(sp.o) != TYPE_BYTES || !(sp.r & CAP_READ)) {
+            t_say(s, "a kernel is bytes you may read: the kernel.elf a build makes.");
+            return;
+        }
+        image = sp.o;
+    }
+
+    char why[120];
+    if (words_are(who, "all")) {
+        u32 n = pipe_update_all(image, why, sizeof(why));
+        if (!n) { t_say(s, why); return; }
+        t_dec(s, n);
+        t_say(s, n == 1 ? " node queued; the journal says how it took it."
+                        : " nodes queued, one after the other; the journal says how each took it.");
+        return;
+    }
+    if (!pipe_update(who, image, why, sizeof(why))) { t_say(s, why); return; }
+    t_puts(s, "the kernel is on its way to ");
+    t_puts(s, who);
+    t_say(s, ".  the journal says whether it was taken; the node installs it and restarts.");
 }
 
 /* Points the pipe at a machine: by the name it answered the scan
@@ -1673,6 +1846,9 @@ static void cmd_help(term_session *s)
     t_say(s, "  wifi             the station: joined where, how, and its address");
     t_say(s, "  address          which card carries the traffic, and the address it holds");
     t_say(s, "  version          what the running kernel calls itself");
+    t_say(s, "  nodes            the machines met through the pipe, and what each may do here");
+    t_say(s, "  allow <node> work|update|all|nothing   what that node may ask of this machine");
+    t_say(s, "  update <node>    send this kernel to that node; it installs and restarts.  'update all'; '... with <kernel.elf>'");
     t_say(s, "  receive <n> bytes as <name>   a text made here, filled with the next n bytes");
     t_say(s, "                   of this session as they are; how a file comes in through the door");
     t_say(s, "  give <name> to <program>   hand it a reference");
@@ -1899,6 +2075,9 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "journal", NULL))  cmd_journal(s);
     else if (word_starts(line, "time", NULL))     cmd_time(s);
     else if (word_starts(line, "version", NULL))  cmd_version(s);
+    else if (word_starts(line, "nodes", NULL))    cmd_nodes(s);
+    else if (word_starts(line, "allow", &rest))   cmd_allow(s, rest);
+    else if (word_starts(line, "update", &rest))  cmd_update(s, rest);
     else {
         t_puts(s, "i do not know '");
         t_puts(s, line);

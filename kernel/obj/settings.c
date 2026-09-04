@@ -48,12 +48,15 @@ typedef struct {
     char wlan_ssid[4][33];
     char wlan_pass[4][64];
     u32  wlans;
+    /* The peer as a node's name, when the peer line holds a word
+     * instead of numbers. */
+    char peer_name[24];
 } values;
 
 static values current = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                           false, { 0, 0, 0, 0 }, 0,
                           false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0,
-                          { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0 };
+                          { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0, "" };
 
 object *settings_object(void) { return settings; }
 
@@ -77,6 +80,23 @@ bool settings_peer(u8 ip[4], u16 *port)
     if (!current.peer_set) return false;
     if (ip) for (u32 i = 0; i < 4; i++) ip[i] = current.peer_ip[i];
     if (port) *port = current.peer_port;
+    return true;
+}
+
+bool settings_peer_name(char *out, u32 max)
+{
+    if (current.peer_set || !current.peer_name[0]) return false;
+    u32 i = 0;
+    while (current.peer_name[i] && i + 1 < max) { out[i] = current.peer_name[i]; i++; }
+    out[i] = 0;
+    return true;
+}
+
+bool settings_known_at(u32 i, u8 ip[4], u8 key[32])
+{
+    if (i >= current.knowns) return false;
+    for (u32 k = 0; k < 4; k++) ip[k] = current.known_ip[i][k];
+    for (u32 k = 0; k < 32; k++) key[k] = current.known_key[i][k];
     return true;
 }
 
@@ -338,6 +358,7 @@ static void read_line(values *v, const char *line, u64 len)
                 g = g * 10 + (u64)(val[i++] - '0');
             nums[got++] = g;
         }
+        v->peer_name[0] = 0;
         if (got == 5 && nums[0] < 256 && nums[1] < 256 &&
             nums[2] < 256 && nums[3] < 256 && nums[4] < 65536 &&
             nums[4] > 0) {
@@ -345,7 +366,18 @@ static void read_line(values *v, const char *line, u64 len)
             v->peer_port = (u16)nums[4];
             v->peer_set = true;
         } else {
+            /* A word instead: the name of a node in the nodes table.
+             * "nobody" and an empty value name no one. */
             v->peer_set = false;
+            u64 from = 0, to = vlen;
+            while (from < to && val[from] == ' ') from++;
+            while (to > from && (val[to - 1] == ' ' || val[to - 1] == '\r')) to--;
+            u32 nl = 0;
+            for (u64 i = from; i < to && nl < sizeof(v->peer_name) - 1; i++)
+                if ((u8)val[i] >= 0x20 && (u8)val[i] < 0x7F)
+                    v->peer_name[nl++] = val[i];
+            v->peer_name[nl] = 0;
+            if (line_has(v->peer_name, nl, "nobody") && nl == 6) v->peer_name[0] = 0;
         }
     } else if (matter_is(line, a, b, "address")) {
         /* Four numbers claim an address of our own instead of asking
@@ -548,10 +580,11 @@ static void note_changes(const values *was, const values *now)
     if (was->peer_set != now->peer_set ||
         (now->peer_set &&
          (memcmp(was->peer_ip, now->peer_ip, 4) != 0 ||
-          was->peer_port != now->peer_port)))
-        journal_says("settings", now->peer_set
-                     ? "the pipe points at a peer now"
-                     : "the pipe points at nobody");
+          was->peer_port != now->peer_port)) ||
+        strcmp(was->peer_name, now->peer_name) != 0)
+        journal_says("settings", now->peer_set  ? "the pipe points at a peer now"
+                                 : now->peer_name[0] ? "the pipe points at a node by name now"
+                                 : "the pipe points at nobody");
 
     if (was->clock_offset_min != now->clock_offset_min) {
         i64 m = now->clock_offset_min;
@@ -583,7 +616,7 @@ void settings_apply(void)
     values next = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                     false, { 0, 0, 0, 0 }, 0,
                     false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0,
-                    { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0 };
+                    { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0, "" };
 
     u64 start = 0;
     for (u64 i = 0; i <= size; i++) {

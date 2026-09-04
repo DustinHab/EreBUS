@@ -8,7 +8,7 @@
  *   show x           say a variable and its value, for the writer
  *   wait             sleep until the next gift or message arrives
  *   tell <words>     send up to 24 letters to "it", when it listens
- *   answer <n|v>     send the value, in digits, to "it"
+ *   answer <n|v>     send the value, in digits, to the first gift after the words (the way home), else to "it"
  *   set x <n|v>      variables a..z hold signed numbers
  *   add sub mul div  arithmetic onto a variable
  *   get x <n|v>      x = eight bytes of "it", at that offset
@@ -293,7 +293,7 @@ static u64 tell_number(u64 port, i64 val)
 
 /* Runs one line. Answers the next line number, or a FLOW_ code. */
 static i64 exec_line(const char *s, u32 ln, u64 console,
-                     i64 *v, u64 it, bool *skip,
+                     i64 *v, u64 it, u64 home, bool *skip,
                      u64 started, u64 budget)
 {
     i32 pos = 0;
@@ -320,11 +320,14 @@ static i64 exec_line(const char *s, u32 ln, u64 console,
         return (i64)ln + 1;
     }
 
+    /* The answer goes home: to the first thing given after the words,
+     * which for far work is the way back to the asker -- whatever "it"
+     * has become since, an input included. */
     if (w == P8('a','n','s','w','e','r',0,0)) {
         bool ok = true;
         i64 n = operand(s, &pos, v, &ok);
         if (!ok) return FLOW_WRONG;
-        u64 res = tell_number(it, n);
+        u64 res = tell_number(home ? home : it, n);
         v['r' - 'a'] = (res == 0) ? 0 : -1;
         return (i64)ln + 1;
     }
@@ -476,6 +479,7 @@ void user_runner(u64 console, u64 inbox)
     u64 started = r_clock();
 
     u64  it = 0;
+    u64  home = 0;                         /* the first gift after the words */
     u32  ln = 0;
     bool skip = false;
     u32  steps = 0;
@@ -498,7 +502,7 @@ void user_runner(u64 console, u64 inbox)
 
         if (script_line(words, ln, line) < 0) break;   /* the end */
 
-        i64 next = exec_line(line, ln, console, v, it, &skip,
+        i64 next = exec_line(line, ln, console, v, it, home, &skip,
                              started, budget);
 
         if (next == FLOW_STOP) break;
@@ -510,7 +514,10 @@ void user_runner(u64 console, u64 inbox)
 
         if (next == FLOW_WAIT) {
             if (msg_receive(inbox, buf) == 0) {
-                if (msg_ncaps(buf) > 0) it = msg_u64(buf, MSG_CAP0);
+                if (msg_ncaps(buf) > 0) {
+                    it = msg_u64(buf, MSG_CAP0);
+                    if (!home) home = it;
+                }
                 /* m carries the message's number. For a gift that is
                  * the word riding along with it -- a far job's range
                  * arrives this way -- and for a plain message it is

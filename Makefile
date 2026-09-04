@@ -114,6 +114,7 @@ KERN_C   := kernel/main.c \
             kernel/fs/settle.c \
             kernel/fs/install.c \
             kernel/net/pipe.c \
+            kernel/net/nodes.c \
             kernel/net/net.c \
             kernel/net/sha512.c \
             kernel/net/ed25519.c \

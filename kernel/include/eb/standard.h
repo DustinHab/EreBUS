@@ -40,7 +40,7 @@ object *code_launch(object *image);
  * interpreter itself enforces. Holds nothing else. A divided job's
  * range rides along: lo on the way-home gift, hi as a bare number. */
 object *work_launch(object *script, object *reply, u64 budget_seconds,
-                    i64 lo, i64 hi);
+                    i64 lo, i64 hi, object *input);
 
 /* Saves the graph and asks the machine to sleep. Comes back only on
  * hardware that ignored the asking. */

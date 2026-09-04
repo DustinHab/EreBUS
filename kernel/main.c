@@ -2,6 +2,13 @@
  * main.c -- kernel entry: handover check, console, clock, tables, memory, objects,
  * devices, network, boot-time install offer, standard programs, shell.
  * - start-up log: one line per finding, prefixed by the reporting part
+ *
+ * Copyright (C) 2026  DustinHab
+ * Part of EreBUS. This program is free software: you can redistribute it
+ * and/or modify it under the terms of the GNU Affero General Public License
+ * as published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version. See the LICENSE file in
+ * the project root, or <https://www.gnu.org/licenses/>.
  */
 #include <eb/types.h>
 #include <eb/io.h>
@@ -28,6 +35,7 @@
 #include <eb/standard.h>
 #include <eb/net.h>
 #include <eb/pipe.h>
+#include <eb/nodes.h>
 #include <eb/string.h>
 #include <eb/syscall.h>
 #include <eb/pic.h>
@@ -275,7 +283,7 @@ object *code_launch(object *image)
  * the low end rides on the way home, the high end follows as a bare
  * number, so the script's first two waits read them as m. */
 object *work_launch(object *script, object *reply, u64 budget_seconds,
-                    i64 lo, i64 hi)
+                    i64 lo, i64 hi, object *input)
 {
     if (!script || obj_type(script) != TYPE_TEXT || !reply ||
         !console_port)
@@ -295,6 +303,14 @@ object *work_launch(object *script, object *reply, u64 budget_seconds,
     obj_set_slot_name(prog, 1, "the way home");
     proc_grant_word(prog, reply, CAP_CALL, (u64)lo);
     proc_post_number(prog, 0x424D554EULL /* "NUMB" */, (u64)hi);
+
+    /* An input sent ahead of the job: the third gift, read-only, so a
+     * script can 'get' its bytes between lo and hi. */
+    if (input) {
+        obj_set_slot(prog, 2, input, CAP_READ);
+        obj_set_slot_name(prog, 2, "its input");
+        proc_grant_word(prog, input, CAP_READ, (u64)hi);
+    }
 
     kprintf("proc: %llu (work) running a visiting text\n", proc_id(p));
     return prog;
@@ -357,7 +373,7 @@ static const char lang_text[] =
     "\n"
     "say <words>      up to 24 letters, to the console\n"
     "tell <words>     the same, to it -- when it listens\n"
-    "answer <n or v>  the value, in digits, to it\n"
+    "answer <n or v>  the value, in digits, to the first gift after the words (the way home), else to it\n"
     "show x           say a variable and its value\n"
     "wait             sleep until the next gift\n"
     "set x <n or v>   also: add sub mul div\n"
@@ -1838,6 +1854,41 @@ void kmain(eb_boot_info *bi)
                 }
             }
             if (ln) pipe_line_set(ln);
+        }
+
+        /* The nodes: one row per machine met through the pipe, with
+         * the person's column of what each may do here. Read and write
+         * -- the trust in the table is theirs to give and take. Beside
+         * it "network", which the kernel rewrites with what it sees on
+         * the wire; read-only, like activity. */
+        {
+            object *nd = find_petnamed(root, "nodes", TYPE_TEXT, NULL, NULL);
+            if (nd) nodes_adopt(nd);
+            if (!nodes_object() && nodes_create())
+                list_append(sys_shelf ? sys_shelf : root, nodes_object(),
+                            CAP_READ | CAP_WRITE, "nodes");
+            nodes_apply();
+
+            /* Machines remembered by older settings come along as rows. */
+            for (u32 i = 0; ; i++) {
+                u8 kip[4], kkey[32];
+                if (!settings_known_at(i, kip, kkey)) break;
+                if (nodes_by_key(kkey) < 0)
+                    nodes_meet(NULL, kkey, kip, PIPE_PORT, NULL, true);
+            }
+
+            object *pg = find_petnamed(root, "network", TYPE_TEXT, NULL, NULL);
+            if (!pg) {
+                object *made = obj_create(TYPE_TEXT, 4096, 0);
+                if (made) {
+                    obj_set_name(made, "network");
+                    if (list_append(sys_shelf ? sys_shelf : root, made,
+                                    CAP_READ, "network"))
+                        pg = made;
+                    obj_release(made);
+                }
+            }
+            if (pg) { obj_set_fleeting(pg, true); pipe_page_set(pg); }
         }
 
         /* The door's key: the host's ed25519 pair, made once and kept
