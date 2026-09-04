@@ -1,6 +1,6 @@
 # EreBUS Manual
 
-For EreBUS 0.5.1. This manual is updated with every release; the version it describes is the one on the releases page.
+For EreBUS 0.5.2. This manual is updated with every release; the version it describes is the one on the releases page.
 
 Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions
 
@@ -473,4 +473,5 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 |---|---|---|
 | 0.4.4 | 2026-09-04 | first published version: loader, kernel, objects and capabilities, snapshots, desktop and terminal, compiler, assembler and linker, self-build through the door, AHCI and FAT, USB input, Intel and Realtek network cards, TLS client, ssh door, sealed object pipe with far work, WPA2 station, boot-time install offer |
 | 0.5.0 | 2026-09-04 | nodes: identity by key, the nodes table and rights per node, kernel updates through the pipe, the network page, heartbeat and gossip, work with input objects, answers with provenance, `version`, `peer` by name |
-| 0.5.1 | 2026-09-05 | compiler fix: members of a struct that contains an inner struct body were resolved against the inner body's members; a self-built kernel's compiler could not compile anything. selfkernel test extended to a second generation. Runtime messages reworded. Test battery parallel and under KVM: 7 minutes instead of 38. |
+| 0.5.1 | 2026-09-05 | compiler fix: members of a struct that contains an inner struct body were resolved against the inner body's members; a self-built kernel's compiler could not compile anything. selfkernel test extended to a second generation. Runtime messages reworded. Test battery parallel and under KVM. |
+| 0.5.2 | 2026-09-05 | console messages of the assembler programs reworded to factual wording. Test battery: relay, agent and persist as scripts in the parallel lanes, per-test directories and time limit, pipe tests driven through the terminal; 22 tests in about 4 minutes. No change to what the machine does. |

@@ -221,6 +221,7 @@ Measured on 32 cores under KVM: about 230 s for all 22 tests (before: 38 minutes
 - EreBUS 0.4.4: first published version.
 - EreBUS 0.5.0: nodes: identity by key, rights per node, kernel updates through the pipe, network page, work with inputs and provenance.
 - EreBUS 0.5.1: compiler fix (member lookup in structs with inner struct bodies); a self-built kernel can compile again; selfkernel test runs a second generation.
+- EreBUS 0.5.2: console messages of the assembler programs reworded to factual wording; test battery parallel and reliable under load, 22 tests in about four minutes. No change to what the machine does.
 
 ## License
 
