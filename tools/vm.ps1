@@ -62,6 +62,6 @@ if (Test-Path $exchange) {
     -device "ide-hd,drive=store,bus=ide.1" `
     @xchgArgs `
     -device "e1000,netdev=n0" `
-    -netdev "user,id=n0,hostfwd=udp::7801-:7800,hostfwd=tcp::8080-:80,hostfwd=tcp::2222-:22" `
+    -netdev "user,id=n0,hostfwd=udp::7801-:7800,hostfwd=tcp::8080-:80,hostfwd=tcp::22222-:22" `
     -name "Erebus" `
     -serial "file:$(Join-Path $build 'vm-serial.log')"
