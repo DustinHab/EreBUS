@@ -376,7 +376,7 @@ static bool parse_mem(as *a, const char *s, u32 n, operand *o)
         j = i;
         while (j < n && is_name_char(s[j])) j++;
     }
-    if (j == i) { fail(a, "what is in the brackets?", NULL); return false; }
+    if (j == i) { fail(a, "empty brackets", NULL); return false; }
 
     u8 rn, rs;
     i64 v;
@@ -389,7 +389,7 @@ static bool parse_mem(as *a, const char *s, u32 n, operand *o)
         return true;
     } else {
         i64 addend;
-        if (!parse_name_expr(a, s + i, n - i, &o->sym, &addend)) { fail(a, "i cannot read what is in the brackets", NULL); return false; }
+        if (!parse_name_expr(a, s + i, n - i, &o->sym, &addend)) { fail(a, "cannot parse the bracket contents", NULL); return false; }
         o->disp = addend;
         return true;
     }
@@ -478,7 +478,7 @@ static bool parse_operand(as *a, const char *s, u32 n, operand *o)
     u32 k = 0;
     while (i + k < n && k < NAME_MAX - 1) { what[k] = s[i + k]; k++; }
     what[k] = 0;
-    fail(a, "i cannot read", what);
+    fail(a, "cannot parse", what);
     return false;
 }
 
@@ -1069,7 +1069,7 @@ static void lay_data(as *a, u8 width, const char *s, u32 n)
             } else {
                 i32 sym;
                 i64 addend;
-                if (!parse_name_expr(a, s + i, e - i, &sym, &addend)) { fail(a, "i cannot read that value", NULL); return; }
+                if (!parse_name_expr(a, s + i, e - i, &sym, &addend)) { fail(a, "cannot parse the value", NULL); return; }
                 if (width == 8) { relocate(a, ASM_R_ABS64, sym, addend); emit64(a, 0); }
                 else if (width == 4) { relocate(a, ASM_R_ABS32S, sym, addend); emit32(a, 0); }
                 else { fail(a, "a name goes with dq or dd", NULL); return; }
@@ -1359,7 +1359,7 @@ count:
         u32 k = 0;
         while (k < ml && k < NAME_MAX - 1) { what[k] = mn[k]; k++; }
         what[k] = 0;
-        fail(a, "i do not know", what);
+        fail(a, "unknown instruction", what);
     }
 }
 
@@ -1411,7 +1411,7 @@ static i64 write_object(as *a, u8 *out, u64 max)
     u64 total = 76;
     for (u32 s = 0; s < ASM_NSEC; s++) total += laid[s];
     total += (u64)nsym * 24 + (u64)a->nrelocs * 24 + strn;
-    if (total > max) { a->line = 0; fail(a, "the object is larger than the room for it", NULL); return -1; }
+    if (total > max) { a->line = 0; fail(a, "the object exceeds the buffer", NULL); return -1; }
 
     u8 *p = out;
     p[0] = 'E'; p[1] = 'B'; p[2] = 'O'; p[3] = '1';
@@ -1432,7 +1432,7 @@ static i64 write_object(as *a, u8 *out, u64 max)
     /* The names, and each label's number among them, for the places. */
     static u32 *symno;
     if (!symno) symno = (u32 *)lang_big_alloc(sizeof(u32) * LABELS_MAX);
-    if (!symno) { fail(a, "there is no room for the object's tables", NULL); return -1; }
+    if (!symno) { fail(a, "out of memory for the object's tables", NULL); return -1; }
     u32 no = 0, soff = 0;
     for (u32 i = 0; i < a->nlabels; i++) {
         label *l = &a->labels[i];
@@ -1485,11 +1485,11 @@ i64 asm_assemble_dialect(const u8 *src, u64 len, bool gnu_names,
     static const u32 caps[ASM_NSEC] = { TEXT_MAX, RODATA_MAX, DATA_MAX, 0, USER_MAX };
     for (u32 s = 0; s < ASM_NSEC; s++) {
         if (caps[s] && !bufs[s]) bufs[s] = (u8 *)lang_big_alloc(caps[s]);
-        if (caps[s] && !bufs[s]) { fail(&a, "there is no room for the assembler's tables", NULL); return -1; }
+        if (caps[s] && !bufs[s]) { fail(&a, "out of memory for the assembler's tables", NULL); return -1; }
     }
     if (!label_buf) label_buf = (label *)lang_big_alloc(sizeof(label) * LABELS_MAX);
     if (!reloc_buf) reloc_buf = (reloc *)lang_big_alloc(sizeof(reloc) * RELOCS_MAX);
-    if (!label_buf || !reloc_buf) { fail(&a, "there is no room for the assembler's tables", NULL); return -1; }
+    if (!label_buf || !reloc_buf) { fail(&a, "out of memory for the assembler's tables", NULL); return -1; }
     a.labels = label_buf;
     a.relocs = reloc_buf;
 

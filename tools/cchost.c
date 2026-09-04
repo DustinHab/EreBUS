@@ -27,6 +27,16 @@
 
 void *lang_big_alloc(u64 size) { return calloc(1, (size_t)size); }
 
+/* The kernel's log line, on the host: the same words, to stderr. */
+#include <stdarg.h>
+void kprintf(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}
+
 /* A text goes by three names: the path as given, the part after an
  * include directory (so <eb/types.h> finds kernel/include/eb/types.h),
  * and the bare file name. */

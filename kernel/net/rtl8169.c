@@ -176,8 +176,8 @@ bool rtl8169_init(bool need_link)
     outb((u16)(io + R_9346CR), 0x00);        /* lock it again */
 
     kprintf("net:  rtl8169 kin %04x at %02x:%02x.%u, "
-            "%02x:%02x:%02x:%02x:%02x:%02x -- first meeting with "
-            "this silicon\n",
+            "%02x:%02x:%02x:%02x:%02x:%02x -- driver untested on "
+            "hardware\n",
             dev->device_id, dev->bus, dev->device, dev->function,
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 

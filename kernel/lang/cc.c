@@ -11,12 +11,14 @@
 #include <eb/cc.h>
 #include <eb/lang.h>
 #include <eb/string.h>
+#include <eb/fmt.h>
 
 #define NAME_MAX    40
 #define STR_POOL    524288
 #define NSTR        4096
 #define NTYPES      4096
 #define NMEMBERS    2048
+#define STRUCT_MEMBERS_MAX 256        /* members of one struct or union */
 #define NSYMS       4096
 #define NNODES      16384
 #define NMACROS     256
@@ -235,7 +237,7 @@ typedef struct {
     /* strings */
     u8     spool[STR_POOL];
     u32    spool_len;
-    struct { u32 at, len; } strs[NSTR];
+    struct { u32 at, n; } strs[NSTR];  /* not "len": an older compiler resolved an inner member's name against the outer struct */
     u32    nstrs;
 
     /* the function being read */
@@ -892,7 +894,7 @@ static void builtin_header(const char *name)
         define_text("size_t", "unsigned long");
         return;
     }
-    fail("no header of that name lives inside this machine:", name);
+    fail("no built-in header:", name);
 }
 
 static void directive(void)
@@ -1007,7 +1009,7 @@ static void directive(void)
         const u8 *text;
         u64 len;
         if (!C.find || !C.find(C.ctx, name, &text, &len)) {
-            fail("no text of that name lies beside this one:", name);
+            fail("no text of that name beside this one:", name);
             return;
         }
         push_source(text, len, name, false);
@@ -1035,7 +1037,7 @@ static void directive(void)
         return;
     }
     if (same(word, "line") || same(word, "warning")) return;
-    fail("i do not know the directive", word);
+    fail("unknown directive", word);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1341,7 +1343,7 @@ static void lex_raw(token *t)
             }
             C.spool[C.spool_len++] = 0;
             C.strs[C.nstrs].at = at;
-            C.strs[C.nstrs].len = C.spool_len - at;
+            C.strs[C.nstrs].n = C.spool_len - at;
             t->kind = TK_STR;
             t->str = C.nstrs++;
             return;
@@ -1631,7 +1633,7 @@ static void add_type(u32 i)
     switch (n->kind) {
     case ND_NUM:  n->ty = C.t_long; break;
     case ND_FNUM: n->ty = C.t_double; break;
-    case ND_STR:  n->ty = array_of(C.t_char, C.strs[n->aux].len); break;
+    case ND_STR:  n->ty = array_of(C.t_char, C.strs[n->aux].n); break;
     case ND_VAR:  n->ty = C.syms[n->sym].ty; break;
 
     case ND_ADD:
@@ -1943,6 +1945,12 @@ static type *record_decl(bool is_union)
     t->packed = packed;
 
     t->mfirst = C.nmembers;
+    /* The members of this struct, by index. A member whose type is an
+     * inner struct body adds that body's members to the table while
+     * this one is still being read, so the indices are gathered and
+     * the entries copied to a contiguous run at the end. */
+    u32 mine[STRUCT_MEMBERS_MAX];
+    u32 nmine = 0;
     u32 off = 0, al = 1, bitpos = 0, unit_off = 0, unit_size = 0;
     while (!is("}") && C.cur.kind != TK_EOF && !C.bad) {
         if (is_kw("_Static_assert")) { stmt(); continue; }
@@ -1954,6 +1962,8 @@ static type *record_decl(bool is_union)
             skip_attributes();
             if (C.bad) return t;
             if (C.nmembers >= NMEMBERS) { fail("too many members", NULL); return t; }
+            if (nmine >= STRUCT_MEMBERS_MAX) { fail("too many members in one struct", tag); return t; }
+            mine[nmine++] = C.nmembers;
             member *m = &C.members[C.nmembers++];
             memset(m, 0, sizeof(*m));
             cpy(m->name, nm);
@@ -1999,7 +2009,18 @@ static type *record_decl(bool is_union)
     while (is_kw("__attribute__")) packed |= skip_one_attribute();
     if (packed) al = 1;
     t->packed = packed;
-    t->mcount = C.nmembers - t->mfirst;
+    if (C.nmembers - t->mfirst != nmine) {
+        /* inner bodies interleaved their members with ours: copy ours
+         * to the end, in order */
+        if (C.nmembers + nmine > NMEMBERS) { fail("too many members", NULL); return t; }
+        u32 start = C.nmembers;
+        for (u32 i = 0; i < nmine; i++) {
+            memcpy(&C.members[C.nmembers], &C.members[mine[i]], sizeof(member));
+            C.nmembers++;
+        }
+        t->mfirst = start;
+    }
+    t->mcount = nmine;
     t->align = al;
     t->size = (off + al - 1) / al * al;
     t->defined = true;
@@ -2221,9 +2242,9 @@ static u32 primary(void)
         advance();
         while (C.cur.kind == TK_STR) {
             u32 a = C.strs[N(n)->aux].at;
-            u32 al = C.strs[N(n)->aux].len - 1;
+            u32 al = C.strs[N(n)->aux].n - 1;
             u32 b = C.strs[C.cur.str].at;
-            u32 bl = C.strs[C.cur.str].len;
+            u32 bl = C.strs[C.cur.str].n;
             if (C.spool_len + al + bl >= STR_POOL || C.nstrs >= NSTR) { fail("the strings are too long together", NULL); return n; }
             u32 at = C.spool_len;
             memcpy(C.spool + C.spool_len, C.spool + a, al);
@@ -2231,7 +2252,7 @@ static u32 primary(void)
             memcpy(C.spool + C.spool_len, C.spool + b, bl);
             C.spool_len += bl;
             C.strs[C.nstrs].at = at;
-            C.strs[C.nstrs].len = al + bl;
+            C.strs[C.nstrs].n = al + bl;
             N(n)->aux = C.nstrs++;
             advance();
         }
@@ -2304,7 +2325,7 @@ static u32 primary(void)
     }
     if (C.cur.kind == TK_IDENT) {
         sym *s = sym_find(C.cur.text);
-        if (!s) { fail("i do not know", C.cur.text); return mk_num(0); }
+        if (!s) { fail("unknown name", C.cur.text); return mk_num(0); }
         u32 idx = (u32)(s - C.syms);
         advance();
         if (s->kind == S_ENUM) return mk_num(s->val);
@@ -2312,7 +2333,7 @@ static u32 primary(void)
         N(n)->sym = idx;
         return n;
     }
-    fail("i cannot read", C.cur.text);
+    fail("cannot parse", C.cur.text);
     return mk_num(0);
 }
 
@@ -2689,13 +2710,13 @@ static u32 joined_string(void)
     u32 s = C.cur.str;
     advance();
     while (C.cur.kind == TK_STR && !C.bad) {
-        u32 a = C.strs[s].at, al = C.strs[s].len - 1;
-        u32 bb = C.strs[C.cur.str].at, bl = C.strs[C.cur.str].len;
+        u32 a = C.strs[s].at, al = C.strs[s].n - 1;
+        u32 bb = C.strs[C.cur.str].at, bl = C.strs[C.cur.str].n;
         if (C.spool_len + al + bl >= STR_POOL || C.nstrs >= NSTR) { fail("the strings are too long together", NULL); return s; }
         u32 at = C.spool_len;
         memcpy(C.spool + C.spool_len, C.spool + a, al); C.spool_len += al;
         memcpy(C.spool + C.spool_len, C.spool + bb, bl); C.spool_len += bl;
-        C.strs[C.nstrs].at = at; C.strs[C.nstrs].len = al + bl;
+        C.strs[C.nstrs].at = at; C.strs[C.nstrs].n = al + bl;
         s = C.nstrs++;
         advance();
     }
@@ -2706,8 +2727,8 @@ static void initializer(type *t, u32 off, bool allow_dyn)
 {
     if (t->kind == T_ARR && C.cur.kind == TK_STR && t->base->kind == T_CHAR) {
         u32 s = joined_string();
-        if (t->len == 0) { t->len = C.strs[s].len; t->size = (u32)t->len; }
-        for (u32 k = 0; k < C.strs[s].len && k < t->len && off + k < INIT_MAX; k++)
+        if (t->len == 0) { t->len = C.strs[s].n; t->size = (u32)t->len; }
+        for (u32 k = 0; k < C.strs[s].n && k < t->len && off + k < INIT_MAX; k++)
             C.ibuf[off + k] = C.spool[C.strs[s].at + k];
         return;
     }
@@ -3072,13 +3093,13 @@ static u32 stmt(void)
         u32 tmpl = C.cur.str;
         advance();
         while (C.cur.kind == TK_STR) {
-            u32 a = C.strs[tmpl].at, al = C.strs[tmpl].len - 1;
-            u32 bb = C.strs[C.cur.str].at, bl = C.strs[C.cur.str].len;
+            u32 a = C.strs[tmpl].at, al = C.strs[tmpl].n - 1;
+            u32 bb = C.strs[C.cur.str].at, bl = C.strs[C.cur.str].n;
             if (C.spool_len + al + bl >= STR_POOL || C.nstrs >= NSTR) { fail("the strings are too long together", NULL); return 0; }
             u32 at = C.spool_len;
             memcpy(C.spool + C.spool_len, C.spool + a, al); C.spool_len += al;
             memcpy(C.spool + C.spool_len, C.spool + bb, bl); C.spool_len += bl;
-            C.strs[C.nstrs].at = at; C.strs[C.nstrs].len = al + bl;
+            C.strs[C.nstrs].at = at; C.strs[C.nstrs].n = al + bl;
             tmpl = C.nstrs++;
             advance();
         }
@@ -3157,7 +3178,17 @@ static u32 stmt(void)
 
 static void o_char(char c)
 {
-    if (C.len + 1 >= C.max) { if (!C.bad) fail_at(0, NULL, "the assembly grew larger than the room for it", NULL); return; }
+    if (C.len + 1 >= C.max) {
+        if (!C.bad) {
+            char head[81];
+            u32 k = 0;
+            while (k < 80 && k < C.len) { char h = C.out[k]; head[k] = (h >= 0x20 && h < 0x7F) ? h : '.'; k++; }
+            head[k] = 0;
+            kprintf("cc:   the assembly overflowed: len %u, room %u, head '%s'\n", (u32)C.len, (u32)C.max, head);
+            fail_at(0, NULL, "the assembly exceeds the buffer", NULL);
+        }
+        return;
+    }
     C.out[C.len++] = c;
 }
 
@@ -4731,7 +4762,7 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
 {
     if (!Cp) Cp = (cstate *)lang_big_alloc(sizeof(cstate));
     if (!Cp) {
-        if (errmax) { const char *m = "there is no room for the compiler's tables"; u32 k = 0; while (m[k] && k + 1 < errmax) { err[k] = m[k]; k++; } err[k] = 0; }
+        if (errmax) { const char *m = "out of memory for the compiler's tables"; u32 k = 0; while (m[k] && k + 1 < errmax) { err[k] = m[k]; k++; } err[k] = 0; }
         return -1;
     }
     memset(&C, 0, sizeof(C));
@@ -4809,7 +4840,7 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
     }
     for (u32 i = 0; i < C.nstrs; i++) {
         o(".Ls%d: db", (i64)i);
-        for (u32 k = 0; k < C.strs[i].len; k++)
+        for (u32 k = 0; k < C.strs[i].n; k++)
             o("%s %d", k ? "," : "", (i64)C.spool[C.strs[i].at + k]);
         o("\n");
     }

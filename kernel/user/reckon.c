@@ -164,9 +164,9 @@ void user_reckon(u64 console, u64 inbox)
 
     /* say "point sums at me" */
     r_say(console,
-          P8('p','o','i','n','t',' ','s','u'),
-          P8('m','s',' ','a','t',' ','m','e'),
-          P8(' ',' ',' ',' ',' ',' ',' ',' '));
+          P8('w','a','i','t','i','n','g',' '),
+          P8('f','o','r',' ','a',' ','t','e'),
+          P8('x','t',' ',' ',' ',' ',' ',' '));
 
     for (;;) {
         if (msg_receive(inbox, buf) != 0) { r_yield(); continue; }
@@ -230,9 +230,9 @@ void user_reckon(u64 console, u64 inbox)
         if (answered == 0) {
             /* say "nothing asked in it" */
             r_say(console,
-                  P8('n','o','t','h','i','n','g',' '),
-                  P8('a','s','k','e','d',' ','i','n'),
-                  P8(' ','i','t',' ',' ',' ',' ',' '));
+                  P8('n','o',' ','l','i','n','e',' '),
+                  P8('e','n','d','s',' ','i','n',' '),
+                  P8('=',' ',' ',' ',' ',' ',' ',' '));
             continue;
         }
 
@@ -253,14 +253,14 @@ void user_reckon(u64 console, u64 inbox)
         if (ok)
             /* say "reckoned; look at it" */
             r_say(console,
-                  P8('r','e','c','k','o','n','e','d'),
-                  P8(';',' ','l','o','o','k',' ','a'),
-                  P8('t',' ','i','t',' ',' ',' ',' '));
+                  P8('a','n','s','w','e','r','s',' '),
+                  P8('w','r','i','t','t','e','n',' '),
+                  P8(' ',' ',' ',' ',' ',' ',' ',' '));
         else
             /* say "it has no room for me" */
             r_say(console,
-                  P8('i','t',' ','h','a','s',' ','n'),
-                  P8('o',' ','r','o','o','m',' ','f'),
-                  P8('o','r',' ','m','e',' ',' ',' '));
+                  P8('n','o',' ','r','o','o','m',' '),
+                  P8('i','n',' ','t','h','e',' ','t'),
+                  P8('e','x','t',' ',' ',' ',' ',' '));
     }
 }

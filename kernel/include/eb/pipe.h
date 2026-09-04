@@ -4,10 +4,10 @@
 #include <eb/types.h>
 #include <eb/object.h>
 
-/* The object pipe: how objects, words, work and kernels travel to another EreBUS.
- * - a system function, not a thing in the graph: "send" on a readable data object, the kernel carries it, what arrives lies in arrivals
- * - substance crosses, never authority: type, name, payload; no references, no rights, no reach back
- * - a node is its key: the knock is signed with the door key, and the nodes table says what each node may do here */
+/* The object pipe: objects, lines, tasks and kernels between EreBUS machines over UDP.
+ * - a kernel function, not an object: "send" on a readable data object, the kernel transfers it, the receiver places it in arrivals
+ * - only data crosses: type, name, payload; no references, no rights
+ * - the handshake is signed with the door key; the nodes table holds the rights granted to each node */
 
 #define PIPE_PORT 7800
 

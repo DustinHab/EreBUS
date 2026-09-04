@@ -70,30 +70,30 @@ void install_offer(void)
     if (!anything_to_take()) return;
 
     if (!ps2_keyboard_present() && !xhci_keyboards()) {
-        kprintf("disk: no store, and no keyboard to be asked with; "
-                "starting without a memory\n");
+        kprintf("disk: no store and no keyboard; "
+                "starting without a store\n");
         return;
     }
 
     kprintf("\n");
-    kprintf("disk: this machine keeps nothing between starts yet.  "
+    kprintf("disk: no store yet.  "
             "a disk can be given to it now.\n");
     settle_disks(say, NULL);
     kprintf("\n");
     kprintf("disk: type the number of a disk to give it to the system, "
-            "or press escape to start without a memory.\n");
-    kprintf("      the disk is emptied: a boot volume with this system, "
-            "and the rest for what you make.\n");
+            "or press escape to start without a store.\n");
+    kprintf("      the disk is erased: a boot volume with this system "
+            "and a store partition.\n");
     kprintf("disk: > ");
 
     u32 c = wait_key(ASK_NS);
     if (c == 0) {
-        kprintf("\ndisk: nobody answered; starting without a memory.  "
-                "the words 'disks' and 'settle' do this later.\n");
+        kprintf("\ndisk: no answer; starting without a store.  "
+                "'disks' and 'settle' do this later.\n");
         return;
     }
     if (c < '1' || c > '9') {
-        kprintf("\ndisk: left alone.  the words 'disks' and 'settle' "
+        kprintf("\ndisk: skipped.  'disks' and 'settle' "
                 "do this later.\n");
         return;
     }
@@ -101,7 +101,7 @@ void install_offer(void)
     kprintf("%c\n", (char)c);
 
     if (which > blk_disk_count()) {
-        kprintf("disk: there is no disk %u.  starting without a memory.\n", which);
+        kprintf("disk: there is no disk %u.  starting without a store.\n", which);
         return;
     }
 
@@ -121,7 +121,7 @@ void install_offer(void)
 
     char answer[16];
     if (!wait_line(answer, sizeof(answer), ASK_NS)) {
-        kprintf("\ndisk: left alone; nothing was written.\n");
+        kprintf("\ndisk: cancelled; nothing was written.\n");
         return;
     }
     if (!(answer[0] == 'y' && answer[1] == 'e' && answer[2] == 's' && answer[3] == 0)) {

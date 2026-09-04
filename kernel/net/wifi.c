@@ -119,8 +119,8 @@ static bool radio_send(const u8 *frame, u32 len)
 bool wifi_radio_present(void)   { return nic_up(); }
 const char *wifi_radio_name(void)
 {
-    return nic_up() ? "no radio chip; the wire carries the test bench's air"
-                    : "no radio, and no wire";
+    return nic_up() ? "no radio; test-bench frames over ethernet"
+                    : "no radio and no network card";
 }
 
 /* ------------------------------------------------------------------ */
@@ -376,8 +376,8 @@ static void eapol_in(const u8 *e, u32 len)
         if (memcmp(mic, calc, 16) != 0) { fail("the password did not open it"); return; }
 
         static u8 plain[256];
-        if (kdlen > sizeof(plain) + 8 || kdlen < 24) { fail("the network's key data made no sense"); return; }
-        if (!aes_unwrap(st.ptk + 16, k + 95, kdlen, plain)) { fail("the network's group key would not unwrap"); return; }
+        if (kdlen > sizeof(plain) + 8 || kdlen < 24) { fail("invalid key data from the network"); return; }
+        if (!aes_unwrap(st.ptk + 16, k + 95, kdlen, plain)) { fail("group key unwrap failed"); return; }
         u32 plen = kdlen - 8;
         st.have_gk = false;
         for (u32 at = 0; at + 2 <= plen;) {
@@ -401,8 +401,8 @@ static void eapol_in(const u8 *e, u32 len)
         st.state = S_JOINED;
         st.why[0] = 0;
         if (fresh) {
-            kprintf("wifi: joined '%s' on channel %u, sealed with wpa2\n", st.ssid, st.channel);
-            journal_says("wifi", "joined the network; the frames are sealed");
+            kprintf("wifi: joined '%s' on channel %u, wpa2\n", st.ssid, st.channel);
+            journal_says("wifi", "joined; wpa2");
             char had[64];
             if (!settings_wlan(st.ssid, had, sizeof(had)) && st.pass[0])
                 settings_remember_wlan(st.ssid, st.pass);
@@ -553,7 +553,7 @@ void wifi_radio_input(const u8 *f, u32 len, i8 rssi, u8 channel)
             st.tries = 0;
             st.step_ns = time_ns();
             send_assoc();
-        } else fail("the network refused the greeting");
+        } else fail("authentication refused");
         return;
     }
     if (kind == FC_ASSOC_RESP && st.state == S_ASSOC && len >= 30) {
@@ -562,19 +562,19 @@ void wifi_radio_input(const u8 *f, u32 len, i8 rssi, u8 channel)
                 st.state = S_JOINED;
                 st.why[0] = 0;
                 kprintf("wifi: joined '%s' on channel %u, open\n", st.ssid, st.channel);
-                journal_says("wifi", "joined an open network; nothing on it is sealed");
+                journal_says("wifi", "joined an open network; no encryption");
                 net_relink();
             } else {
                 st.state = S_HANDSHAKE;
                 st.step_ns = time_ns();
             }
-        } else fail("the network would not have us");
+        } else fail("association refused");
         return;
     }
     if (kind == FC_DEAUTH || kind == FC_DISASSOC) {
         if (st.state == S_HANDSHAKE) fail("the password did not open it");
-        else if (st.state == S_JOINED) fail("the network let go of us");
-        else fail("the network turned us away");
+        else if (st.state == S_JOINED) fail("deauthenticated by the network");
+        else fail("refused by the network");
     }
 }
 
@@ -600,9 +600,9 @@ static void begin_join(const char *ssid, const char *pass)
         if (strcmp(nets[i].ssid, ssid) != 0) continue;
         if (!best || nets[i].rssi > best->rssi) best = &nets[i];
     }
-    if (!best) { fail("no network of that name has been heard"); return; }
-    if (best->security == WIFI_OTHER) { fail("that network's protection is not one this station speaks"); return; }
-    if (best->security == WIFI_WPA2 && !crypto_ok) { fail("the station's own arithmetic failed its test; it will not seal"); return; }
+    if (!best) { fail("no network of that name seen"); return; }
+    if (best->security == WIFI_OTHER) { fail("unsupported security"); return; }
+    if (best->security == WIFI_WPA2 && !crypto_ok) { fail("crypto self test failed; wpa2 disabled"); return; }
     u32 pl = 0;
     while (pass[pl]) pl++;
     if (best->security == WIFI_WPA2 && (pl < 8 || pl > 63)) { fail("a passphrase is eight to sixty-three letters"); return; }
@@ -644,11 +644,11 @@ const char *wifi_state(char *out, u32 max)
     #define NUM(v) do { char d_[24]; u32 n_ = 0; u64 x_ = (v); if (!x_) d_[n_++] = '0'; while (x_) { d_[n_++] = (char)('0' + x_ % 10); x_ /= 10; } while (n_ && at + 1 < max) out[at++] = d_[--n_]; } while (0)
     if (st.state == S_JOINED) {
         PUT("joined '"); PUT(st.ssid); PUT("' on channel "); NUM(st.channel);
-        PUT(st.open ? ", open; " : ", sealed with wpa2; ");
-        NUM(st.sealed_out); PUT(" frames sealed out, "); NUM(st.sealed_in); PUT(" unsealed in");
+        PUT(st.open ? ", open; " : ", wpa2; ");
+        NUM(st.sealed_out); PUT(" frames encrypted out, "); NUM(st.sealed_in); PUT(" decrypted in");
     } else if (st.state != S_IDLE) {
         PUT("joining '"); PUT(st.ssid); PUT("'");
-        PUT(st.state == S_AUTH ? ": greeting" : st.state == S_ASSOC ? ": asking in" : ": the handshake");
+        PUT(st.state == S_AUTH ? ": authenticating" : st.state == S_ASSOC ? ": associating" : ": handshake");
     } else {
         PUT("not joined");
         if (st.why[0]) { PUT("; last time: "); PUT(st.why); }
@@ -705,7 +705,7 @@ void wifi_poll(void)
         }
         break;
     case S_HANDSHAKE:
-        if (now - st.step_ns > 4 * SECOND) fail("the handshake did not finish; is the password right?");
+        if (now - st.step_ns > 4 * SECOND) fail("handshake timeout; wrong passphrase?");
         break;
     default:
         break;
@@ -786,7 +786,7 @@ void wifi_init(void)
     crypto_ok = selftest();
     kprintf("wifi: %s; %s\n",
             crypto_ok ? "self test passed -- sha1, pbkdf2, aes-ccm, key unwrap"
-                      : "self test FAILED -- no network will be sealed",
+                      : "self test FAILED -- wpa2 disabled",
             wifi_radio_name());
     st.auto_ns = time_ns() + 3 * SECOND;             /* let the air be heard first */
 }

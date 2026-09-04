@@ -192,7 +192,7 @@ static void pend_bytes(const u8 *d, u32 n)
     if (ssh.pend_len + n > sizeof(ssh.pend)) {
         /* More than the visitor can take before answering: the honest
          * end is a dropped visit, not silently dropped words. */
-        kprintf("ssh:  the visitor fell too far behind\n");
+        kprintf("ssh:  the client is too far behind; closing\n");
         door_close();
         return;
     }
@@ -334,7 +334,7 @@ static void visit_end(const char *why)
     if (ssh.user[0] && ssh.stage >= ST_OPEN) {
         char note[64];
         u32 at = 0;
-        const char *a = "the door closed behind ";
+        const char *a = "session closed for ";
         while (a[at]) { note[at] = a[at]; at++; }
         for (u32 i = 0; ssh.user[i] && at < sizeof(note) - 1; i++)
             note[at++] = ssh.user[i];
@@ -434,7 +434,7 @@ static bool on_kexinit(const u8 *p, u32 n)
               list_has(ec, ecn, "aes128-gcm@openssh.com") &&
               list_has(es, esn, "aes128-gcm@openssh.com");
     if (!ok) {
-        say_disconnect(3, "this door speaks curve25519-sha256, ssh-ed25519 and aes128-gcm@openssh.com, and nothing else");
+        say_disconnect(3, "supported: curve25519-sha256, ssh-ed25519, aes128-gcm@openssh.com");
         return false;
     }
     ssh.stage = ST_ECDH;
@@ -568,10 +568,10 @@ static bool on_userauth(const u8 *p, u32 n)
                  be32(blob + 15) == 32;
     if (!shape || !key_may_enter(blob + 19)) {
         if (settings_door_count() == 0)
-            kprintf("ssh:  %s knocked, but no key is named in the settings\n",
+            kprintf("ssh:  %s: no door key in the settings\n",
                     ssh.user);
         else
-            kprintf("ssh:  %s knocked with a key the door was not told about\n",
+            kprintf("ssh:  %s presented a key not in the settings\n",
                     ssh.user);
         auth_failure();
         return true;
@@ -613,7 +613,7 @@ static bool on_userauth(const u8 *p, u32 n)
     put32(msg + m, bn); m += 4; memcpy(msg + m, blob, bn); m += bn;
 
     if (!ed25519_verify(blob + 19, msg, m, sigblob + 19)) {
-        kprintf("ssh:  %s could not prove the key\n", ssh.user);
+        kprintf("ssh:  %s: signature check failed\n", ssh.user);
         auth_failure();
         return true;
     }
@@ -625,12 +625,12 @@ static bool on_userauth(const u8 *p, u32 n)
 
     u8 ip[4];
     door_peer(ip);
-    kprintf("ssh:  %s came in through the door from %u.%u.%u.%u\n",
+    kprintf("ssh:  %s logged in from %u.%u.%u.%u\n",
             ssh.user, ip[0], ip[1], ip[2], ip[3]);
     char note[64];
     u32 at = 0;
     for (u32 i = 0; ssh.user[i] && at < 30; i++) note[at++] = ssh.user[i];
-    const char *tail = " came in through the door";
+    const char *tail = " logged in";
     for (u32 i = 0; tail[i] && at < sizeof(note) - 1; i++) note[at++] = tail[i];
     note[at] = 0;
     journal_says("ssh", note);
@@ -801,7 +801,7 @@ static bool on_channel_open(const u8 *p, u32 n)
         pw_byte(MSG_CHANNEL_OPEN_FAIL);
         pw_u32(sender);
         pw_u32(ssh.chan ? 4 : 3);
-        pw_cstr(ssh.chan ? "one session is the whole door" : "only a session opens here");
+        pw_cstr(ssh.chan ? "only one session" : "only session channels");
         pw_cstr("");
         send_packet();
         return true;
@@ -929,7 +929,7 @@ static bool on_payload(const u8 *p, u32 n)
     u8 t = p[0];
 
     if (t == MSG_IGNORE || t == MSG_DEBUG || t == MSG_UNIMPLEMENTED) return true;
-    if (t == MSG_DISCONNECT) { door_close(); visit_end("the visitor left"); return true; }
+    if (t == MSG_DISCONNECT) { door_close(); visit_end("client disconnected"); return true; }
 
     switch (ssh.stage) {
     case ST_KEXINIT:
@@ -955,7 +955,7 @@ static bool on_payload(const u8 *p, u32 n)
             return true;
         }
         if (t == MSG_USERAUTH_REQUEST) return on_userauth(p, n);
-        if (t == MSG_KEXINIT) { say_disconnect(2, "this door does not rekey"); return false; }
+        if (t == MSG_KEXINIT) { say_disconnect(2, "rekeying is not supported"); return false; }
         return false;
     case ST_OPEN:
     case ST_LIVE:
@@ -977,7 +977,7 @@ static bool on_payload(const u8 *p, u32 n)
         if (t == MSG_CHANNEL_CLOSE) {
             if (!ssh.closing_sent) session_close();
             door_close();
-            visit_end("the visit ended");
+            visit_end("session ended");
             return true;
         }
         if (t == MSG_GLOBAL_REQUEST) {
@@ -992,7 +992,7 @@ static bool on_payload(const u8 *p, u32 n)
             }
             return true;
         }
-        if (t == MSG_KEXINIT) { say_disconnect(2, "this door does not rekey"); return false; }
+        if (t == MSG_KEXINIT) { say_disconnect(2, "rekeying is not supported"); return false; }
         return true;                              /* anything else: let it pass */
     default:
         return false;
@@ -1019,7 +1019,7 @@ static bool take_packet(void)
         ssh.in_len -= i + 1;
         if (l < 8 || memcmp(ssh.vc, "SSH-2.0-", 8) != 0) {
             door_close();
-            visit_end("the visitor does not speak ssh 2");
+            visit_end("not ssh 2");
             return false;
         }
         ssh.stage = ST_KEXINIT;
@@ -1028,7 +1028,7 @@ static bool take_packet(void)
 
     if (ssh.in_len < 4) return false;
     u32 L = be32(ssh.in);
-    if (L < 8 || L > 18000) { door_close(); visit_end("a bent packet length"); return false; }
+    if (L < 8 || L > 18000) { door_close(); visit_end("invalid packet length"); return false; }
 
     static u8 plain[18100];
     const u8 *payload;
@@ -1041,19 +1041,19 @@ static bool take_packet(void)
         if (!aes128_gcm_open(ssh.key_in, ssh.iv_in, ssh.in, 4, ssh.in + 4, L,
                              ssh.in + 4 + L, plain)) {
             door_close();
-            visit_end("a packet that would not open");
+            visit_end("packet authentication failed");
             return false;
         }
         iv_step(ssh.iv_in);
         u8 pad = plain[0];
-        if ((u32)pad + 1 > L) { door_close(); visit_end("bent padding"); return false; }
+        if ((u32)pad + 1 > L) { door_close(); visit_end("invalid padding"); return false; }
         payload = plain + 1;
         plen = L - 1 - pad;
     } else {
         whole = 4 + L;
         if (ssh.in_len < whole) return false;
         u8 pad = ssh.in[4];
-        if ((u32)pad + 1 > L) { door_close(); visit_end("bent padding"); return false; }
+        if ((u32)pad + 1 > L) { door_close(); visit_end("invalid padding"); return false; }
         memcpy(plain, ssh.in + 5, L - 1 - pad);
         payload = plain;
         plen = L - 1 - pad;
@@ -1063,9 +1063,9 @@ static bool take_packet(void)
     ssh.in_len -= whole;
 
     if (!on_payload(payload, plen) && ssh.stage != ST_IDLE) {
-        say_disconnect(2, "that was not expected here");
+        say_disconnect(2, "unexpected message");
         door_close();
-        visit_end("the visitor said something out of order");
+        visit_end("message out of order");
     }
     return ssh.stage != ST_IDLE;
 }
@@ -1083,7 +1083,7 @@ void ssh_service(void)
     if (ssh.stage == ST_IDLE) return;
 
     if (!door_alive()) {
-        visit_end("the visitor went away");
+        visit_end("connection lost");
         return;
     }
 
@@ -1106,7 +1106,7 @@ void ssh_service(void)
 
     if (ssh.in_len >= sizeof(ssh.in)) {
         door_close();
-        visit_end("the visitor sent more than a packet can hold");
+        visit_end("packet too large");
         return;
     }
 
@@ -1116,17 +1116,17 @@ void ssh_service(void)
     if (ssh.stage < ST_LIVE && now - ssh.born_ns > 40 * SECOND) {
         say_disconnect(2, "too slow");
         door_close();
-        visit_end("the visitor never got to the terminal");
+        visit_end("login timeout");
         return;
     }
     if (ssh.stage == ST_CLOSING && ssh.pend_len == 0 &&
         now - ssh.close_ns > 2 * SECOND) {
         door_close();
-        visit_end("the visit ended");
+        visit_end("session ended");
         return;
     }
     if (door_finished() && ssh.pend_len == 0) {
         door_close();
-        visit_end("the visitor hung up");
+        visit_end("connection closed");
     }
 }

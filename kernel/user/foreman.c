@@ -168,9 +168,9 @@ void user_foreman(u64 console, u64 inbox)
 
     /* say "i wait for tasks" */
     f_say(console,
-          P8('i',' ','w','a','i','t',' ','f'),
-          P8('o','r',' ','t','a','s','k','s'),
-          P8(' ',' ',' ',' ',' ',' ',' ',' '));
+          P8('w','a','i','t','i','n','g',' '),
+          P8('f','o','r',' ','t','a','s','k'),
+          P8('s',' ',' ',' ',' ',' ',' ',' '));
 
     for (;;) {
         if (msg_receive(inbox, buf) != 0) { f_yield(); continue; }
@@ -184,9 +184,9 @@ void user_foreman(u64 console, u64 inbox)
             wire = cap;
             /* say "the wire is in hand" */
             f_say(console,
-                  P8('t','h','e',' ','w','i','r','e'),
-                  P8(' ','i','s',' ','i','n',' ','h'),
-                  P8('a','n','d',' ',' ',' ',' ',' '));
+                  P8('w','i','r','e',' ','c','a','p'),
+                  P8('a','b','i','l','i','t','y',' '),
+                  P8('h','e','l','d',' ',' ',' ',' '));
             continue;
         }
 
@@ -199,7 +199,7 @@ void user_foreman(u64 console, u64 inbox)
                 f_say(console,
                       P8('t','h','e',' ','w','i','r','e'),
                       P8(' ','r','e','f','u','s','e','d'),
-                      P8(' ','m','e',' ',' ',' ',' ',' '));
+                      P8(' ','t','h','e',' ','t','a','s'));
                 break;
             }
             /* say "task handed to the desk" */
@@ -224,9 +224,9 @@ void user_foreman(u64 console, u64 inbox)
             if (!done) {
                 /* say "the desk stayed silent" */
                 f_say(console,
-                      P8('t','h','e',' ','d','e','s','k'),
-                      P8(' ','s','t','a','y','e','d',' '),
-                      P8('s','i','l','e','n','t',' ',' '));
+                      P8('n','o',' ','a','n','s','w','e'),
+                      P8('r',' ','f','r','o','m',' ','t'),
+                      P8('h','e',' ','d','e','s','k',' '));
                 break;
             }
 

@@ -1391,7 +1391,7 @@ static void lens_html(object *o, i32 x, i32 y, i32 w, i32 h, bool live)
 
     if (ask + 1 >= len) {
         text_at(x, by, x + w, may_ask
-                ? "nothing here yet. the first line asks; go fetches."
+                ? "empty. line 1 is the address; 'go' fetches it."
                 : "nothing here yet.", C_FAINT);
         html_rows = 0;
         if (live) { link_spot_count = 0; field_spot_count = 0; }
@@ -1643,7 +1643,7 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
 
         u32 nfound = pipe_found_count();
         if (pipe_scanning() && nfound == 0) {
-            if (ROW_ON) text_at(x, ty, x + w, "  listening...", C_FAINT);
+            if (ROW_ON) text_at(x, ty, x + w, "  scanning...", C_FAINT);
             ty += ROW;
         }
         for (u32 i = 0; i < nfound; i++) {
@@ -3205,7 +3205,7 @@ static void draw_all(void)
             }
             ex[exn] = 0;
 
-            at = put(line, 0, "carrying \"");
+            at = put(line, 0, "held: \"");
             at = put(line, at, ex);
             if (held_len > 18) at = put(line, at, "...");
             at = put(line, at, "\"");
@@ -3366,14 +3366,14 @@ static void draw_all(void)
         at = put(line, at, "click anything you can see.  arrows move; "
                            "the wheel scrolls.  ");
         if (sendto_open && sendto_ask)
-            at = put(line, at, "click a machine and it does the work. "
-                               "esc keeps it here.");
+            at = put(line, at, "click a machine to run the task there. "
+                               "esc cancels.");
         else if (sendto_open)
-            at = put(line, at, "click a machine and it goes there. "
-                               "esc keeps it here.");
+            at = put(line, at, "click a machine to send it there. "
+                               "esc cancels.");
         else if (focus() == pipe_arrivals() && nav.at_generation == 0)
-            at = put(line, at, "scan finds machines; "
-                               "click one and send reaches it.");
+            at = put(line, at, "scan lists machines; "
+                               "click one to set it as peer.");
         else if (nav.mode == SHELL_GRAPH)
             at = put(line, at, "drag the empty ground to move the map; "
                                "the wheel zooms.");
@@ -3381,12 +3381,12 @@ static void draw_all(void)
             at = put(line, at, "two walks: the left one writes, "
                                "the right one reads.");
         else if (nav.mode == SHELL_TERM)
-            at = put(line, at, "the keys go to the terminal; "
-                               "'help' names its words.");
+            at = put(line, at, "keys go to the terminal; "
+                               "'help' lists the words.");
         else if (nav.mode == SHELL_INDEX)
-            at = put(line, at, "typing searches what you can reach.");
+            at = put(line, at, "typing filters the index.");
         else if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
-            at = put(line, at, "point it at something to hand it over.");
+            at = put(line, at, "point it at an object to pass a reference.");
         else if (obj_type(focus()) == TYPE_PICTURE &&
                  (focus_rights() & CAP_WRITE) && nav.at_generation == 0)
             at = put(line, at, "pick an ink, then draw.");
@@ -3462,7 +3462,7 @@ static void draw_all(void)
             bool alit = is_hovered(HOT_SCAN, 1);
             i32 ax = px + pw2 - 10 * GLYPH_W - 8;
             if (alit) fb_rect(ax - 4, ty2 - 3, 10 * GLYPH_W + 8, ROW, C_EDGE);
-            text_at(ax, ty2, px + pw2, "look again",
+            text_at(ax, ty2, px + pw2, "scan again",
                     alit ? C_TEXT : C_ACCENT);
             hot_add(ax - 4, ty2 - 3, 10 * GLYPH_W + 8, ROW, HOT_SCAN, 1);
         }
@@ -3470,9 +3470,8 @@ static void draw_all(void)
 
         if (nfound == 0) {
             text_at(px + 8, ty2, px + pw2,
-                    pipe_scanning() ? "listening..."
-                                    : "nobody answered -- is the other "
-                                      "machine on?",
+                    pipe_scanning() ? "scanning..."
+                                    : "no answer",
                     C_FAINT);
             ty2 += ROW;
         }
@@ -4583,7 +4582,7 @@ static void act_on(const hot_region *r)
     case HOT_END:
         if ((focus_rights() & CAP_GRANT) && nav.at_generation == 0 &&
             proc_end(focus())) {
-            journal_says("system", "a program was ended by hand");
+            journal_says("system", "a program was ended");
             nav.changes++;
         }
         nav.redraw = true;
@@ -4610,7 +4609,7 @@ static void act_on(const hot_region *r)
         else put(base, 0, "home");
         base[19] = 0;
         if (term_build_start(f, base))
-            journal_says("build", "building in the background; each text is named here as it is done");
+            journal_says("build", "building in the background; each unit is listed here as it is compiled");
         else
             journal_says("build", "a build is running already");
         nav.redraw = true;
@@ -4635,11 +4634,11 @@ static void act_on(const hot_region *r)
         label_of(holder, nav.via[nav.depth - 1], f, base, sizeof(base));
         base[19] = 0;
 
-        if (term_building()) { journal_says("compile", "a build is running; the tools are busy until it is done"); break; }
+        if (term_building()) { journal_says("compile", "a build is running; wait for it to finish"); break; }
         static char *text;
         if (!text) text = (char *)lang_big_alloc(4u << 20);
         u8 *image = lang_out_buffer();
-        if (!text || !image) { journal_says("compile", "there is no room for the tools' tables"); break; }
+        if (!text || !image) { journal_says("compile", "out of memory for the tool tables"); break; }
         char err[112];
         const u8 *src = (const u8 *)obj_data(f);
         u64 slen = text_len(src, obj_size(f));
@@ -4672,7 +4671,7 @@ static void act_on(const hot_region *r)
         u32 kind = 0;
         i64 got = lang_build_text(src, slen, gnu, image, LANG_OUT_MAX, &kind, err, sizeof(err));
         if (got < 0) {
-            journal_says(r->kind == HOT_COMPILE ? "the assembler refused what the compiler made"
+            journal_says(r->kind == HOT_COMPILE ? "the assembler rejected the compiler's output"
                                                 : "assemble", err);
             nav.redraw = true;
             break;
@@ -4690,8 +4689,8 @@ static void act_on(const hot_region *r)
         }
         obj_release(made);
         journal_says(r->kind == HOT_COMPILE ? "compile" : "assemble",
-                     kind == LANG_IMAGE ? "an image lies beside the text; run it"
-                                        : "an object lies beside the text; it waits for other texts' names -- link joins them");
+                     kind == LANG_IMAGE ? "an image was created beside the text; run it"
+                                        : "an object was created beside the text; it has undefined names; 'link' resolves them");
         nav.changes++;
         nav.redraw = true;
         break;
@@ -4754,8 +4753,8 @@ static void act_on(const hot_region *r)
             }
         }
         obj_release(made);
-        journal_says("system", placed_it ? "a copy lies beside it"
-                             : "nowhere writable to lay the copy");
+        journal_says("system", placed_it ? "a copy was created beside it"
+                             : "no writable list for the copy");
         nav.changes++;
         nav.redraw = true;
         break;
@@ -4799,8 +4798,8 @@ static void act_on(const hot_region *r)
                      : bundle_unpack(focus());
         if (!made) {
             journal_says("system", r->kind == HOT_PACK
-                         ? "it does not fit into one bundle"
-                         : "these bytes do not unfold");
+                         ? "the bundle limit of 64 KiB is exceeded"
+                         : "these bytes are not a bundle");
             nav.redraw = true;
             break;
         }
@@ -4832,9 +4831,9 @@ static void act_on(const hot_region *r)
         }
         obj_release(made);
         journal_says("system", !placed_it
-                     ? "nowhere writable to lay it down"
-                     : r->kind == HOT_PACK ? "packed into one thing"
-                                           : "unfolded into a list");
+                     ? "no writable list for it"
+                     : r->kind == HOT_PACK ? "packed into one bytes object"
+                                           : "unpacked into a list");
         nav.changes++;
         nav.redraw = true;
         break;

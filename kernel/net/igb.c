@@ -284,24 +284,24 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
             /* No link, and the card says its wire chip sleeps when there
              * is none: it is asleep, and asking it now is asking a wall.
              * Nothing is plugged in here; pass over without a word. */
-            kprintf("net:  %s at %02x:%02x.%u: no link, and its wire chip is asleep; "
-                    "passed over for now\n", k->name, dev->bus, dev->device, dev->function);
+            kprintf("net:  %s at %02x:%02x.%u: no link and the phy is powered down; "
+                    "skipped\n", k->name, dev->bus, dev->device, dev->function);
             return false;
         }
-        kprintf("net:  %s at %02x:%02x.%u: no link; asking the wire's chip at address %u\n",
+        kprintf("net:  %s at %02x:%02x.%u: no link; querying the phy at address %u\n",
                 k->name, dev->bus, dev->device, dev->function, phy_at >> 21);
         u16 pc = phy_read(PHY_CTRL);
-        kprintf("net:  %s: the chip %s\n", k->name,
-                pc == 0xFFFF ? "did not answer" : "answered; asked to agree a speed");
+        kprintf("net:  %s: the phy %s\n", k->name,
+                pc == 0xFFFF ? "did not answer" : "answered; autonegotiation restarted");
         if (pc != 0xFFFF) phy_write(PHY_CTRL, (u16)(pc | PHY_AUTONEG | PHY_RESTART));
         for (u32 i = 0; i < 30 && !(rr(R_STATUS) & STATUS_LU); i++) wait_ms(50);
         if (!(rr(R_STATUS) & STATUS_LU)) {
-            kprintf("net:  %s: still no link; passed over for now\n", k->name);
+            kprintf("net:  %s: still no link; skipped\n", k->name);
             return false;
         }
     }
 
-    kprintf("net:  %s at %02x:%02x.%u: taking it\n",
+    kprintf("net:  %s at %02x:%02x.%u: selected\n",
             k->name, dev->bus, dev->device, dev->function);
 
     wr(R_IMC, 0xFFFFFFFFu);
@@ -382,18 +382,18 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
         if (phpm & PHPM_GO_LINK_D) {
             wr(R_PHPM, phpm & ~PHPM_GO_LINK_D);
             wait_ms(10);
-            kprintf("net:  %s: its wire chip was asleep; woken\n", k->name);
+            kprintf("net:  %s: the phy was powered down; woken\n", k->name);
         }
     }
 
     u16 pc = phy_read(PHY_CTRL);
     if (pc != 0xFFFF) {
         phy_write(PHY_CTRL, (u16)(pc | PHY_AUTONEG | PHY_RESTART));
-        kprintf("net:  %s: the wire's chip answers at address %u; asked to agree a speed\n",
+        kprintf("net:  %s: the phy answers at address %u; autonegotiation restarted\n",
                 k->name, phy_at >> 21);
     } else {
-        kprintf("net:  %s: the wire's chip did not answer at address %u; "
-                "the link is whatever the firmware left\n", k->name, phy_at >> 21);
+        kprintf("net:  %s: the phy did not answer at address %u; "
+                "link left as set by the firmware\n", k->name, phy_at >> 21);
     }
 
     /* Agreeing takes a moment even between two ends that are only
@@ -463,7 +463,7 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
     kprintf("net:  %s at %02x:%02x.%u, %02x:%02x:%02x:%02x:%02x:%02x, %s\n",
             k->name, dev->bus, dev->device, dev->function,
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-            (rr(R_STATUS) & STATUS_LU) ? "a cable is in it" : "no cable");
+            (rr(R_STATUS) & STATUS_LU) ? "link up" : "no link");
 
     up = true;
     nic_register(&igb_ops);

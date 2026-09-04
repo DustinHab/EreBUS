@@ -164,7 +164,7 @@ static bool global_add(const char *name, u64 addr, u32 ui)
 {
     gsym *old = global_find(name);
     if (old) {
-        fail(name, " is laid down twice: in ", units[old->unit].name, NULL);
+        fail(name, " is defined twice: in ", units[old->unit].name, NULL);
         if (errmax) {
             /* and in whom else: room permitting */
             u32 at = (u32)strlen(errp);
@@ -358,7 +358,7 @@ static bool resolve(const plan *p, unit *u, u32 si, u64 *addr)
     gsym *g = global_find(nm);
     if (g) { *addr = g->addr; return true; }
     if (layout_symbol(p, nm, addr)) return true;
-    fail(u->name, " wants ", nm, ", and no text lays it down");
+    fail(u->name, " needs ", nm, ", which no object defines");
     return false;
 }
 
@@ -370,12 +370,12 @@ static bool apply(u8 *out, const plan *p, u32 n)
             const u8 *rr = u->rels + r * 24;
             u32 sec = rd32(rr), off = rd32(rr + 4), si = rd32(rr + 8), kind = rd32(rr + 12);
             i64 addend = (i64)rd64(rr + 16);
-            if (off + (kind == ASM_R_ABS64 ? 8 : 4) > u->laid[sec]) { fail(u->name, ": a place that wants a name lies past its bytes", NULL, NULL); return false; }
+            if (off + (kind == ASM_R_ABS64 ? 8 : 4) > u->laid[sec]) { fail(u->name, ": a relocation lies past the section", NULL, NULL); return false; }
             u64 P = u->base[sec] + off;
             u64 S;
             if (!resolve(p, u, si, &S)) return false;
             u8 *at = place(out, p, sec, P);
-            if (!at) { fail(u->name, ": a place that wants a name lies where nothing is written", NULL, NULL); return false; }
+            if (!at) { fail(u->name, ": a relocation in an empty section", NULL, NULL); return false; }
             if (kind == ASM_R_REL32) {
                 i64 v = (i64)(S + (u64)addend - P);
                 if (v < -2147483648LL || v > 2147483647LL) { fail(u->name, ": ", sym_name(u, si), " is too far away for a relative reference"); return false; }
@@ -386,7 +386,7 @@ static bool apply(u8 *out, const plan *p, u32 n)
                 i64 v = (i64)(S + (u64)addend);
                 if (v < -2147483648LL || v > 2147483647LL) { fail(u->name, ": ", sym_name(u, si), "'s address does not fit a doubleword"); return false; }
                 wr32(at, (u32)(i32)v);
-            } else { fail(u->name, ": a place wants a name in a way i do not know", NULL, NULL); return false; }
+            } else { fail(u->name, ": unknown relocation kind", NULL, NULL); return false; }
         }
     }
     return !bad;
@@ -411,7 +411,7 @@ static i64 write_program(u8 *out, u64 max, plan *p, u32 n)
     u64 zero_len = p->data_end - p->data_laid_end;
     if (code_len == 0) { fail("there is no code in it", NULL, NULL, NULL); return -1; }
     u64 total = 20 + code_len + data_len;
-    if (total > max) { fail("the image is larger than the room for it", NULL, NULL, NULL); return -1; }
+    if (total > max) { fail("the image exceeds the buffer", NULL, NULL, NULL); return -1; }
     memset(out, 0, total);
     copy_bytes(out, p, n);
     if (!apply(out, p, n)) return -1;
@@ -473,7 +473,7 @@ static void write_names(u8 *out, const plan *p, u32 n)
 static i64 write_kernel(u8 *out, u64 max, plan *p, u32 n)
 {
     u64 total = p->seg_off[2] + p->seg_filesz[2];
-    if (total > max) { fail("the kernel is larger than the room for it", NULL, NULL, NULL); return -1; }
+    if (total > max) { fail("the kernel exceeds the buffer", NULL, NULL, NULL); return -1; }
     if (p->text_end == p->text_start) { fail("there is no code in it", NULL, NULL, NULL); return -1; }
     memset(out, 0, total);
     copy_bytes(out, p, n);
@@ -481,7 +481,7 @@ static i64 write_kernel(u8 *out, u64 max, plan *p, u32 n)
     write_names(out, p, n);
 
     gsym *start = global_find("_start");
-    if (!start) { fail("a kernel begins at _start, and nothing lays that name down", NULL, NULL, NULL); return -1; }
+    if (!start) { fail("no _start defined", NULL, NULL, NULL); return -1; }
 
     /* The ELF head: 64-bit, little-endian, an executable for x86-64,
      * three program headers right behind it, no section headers. */
@@ -528,13 +528,13 @@ i64 ld_link(const ld_unit *in, u32 n, u32 layout, u8 *out, u64 max,
     if (!units) units = (unit *)lang_big_alloc(sizeof(unit) * UNITS_MAX);
     if (!gsyms) gsyms = (gsym *)lang_big_alloc(sizeof(gsym) * GSYMS_MAX);
     if (!hash)  hash  = (u32 *)lang_big_alloc(sizeof(u32) * HASH_SIZE);
-    if (!units || !gsyms || !hash) { fail("there is no room for the linker's tables", NULL, NULL, NULL); return -1; }
+    if (!units || !gsyms || !hash) { fail("out of memory for the linker's tables", NULL, NULL, NULL); return -1; }
     if (n == 0) { fail("nothing to link", NULL, NULL, NULL); return -1; }
     if (n > UNITS_MAX) { fail("too many objects at once", NULL, NULL, NULL); return -1; }
 
     for (u32 i = 0; i < n; i++)
         if (!parse_unit(&units[i], in[i].data, in[i].len, in[i].name ? in[i].name : "an object")) {
-            fail(in[i].name ? in[i].name : "one of them", " is not an object the assembler made", NULL, NULL);
+            fail(in[i].name ? in[i].name : "one of them", " is not an object file", NULL, NULL);
             return -1;
         }
 
@@ -619,13 +619,13 @@ i64 lang_build_text(const u8 *src, u64 len, bool gnu, u8 *out, u64 max,
                     u32 *kind, char *err, u32 errmax_)
 {
     if (!objbuf) objbuf = (u8 *)lang_big_alloc(OBJ_MAX);
-    if (!objbuf) { if (errmax_) { const char *m = "there is no room for the object"; u32 k = 0; while (m[k] && k + 1 < errmax_) { err[k] = m[k]; k++; } err[k] = 0; } return -1; }
+    if (!objbuf) { if (errmax_) { const char *m = "out of memory for the object"; u32 k = 0; while (m[k] && k + 1 < errmax_) { err[k] = m[k]; k++; } err[k] = 0; } return -1; }
     i64 on = gnu ? asm_assemble_gnu(src, len, objbuf, OBJ_MAX, err, errmax_)
                  : asm_assemble(src, len, objbuf, OBJ_MAX, err, errmax_);
     if (on < 0) return -1;
 
     if (ld_object_wants(objbuf, (u64)on, NULL, 0) > 0) {
-        if ((u64)on > max) { if (errmax_) { const char *m = "the object is larger than the room for it"; u32 k = 0; while (m[k] && k + 1 < errmax_) { err[k] = m[k]; k++; } err[k] = 0; } return -1; }
+        if ((u64)on > max) { if (errmax_) { const char *m = "the object exceeds the buffer"; u32 k = 0; while (m[k] && k + 1 < errmax_) { err[k] = m[k]; k++; } err[k] = 0; } return -1; }
         memcpy(out, objbuf, (u64)on);
         if (kind) *kind = LANG_OBJECT;
         return on;

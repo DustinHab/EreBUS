@@ -459,7 +459,7 @@ bool proc_end(object *program)
     process *p = ((program_ref *)obj_data(program))->p;
     if (!p->first) return false;
 
-    kprintf("proc: %llu (%s) is being ended by hand\n",
+    kprintf("proc: %llu (%s) is being ended\n",
             p->id, p->name);
     thread_condemn(p->first);
     return true;
@@ -569,9 +569,9 @@ static void proc_reap(void *arg)
 
     addrspace_destroy(p->pml4);
 
-    kprintf("proc: %llu (%s) ended; everything it held has been let go\n",
+    kprintf("proc: %llu (%s) ended; all capabilities released\n",
             p->id, p->name);
-    journal_says(p->name, "ended; everything it held has been let go");
+    journal_says(p->name, "ended; all capabilities released");
 
     p->magic = 0;
     kfree(p);
@@ -656,8 +656,8 @@ void proc_fault(const char *what, virt_addr where)
 
     kprintf("proc: thread %llu (%s) faulted in ring 3: %s at %p\n",
             thread_id(t), thread_name(t), what, (void *)where);
-    kprintf("proc: ending that thread; the rest of the system continues\n");
-    journal_says(thread_name(t), "reached where it may not; it was ended");
+    kprintf("proc: ending the thread; the system continues\n");
+    journal_says(thread_name(t), "faulted; ended");
 
     /* This is the difference the address space buys. A program reaching
      * where it should not is one program's problem, reported and over

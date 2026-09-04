@@ -129,7 +129,7 @@ static bool mount_on(fat_vol *v, i32 disk, const char *what)
                      ((u32)sec[456] << 16) | ((u32)sec[457] << 24);
         if (pstart && vol_open(v, pstart)) goto up;
     }
-    kprintf("fat:  the %s does not speak fat32\n", what);
+    kprintf("fat:  the %s is not fat32\n", what);
     return false;
 
 up:
@@ -662,7 +662,7 @@ u32 fat_take_in(object *into)
     struct take_ctx ctx = { into, 0, 0 };
     walk_dir(&xchg, xchg.root_cluster, take_visit, &ctx);
     if (ctx.skipped)
-        kprintf("fat:  %u files were too big to carry\n", ctx.skipped);
+        kprintf("fat:  %u files exceeded the size limit\n", ctx.skipped);
     kprintf("fat:  took %u files in\n", ctx.taken);
     if (ctx.taken) obj_touch(into);        /* the graph changed; the next quiet moment writes it */
     return ctx.taken;
@@ -758,13 +758,13 @@ static bool put_count(u32 dir, u8 value)
 bool fat_install_kernel(const u8 *elf, u64 len, char *why, u32 max)
 {
     if (!elf || len < 64 || elf[0] != 0x7F || elf[1] != 'E' || elf[2] != 'L' || elf[3] != 'F') {
-        say_why(why, max, "that is not a kernel: it does not begin the way an elf does");
+        say_why(why, max, "not an elf image");
         return false;
     }
-    if (len > WRITE_MAX) { say_why(why, max, "the kernel is too large to lay down"); return false; }
+    if (len > WRITE_MAX) { say_why(why, max, "the kernel exceeds the size limit"); return false; }
     u32 dir;
     if (!boot_folder(&dir)) {
-        say_why(why, max, "the boot disk, or its erebus folder, is not to be found");
+        say_why(why, max, "boot disk or its erebus folder not found");
         return false;
     }
     u32 need = (u32)((len + bootv.spc * 512 - 1) / (bootv.spc * 512));
@@ -776,7 +776,7 @@ bool fat_install_kernel(const u8 *elf, u64 len, char *why, u32 max)
     /* The new one first, under a name of its own; nothing the next
      * start reads has changed yet. */
     u8 short83[11];
-    if (!dir_delete(&bootv, dir, "kernel.new")) { say_why(why, max, "an old kernel.new would not go"); return false; }
+    if (!dir_delete(&bootv, dir, "kernel.new")) { say_why(why, max, "kernel.new could not be deleted"); return false; }
     make_short("kernel.new", short83);
     if (!write_file_in(&bootv, dir, short83, elf, (u32)len)) {
         say_why(why, max, "the kernel could not be written; the boot disk is unchanged");
@@ -785,15 +785,15 @@ bool fat_install_kernel(const u8 *elf, u64 len, char *why, u32 max)
 
     /* Then the names turn: the running kernel steps aside as
      * kernel.old, the new one takes its place. */
-    if (!dir_delete(&bootv, dir, "kernel.old")) { say_why(why, max, "the older kernel.old would not go"); return false; }
+    if (!dir_delete(&bootv, dir, "kernel.old")) { say_why(why, max, "kernel.old could not be deleted"); return false; }
     dir_entry e;
     if (dir_find(&bootv, dir, "kernel.elf", &e) &&
         !dir_rename(&bootv, dir, "kernel.elf", "kernel.old")) {
-        say_why(why, max, "the running kernel could not step aside");
+        say_why(why, max, "kernel.elf could not be renamed to kernel.old");
         return false;
     }
     if (!dir_rename(&bootv, dir, "kernel.new", "kernel.elf")) {
-        say_why(why, max, "the new kernel could not take the name; kernel.new lies there still");
+        say_why(why, max, "kernel.new could not be renamed to kernel.elf");
         return false;
     }
     put_count(dir, 0);
@@ -809,11 +809,11 @@ bool fat_install_kernel(const u8 *elf, u64 len, char *why, u32 max)
 bool fat_install_loader(const u8 *pe, u64 len, char *why, u32 max)
 {
     if (!pe || len < 64 || pe[0] != 'M' || pe[1] != 'Z') {
-        say_why(why, max, "that is not a loader: it does not begin the way the firmware's programs do");
+        say_why(why, max, "not a pe image");
         return false;
     }
-    if (len > WRITE_MAX) { say_why(why, max, "the loader is too large to lay down"); return false; }
-    if (!fat_boot_present()) { say_why(why, max, "the boot disk is not to be found"); return false; }
+    if (len > WRITE_MAX) { say_why(why, max, "the loader exceeds the size limit"); return false; }
+    if (!fat_boot_present()) { say_why(why, max, "boot disk not found"); return false; }
 
     dir_entry e;
     if (!dir_find(&bootv, bootv.root_cluster, "EFI", &e) || !(e.attr & 0x10) || e.cluster < 2) {
@@ -828,15 +828,15 @@ bool fat_install_loader(const u8 *pe, u64 len, char *why, u32 max)
     u32 boot = e.cluster;
 
     u8 short83[11];
-    if (!dir_delete(&bootv, boot, "BOOTX64.NEW")) { say_why(why, max, "an old BOOTX64.NEW would not go"); return false; }
+    if (!dir_delete(&bootv, boot, "BOOTX64.NEW")) { say_why(why, max, "BOOTX64.NEW could not be deleted"); return false; }
     make_short("BOOTX64.NEW", short83);
     if (!write_file_in(&bootv, boot, short83, pe, (u32)len)) {
         say_why(why, max, "the loader could not be written; the boot disk is unchanged");
         return false;
     }
-    if (!dir_delete(&bootv, boot, "BOOTX64.EFI")) { say_why(why, max, "the old loader would not go; BOOTX64.NEW lies beside it"); return false; }
+    if (!dir_delete(&bootv, boot, "BOOTX64.EFI")) { say_why(why, max, "BOOTX64.EFI could not be deleted; BOOTX64.NEW remains"); return false; }
     if (!dir_rename(&bootv, boot, "BOOTX64.NEW", "BOOTX64.EFI")) {
-        say_why(why, max, "the new loader could not take the name; BOOTX64.NEW lies there still");
+        say_why(why, max, "BOOTX64.NEW could not be renamed to BOOTX64.EFI");
         return false;
     }
     fat_flush(&bootv);

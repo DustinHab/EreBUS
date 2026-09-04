@@ -138,7 +138,7 @@ static void session_begin(term_session *s)
     while (h[i]) { s->names[0][i] = h[i]; i++; }
     s->names[0][i] = 0;
     s->depth = 1;
-    t_say(s, "the terminal.  'help' names the words it knows.");
+    t_say(s, "terminal.  'help' lists the words.");
 }
 
 void term_init(object *root, u32 root_rights)
@@ -286,9 +286,9 @@ static bool resolve(term_session *s, const char *what, spot *sp)
     }
     i64 i = slot_named(s, what);
     if (i < 0) {
-        t_puts(s, "nothing here is called ");
+        t_puts(s, "no reference here is called ");
         t_puts(s, what);
-        t_say(s, ".  'look' shows the names.");
+        t_say(s, ".  'look' lists them.");
         return false;
     }
     sp->o = obj_get_slot(focus(s), (u64)i);
@@ -296,7 +296,7 @@ static bool resolve(term_session *s, const char *what, spot *sp)
     sp->nm = shown_name(focus(s), (u64)i);
     sp->slot = i;
     if (sp->r == 0) {
-        t_say(s, "that reference grants nothing in your hand.");
+        t_say(s, "that reference grants no rights.");
         return false;
     }
     return true;
@@ -412,8 +412,8 @@ static void cmd_where(term_session *s)
 
 static void cmd_go(term_session *s, const char *what)
 {
-    if (!what[0]) { t_say(s, "go where?  'look' shows the names."); return; }
-    if (s->depth >= TERM_DEPTH) { t_say(s, "deep enough; 'back' first."); return; }
+    if (!what[0]) { t_say(s, "go where?  'look' lists the references."); return; }
+    if (s->depth >= TERM_DEPTH) { t_say(s, "maximum depth reached; 'back' first."); return; }
 
     spot sp;
     if (!resolve(s, what, &sp)) return;
@@ -431,7 +431,7 @@ static void cmd_go(term_session *s, const char *what)
 
 static void cmd_back(term_session *s)
 {
-    if (s->depth <= 1) { t_say(s, "this is the beginning."); return; }
+    if (s->depth <= 1) { t_say(s, "already at the start."); return; }
     s->depth--;
     obj_release(s->node[s->depth]);
     s->node[s->depth] = NULL;
@@ -502,7 +502,7 @@ static void cmd_read(term_session *s, const char *what)
         t_dec(s, w);
         t_puts(s, " by ");
         t_dec(s, h);
-        t_say(s, ".  the screen's picture lens shows it.");
+        t_say(s, ".  the picture lens on the screen shows it.");
         return;
     }
     if (t == TYPE_PROGRAM) {
@@ -511,14 +511,14 @@ static void cmd_read(term_session *s, const char *what)
         t_say(s, ".  'look' shows what it holds.");
         return;
     }
-    t_say(s, "'look' is the way to read this kind.");
+    t_say(s, "use 'look' for this kind.");
 }
 
 static void cmd_write(term_session *s, const char *words)
 {
     object *f = focus(s);
-    if (obj_type(f) != TYPE_TEXT) { t_say(s, "only a text takes writing; 'go' to one first."); return; }
-    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "this one is read-only in your hand."); return; }
+    if (obj_type(f) != TYPE_TEXT) { t_say(s, "only a text can be written; 'go' to one first."); return; }
+    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "this reference is read-only."); return; }
     if (!words[0]) { t_say(s, "write what?"); return; }
 
     u8 *d = (u8 *)obj_data(f);
@@ -553,17 +553,17 @@ static void cmd_make(term_session *s, const char *what)
     else { t_say(s, "make text <name>, or make list <name>."); return; }
     if (!*nm) { t_say(s, "name it."); return; }
 
-    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "you may not lay things in here."); return; }
+    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "no write right on this list."); return; }
 
     object *made = obj_create(t, t == TYPE_TEXT ? 3000 : 0,
                               t == TYPE_LIST ? 4 : 0);
-    if (!made) { t_say(s, "nothing came of it; memory is short."); return; }
+    if (!made) { t_say(s, "out of memory."); return; }
     i64 at = lay_here(s, made, CAP_READ | CAP_WRITE | CAP_GRANT, nm);
     obj_release(made);                /* the slot holds it now */
     if (at < 0) { t_say(s, "no room for another reference here."); return; }
 
     t_puts(s, nm);
-    t_puts(s, "  lies here now, slot ");
+    t_puts(s, "  created here, slot ");
     t_dec(s, (u64)at);
     t_end(s);
 }
@@ -597,12 +597,12 @@ static void cmd_receive(term_session *s, const char *what)
     p += 3;
     while (*p == ' ') p++;
     if (!*p) { t_say(s, "name it."); return; }
-    if (n == 0 || n > RECEIVE_MAX) { t_say(s, "between one byte and eight million, please."); return; }
-    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "you may not lay things in here."); return; }
-    if (s->take_o) { t_say(s, "bytes are still coming for the last one."); return; }
+    if (n == 0 || n > RECEIVE_MAX) { t_say(s, "the count must be between 1 and 8388608."); return; }
+    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "no write right on this list."); return; }
+    if (s->take_o) { t_say(s, "the previous receive is still in progress."); return; }
 
     object *made = obj_create(TYPE_TEXT, n + 1, 0);
-    if (!made) { t_say(s, "nothing came of it; memory is short."); return; }
+    if (!made) { t_say(s, "out of memory."); return; }
     memset(obj_data(made), 0, n + 1);
     i64 at = lay_here(s, made, CAP_READ | CAP_WRITE | CAP_GRANT, p);
     if (at < 0) { obj_release(made); t_say(s, "no room for another reference here."); return; }
@@ -635,7 +635,7 @@ u32 term_take_bytes(term_session *s, const u8 *d, u32 n)
         dst[s->take_size] = 0;
         obj_touch(s->take_o);
         t_puts(s, s->take_name);
-        t_puts(s, "  lies here now, ");
+        t_puts(s, "  created here, ");
         t_dec(s, s->take_size);
         t_say(s, " bytes.");
         obj_release(s->take_o);
@@ -651,7 +651,7 @@ static void cmd_copy(term_session *s, const char *what)
     if (!resolve(s, what, &sp)) return;
     if (sp.slot < 0) return;
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
-    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "the copy would lie here, and you may not lay things in here."); return; }
+    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "no write right on this list for the copy."); return; }
 
     type_id t = obj_type(sp.o);
     object *made = NULL;
@@ -672,7 +672,7 @@ static void cmd_copy(term_session *s, const char *what)
         t_say(s, "this kind cannot be copied.");
         return;
     }
-    if (!made) { t_say(s, "nothing came of it; memory is short."); return; }
+    if (!made) { t_say(s, "out of memory."); return; }
 
     char nm[NAME_SHOWN];
     u32 n = 0;
@@ -685,7 +685,7 @@ static void cmd_copy(term_session *s, const char *what)
     obj_release(made);
     if (at < 0) { t_say(s, "no room to lay the copy here."); return; }
     t_puts(s, nm);
-    t_say(s, "  lies beside it.");
+    t_say(s, "  created beside it.");
 }
 
 static void cmd_rename(term_session *s, const char *rest)
@@ -698,7 +698,7 @@ static void cmd_rename(term_session *s, const char *rest)
     spot sp;
     if (!resolve(s, a, &sp)) return;
     if (sp.slot < 0) return;
-    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "the name lives on this holder, and you may not change it."); return; }
+    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "the name is on this list, which you may not write."); return; }
     obj_set_slot_name(focus(s), (u64)sp.slot, b);
     obj_touch(focus(s));
     t_puts(s, a);
@@ -714,8 +714,8 @@ static void cmd_letgo(term_session *s, const char *what)
     if (!what[0]) { t_say(s, "let go of which?"); return; }
     spot sp;
     if (!resolve(s, what, &sp)) return;
-    if (sp.slot < 0) { t_say(s, "stand beside it, not on it: 'back' first."); return; }
-    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "you may not take things out of here."); return; }
+    if (sp.slot < 0) { t_say(s, "'let go' works from the list holding it: 'back' first."); return; }
+    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "no write right on this list."); return; }
 
     /* The name goes with it; copied before anything grows. */
     char nm[NAME_SHOWN];
@@ -771,7 +771,7 @@ static void cmd_letgo(term_session *s, const char *what)
     obj_set_slot(focus(s), (u64)sp.slot, NULL, 0);
     obj_set_slot_name(focus(s), (u64)sp.slot, NULL);
     obj_touch(focus(s));
-    t_say(s, final ? "let go, for good." : "it lies in the bin now.");
+    t_say(s, final ? "deleted." : "moved to the bin.");
 }
 
 /* ------------------------------------------------------------------ */
@@ -794,7 +794,7 @@ static bool gnu_named(const char *nm)
 static void lay_made(term_session *s, const char *base, const u8 *bytes, u64 len, u32 kind)
 {
     object *made = obj_create(TYPE_BYTES, len, 0);
-    if (!made) { t_say(s, "nothing came of it; memory is short."); return; }
+    if (!made) { t_say(s, "out of memory."); return; }
     memcpy(obj_data(made), bytes, len);
     char nm[NAME_SHOWN + 8];
     u32 n = 0;
@@ -806,15 +806,15 @@ static void lay_made(term_session *s, const char *base, const u8 *bytes, u64 len
     obj_release(made);
     if (at < 0) { t_say(s, "no room to lay it here."); return; }
     t_puts(s, nm);
-    t_puts(s, "  lies beside it: ");
+    t_puts(s, "  created beside it: ");
     t_dec(s, len);
     if (kind == LANG_IMAGE) { t_say(s, " bytes of image.  'run' it."); return; }
     char wants[120];
     ld_object_wants(bytes, len, wants, sizeof(wants));
-    t_say(s, " bytes of object.  it waits for other texts' names:");
+    t_say(s, " bytes of object; undefined names:");
     t_puts(s, "  ");
     t_say(s, wants);
-    t_say(s, "  'link' joins objects; 'build' makes them from a list of texts.");
+    t_say(s, "  'link' joins objects; 'build' compiles a list of texts.");
 }
 
 static void cmd_assemble(term_session *s, const char *what)
@@ -824,11 +824,11 @@ static void cmd_assemble(term_session *s, const char *what)
     if (!resolve(s, what, &sp)) return;
     if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "only a text can be assembled."); return; }
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
-    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "the image would lie here, and you may not lay things in here."); return; }
-    if (term_building()) { t_say(s, "a build is running; the tools are busy until it is done."); return; }
+    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "no write right on this list for the image."); return; }
+    if (term_building()) { t_say(s, "a build is running; wait for it to finish."); return; }
 
     u8 *out = lang_out_buffer();
-    if (!out) { t_say(s, "there is no room for the tools' tables."); return; }
+    if (!out) { t_say(s, "out of memory for the tool tables."); return; }
     char err[120];
     u32 kind = 0;
     const u8 *src = (const u8 *)obj_data(sp.o);
@@ -872,8 +872,8 @@ static void cmd_compile(term_session *s, const char *what)
     if (!resolve(s, what, &sp)) return;
     if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "only a text can be compiled."); return; }
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
-    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "what it makes would lie here, and you may not lay things in here."); return; }
-    if (term_building()) { t_say(s, "a build is running; the tools are busy until it is done."); return; }
+    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "no write right on this list for the output."); return; }
+    if (term_building()) { t_say(s, "a build is running; wait for it to finish."); return; }
 
     char base[NAME_SHOWN];
     u32 n = 0;
@@ -882,7 +882,7 @@ static void cmd_compile(term_session *s, const char *what)
 
     char *text = lang_text_buffer();
     u8 *out = lang_out_buffer();
-    if (!text || !out) { t_say(s, "there is no room for the tools' tables."); return; }
+    if (!text || !out) { t_say(s, "out of memory for the tool tables."); return; }
     char err[120];
     const u8 *src = (const u8 *)obj_data(sp.o);
     i64 got = cc_compile(src, text_len(src, obj_size(sp.o)), base,
@@ -891,7 +891,7 @@ static void cmd_compile(term_session *s, const char *what)
     if (got < 0) { t_say(s, err); return; }
 
     object *made = obj_create(TYPE_TEXT, (u64)got + 16, 0);
-    if (!made) { t_say(s, "nothing came of it; memory is short."); return; }
+    if (!made) { t_say(s, "out of memory."); return; }
     memcpy(obj_data(made), text, (u64)got);
     char nm[NAME_SHOWN];
     n = 0;
@@ -903,7 +903,7 @@ static void cmd_compile(term_session *s, const char *what)
     obj_release(made);
     if (at < 0) { t_say(s, "no room to lay the assembly here."); return; }
     t_puts(s, nm);
-    t_puts(s, "  lies beside it: ");
+    t_puts(s, "  created beside it: ");
     t_dec(s, (u64)got);
     t_say(s, " letters of assembly.");
 
@@ -911,7 +911,7 @@ static void cmd_compile(term_session *s, const char *what)
     i64 img = lang_build_text((const u8 *)text, (u64)got, false, out, LANG_OUT_MAX,
                               &kind, err, sizeof(err));
     if (img < 0) {
-        t_say(s, "the assembler refused what the compiler made:");
+        t_say(s, "the assembler rejected the compiler's output:");
         t_say(s, err);
         return;
     }
@@ -969,12 +969,12 @@ static bool link_units(object *into, const char *listname, u32 n, term_say_fn sa
 {
     char line[160];
     u32 at = 0;
-    if (n == 0) { say(ctx, "there is nothing to link in it."); return false; }
+    if (n == 0) { say(ctx, "the list holds no objects."); return false; }
     bool kernel = false;
     for (u32 i = 0; i < n; i++) if (ld_object_defines(units[i].data, units[i].len, "kmain")) kernel = true;
 
     u8 *out = lang_out_buffer();
-    if (!out) { say(ctx, "there is no room for the tools' tables."); return false; }
+    if (!out) { say(ctx, "out of memory for the tool tables."); return false; }
     char err[160];
     i64 got = ld_link(units, n, kernel ? LD_KERNEL : LD_PROGRAM, out, LANG_OUT_MAX, err, sizeof(err));
     if (got < 0) { say(ctx, err); return false; }
@@ -993,7 +993,7 @@ static bool link_units(object *into, const char *listname, u32 n, term_say_fn sa
         nm[k] = 0;
     }
     object *made = obj_create(TYPE_BYTES, (u64)got, 0);
-    if (!made) { say(ctx, "nothing came of it; memory is short."); return false; }
+    if (!made) { say(ctx, "out of memory."); return false; }
     memcpy(obj_data(made), out, (u64)got);
     /* A kernel is far too large for the snapshot and lives until the
      * next boot -- write out keeps it; a program's image is small and
@@ -1004,11 +1004,11 @@ static bool link_units(object *into, const char *listname, u32 n, term_say_fn sa
     if (!ok) { say(ctx, "no room to lay it in the list."); return false; }
     kprintf("build: %s, %llu bytes from %u objects\n", nm, (u64)got, n);
     ap(line, &at, nm);
-    ap(line, &at, "  lies in the list: ");
+    ap(line, &at, "  created in the list: ");
     apd(line, &at, (u64)got);
     ap(line, &at, " bytes, ");
     apd(line, &at, n);
-    ap(line, &at, kernel ? " objects, the kernel's shape.  'write out' carries it to the disk."
+    ap(line, &at, kernel ? " objects; a kernel image.  'install' or 'write out' it."
                          : " objects.  'run' it.");
     say(ctx, line);
     return true;
@@ -1039,7 +1039,7 @@ bool term_build_list(object *list, const char *name, term_say_fn say, void *ctx)
     if (!arena) arena = (u8 *)lang_big_alloc(ARENA_MAX);
     char *text = lang_text_buffer();
     u8 *out = lang_out_buffer();
-    if (!arena || !text || !out) { say(ctx, "there is no room for the tools' tables."); return false; }
+    if (!arena || !text || !out) { say(ctx, "out of memory for the tool tables."); return false; }
 
     u32 n = 0, used = 0, texts = 0;
     char err[160];
@@ -1148,8 +1148,8 @@ static void cmd_link(term_session *s, const char *what)
     if (!resolve(s, what, &sp)) return;
     if (obj_type(sp.o) != TYPE_LIST) { t_say(s, "link takes a list of objects."); return; }
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
-    if (!(sp.r & CAP_WRITE)) { t_say(s, "what it makes would lie in the list, and you may not lay things in there."); return; }
-    if (building) { t_say(s, "a build is running; the tools are busy until it is done."); return; }
+    if (!(sp.r & CAP_WRITE)) { t_say(s, "no write right on the list for the output."); return; }
+    if (building) { t_say(s, "a build is running; wait for it to finish."); return; }
     term_link_list(sp.o, sp.nm, say_to_session, s);
 }
 
@@ -1163,10 +1163,10 @@ static void cmd_build(term_session *s, const char *what)
     if (!resolve(s, what, &sp)) return;
     if (obj_type(sp.o) != TYPE_LIST) { t_say(s, "build takes a list of texts."); return; }
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
-    if (!(sp.r & CAP_WRITE)) { t_say(s, "what it makes would lie in the list, and you may not lay things in there."); return; }
-    if (!term_build_start(sp.o, sp.nm)) { t_say(s, "a build is running already; the journal says how it goes."); return; }
-    t_say(s, "building, in the background: the journal names each text as it is done,");
-    t_say(s, "and what lies in the list at the end.");
+    if (!(sp.r & CAP_WRITE)) { t_say(s, "no write right on the list for the output."); return; }
+    if (!term_build_start(sp.o, sp.nm)) { t_say(s, "a build is already running; see the journal."); return; }
+    t_say(s, "building in the background; the journal lists each unit as it is compiled,");
+    t_say(s, "and the result in the list at the end.");
 }
 
 /* take in <list>, write out <list>: the exchange disk's files into the
@@ -1177,7 +1177,7 @@ static void cmd_take_in(term_session *s, const char *what)
     if (!what[0]) { t_say(s, "take in to which list?"); return; }
     spot sp;
     if (!resolve(s, what, &sp)) return;
-    if (obj_type(sp.o) != TYPE_LIST || !(sp.r & CAP_WRITE)) { t_say(s, "take in fills a list you may write."); return; }
+    if (obj_type(sp.o) != TYPE_LIST || !(sp.r & CAP_WRITE)) { t_say(s, "take in needs a writable list."); return; }
     if (!fat_present()) { t_say(s, "there is no exchange disk."); return; }
     u32 n = fat_take_in(sp.o);
     t_dec(s, n);
@@ -1207,26 +1207,26 @@ static void cmd_install(term_session *s, const char *what)
         const u8 *l, *k;
         u64 ls, ks;
         if (!system_boot_files(&l, &ls, &k, &ks)) {
-            t_say(s, "the loader did not hand its files over at start, so there is nothing to install from.");
+            t_say(s, "the loader did not pass its files at start; nothing to install from.");
             return;
         }
         char why[120];
         if (!fat_install_kernel(k, ks, why, sizeof(why))) { t_say(s, why); return; }
         if (!fat_install_loader(l, ls, why, sizeof(why))) {
             t_say(s, why);
-            t_say(s, "the kernel went on all the same; the next start runs it with the old loader.");
+            t_say(s, "the kernel was installed; the loader was not.");
         }
         kprintf("boot: the running loader and kernel (%llu and %llu bytes) are installed on the boot disk\n", ls, ks);
         journal_says("system", "the running system is installed on the boot disk for the next start");
-        t_say(s, "installed.  the boot disk now starts with this loader and this kernel;");
-        t_say(s, "the kernel it had stays beside it as kernel.old, and the store is as it was.");
-        t_say(s, "take the stick out and 'restart'.");
+        t_say(s, "installed: this loader and this kernel are on the boot disk;");
+        t_say(s, "the previous kernel is kernel.old; the store is unchanged.");
+        t_say(s, "remove the stick and 'restart'.");
         return;
     }
 
     spot sp;
     if (!resolve(s, what, &sp)) return;
-    if (obj_type(sp.o) != TYPE_BYTES) { t_say(s, "a kernel is bytes: the kernel.elf a build makes."); return; }
+    if (obj_type(sp.o) != TYPE_BYTES) { t_say(s, "a kernel is a bytes object (kernel.elf from a build)."); return; }
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
     char why[120];
     if (!fat_install_kernel((const u8 *)obj_data(sp.o), obj_size(sp.o), why, sizeof(why))) {
@@ -1235,14 +1235,14 @@ static void cmd_install(term_session *s, const char *what)
     }
     kprintf("boot: a kernel of %llu bytes is installed; the previous one is kernel.old\n", obj_size(sp.o));
     journal_says("system", "a new kernel is installed for the next start");
-    t_say(s, "installed.  the next start runs it; the running kernel stays as kernel.old,");
-    t_say(s, "and the loader returns to that one if the new kernel does not come up twice.");
+    t_say(s, "installed; the next start runs it.  the previous kernel is kernel.old;");
+    t_say(s, "the loader falls back to it after two failed starts.");
     t_say(s, "'restart' starts it now.");
 }
 
 static void cmd_restart(term_session *s)
 {
-    t_say(s, "starting again.");
+    t_say(s, "restarting.");
     system_restart();
 }
 
@@ -1251,7 +1251,7 @@ static void cmd_write_out(term_session *s, const char *what)
     if (!what[0]) { t_say(s, "write out which list?"); return; }
     spot sp;
     if (!resolve(s, what, &sp)) return;
-    if (obj_type(sp.o) != TYPE_LIST || !(sp.r & CAP_READ)) { t_say(s, "write out takes a list you may read."); return; }
+    if (obj_type(sp.o) != TYPE_LIST || !(sp.r & CAP_READ)) { t_say(s, "write out needs a readable list."); return; }
     if (!fat_present()) { t_say(s, "there is no exchange disk."); return; }
     u32 n = fat_write_out(sp.o);
     t_dec(s, n);
@@ -1263,12 +1263,12 @@ static void cmd_run(term_session *s, const char *what)
     if (!what[0]) { t_say(s, "run which text, or which image?"); return; }
     spot sp;
     if (!resolve(s, what, &sp)) return;
-    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "the running one would lie here, and you may not lay things in here."); return; }
+    if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "no write right on this list for the program."); return; }
 
     if (obj_type(sp.o) == TYPE_BYTES) {
         if (!code_image_ok((const u8 *)obj_data(sp.o), obj_size(sp.o),
                            NULL, NULL, NULL)) {
-            t_say(s, "those bytes are no program image; 'assemble' makes one.");
+            t_say(s, "these bytes are not a program image; 'assemble' makes one.");
             return;
         }
         char nm[NAME_SHOWN];
@@ -1276,11 +1276,11 @@ static void cmd_run(term_session *s, const char *what)
         while (sp.nm[n] && n < NAME_SHOWN - 1) { nm[n] = sp.nm[n]; n++; }
         nm[n] = 0;
         object *prog = code_launch(sp.o);
-        if (!prog) { t_say(s, "it would not start."); return; }
+        if (!prog) { t_say(s, "the program did not start."); return; }
         i64 at = lay_here(s, prog, CAP_READ | CAP_GRANT, nm);
         obj_release(prog);                       /* the slot holds it now */
-        if (at < 0) { t_say(s, "it runs, but there was no room to lay it here."); return; }
-        t_say(s, "it runs; the journal carries what it says.");
+        if (at < 0) { t_say(s, "running, but no room for its reference here."); return; }
+        t_say(s, "running; its output goes to the journal.");
         return;
     }
     if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "only a text or an image can run."); return; }
@@ -1298,11 +1298,11 @@ static void cmd_run(term_session *s, const char *what)
      * takes its hold, and ours is what keeps the object real across
      * that gap. Once it lies here, the slot's hold is enough. */
     object *prog = runner_launch(sp.o);
-    if (!prog) { t_say(s, "it would not start."); return; }
+    if (!prog) { t_say(s, "the program did not start."); return; }
     i64 at = lay_here(s, prog, CAP_READ | CAP_GRANT, nm);
     obj_release(prog);
-    if (at < 0) { t_say(s, "it runs, but there was no room to lay it here."); return; }
-    t_say(s, "it runs; the journal carries what it says.");
+    if (at < 0) { t_say(s, "running, but no room for its reference here."); return; }
+    t_say(s, "running; its output goes to the journal.");
 }
 
 static void cmd_give(term_session *s, const char *rest)
@@ -1318,14 +1318,14 @@ static void cmd_give(term_session *s, const char *rest)
         t_say(s, "only a running program can be given to.");
         return;
     }
-    if (!(prog.r & CAP_GRANT)) { t_say(s, "you may not give to that program."); return; }
+    if (!(prog.r & CAP_GRANT)) { t_say(s, "no give right on that program."); return; }
 
     if (!proc_grant(prog.o, thing.o, thing.r)) {
-        t_say(s, "it could not be handed over.");
+        t_say(s, "the reference could not be passed.");
         return;
     }
     t_puts(s, prog.nm);
-    t_say(s, "  holds it now, with what you held.");
+    t_say(s, "  holds it now, with your rights.");
 }
 
 static void cmd_end(term_session *s, const char *what)
@@ -1336,8 +1336,8 @@ static void cmd_end(term_session *s, const char *what)
     if (obj_type(sp.o) != TYPE_PROGRAM) { t_say(s, "only a program can be ended."); return; }
     if (!(sp.r & CAP_GRANT)) { t_say(s, "you may not end that one."); return; }
     if (!proc_end(sp.o)) { t_say(s, "it was not running."); return; }
-    journal_says("system", "a program was ended by hand");
-    t_say(s, "ended.  it finishes at its next step into the kernel.");
+    journal_says("system", "a program was ended");
+    t_say(s, "ended; it stops at its next system call.");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1349,11 +1349,11 @@ static void cmd_send(term_session *s, const char *what)
     if (!what[0]) { t_say(s, "send which?"); return; }
     spot sp;
     if (!resolve(s, what, &sp)) return;
-    if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that, so you may not send it."); return; }
+    if (!(sp.r & CAP_READ)) { t_say(s, "no read right; cannot send."); return; }
     if (pipe_post(sp.o))
-        t_say(s, "on its way to the peer.");
+        t_say(s, "transfer to the peer started.");
     else
-        t_say(s, "the pipe would not take it.  is a peer named?  'scan' and 'point at' set one.");
+        t_say(s, "the pipe refused it; the journal says why.  'point at' names a peer.");
 }
 
 /* "ask <task>", or "ask <task> with <object>": the object goes ahead
@@ -1385,13 +1385,13 @@ static void cmd_ask(term_session *s, const char *what)
     if (with && *with) {
         spot in;
         if (!resolve(s, with, &in)) return;
-        if (!(in.r & CAP_READ)) { t_say(s, "you may not read that, so it cannot go along."); return; }
+        if (!(in.r & CAP_READ)) { t_say(s, "no read right on the input."); return; }
         ok = pipe_ask_with(sp.o, (sp.r & CAP_WRITE) != 0, in.o);
     } else {
         ok = pipe_ask(sp.o, (sp.r & CAP_WRITE) != 0);
     }
     if (ok)
-        t_say(s, "the desk has it.  the answer lands in the task itself, or in arrivals.");
+        t_say(s, "queued at the desk; the answer is written into the task or into arrivals.");
     else
         t_say(s, "the desk would not take it.  the journal says why.");
 }
@@ -1400,15 +1400,15 @@ static void cmd_say(term_session *s, const char *words)
 {
     if (!words[0]) { t_say(s, "say what?"); return; }
     if (pipe_say(words))
-        t_say(s, "said; it stands on the line.");
+        t_say(s, "sent; the line shows it.");
     else
-        t_say(s, "nobody is on the line, and no peer is named in the settings.");
+        t_say(s, "no session open and no peer named in the settings.");
 }
 
 static void cmd_scan(term_session *s)
 {
     pipe_scan();
-    t_say(s, "the call is out.  'found' shows who answered.");
+    t_say(s, "scan sent; 'found' lists the answers.");
 }
 
 static void put_ip(term_session *s, const u8 ip[4])
@@ -1423,8 +1423,8 @@ static void cmd_found(term_session *s)
 {
     u32 n = pipe_found_count();
     if (n == 0) {
-        t_say(s, pipe_scanning() ? "no answers yet; the call is still out."
-                                 : "nobody has answered.  'scan' calls again.");
+        t_say(s, pipe_scanning() ? "no answers yet; the scan is running."
+                                 : "no answers.  'scan' sends again.");
         return;
     }
     for (u32 i = 0; i < n; i++) {
@@ -1453,7 +1453,7 @@ static void cmd_nodes(term_session *s)
     nodes_apply();
     u32 n = nodes_count();
     if (n == 0) {
-        t_say(s, "no node has been met yet.  'scan' calls out; the first sealed knock writes the first row.");
+        t_say(s, "no nodes yet; the first handshake writes the first row.");
         return;
     }
     for (u32 i = 0; i < n; i++) {
@@ -1480,7 +1480,7 @@ static void cmd_nodes(term_session *s)
         }
         t_end(s);
     }
-    t_say(s, "the table itself lies in system as 'nodes'; 'allow' writes the may column.");
+    t_say(s, "the table is 'nodes' under system; 'allow' writes the may column.");
 }
 
 /* "allow <node> work update", "allow <node> all", "allow <node> nothing":
@@ -1569,7 +1569,7 @@ static void cmd_update(term_session *s, const char *rest)
         spot sp;
         if (!resolve(s, with, &sp)) return;
         if (obj_type(sp.o) != TYPE_BYTES || !(sp.r & CAP_READ)) {
-            t_say(s, "a kernel is bytes you may read: the kernel.elf a build makes.");
+            t_say(s, "a kernel is a readable bytes object (kernel.elf from a build).");
             return;
         }
         image = sp.o;
@@ -1580,14 +1580,14 @@ static void cmd_update(term_session *s, const char *rest)
         u32 n = pipe_update_all(image, why, sizeof(why));
         if (!n) { t_say(s, why); return; }
         t_dec(s, n);
-        t_say(s, n == 1 ? " node queued; the journal says how it took it."
-                        : " nodes queued, one after the other; the journal says how each took it.");
+        t_say(s, n == 1 ? " node queued; the journal reports the outcome."
+                        : " nodes queued, one after the other; the journal reports each outcome.");
         return;
     }
     if (!pipe_update(who, image, why, sizeof(why))) { t_say(s, why); return; }
-    t_puts(s, "the kernel is on its way to ");
+    t_puts(s, "kernel transfer to ");
     t_puts(s, who);
-    t_say(s, ".  the journal says whether it was taken; the node installs it and restarts.");
+    t_say(s, " started; the journal reports the outcome; the node installs it and restarts.");
 }
 
 /* Points the pipe at a machine: by the name it answered the scan
@@ -1596,7 +1596,7 @@ static void cmd_update(term_session *s, const char *rest)
  * no hidden switch, just the sentence. */
 static void cmd_point(term_session *s, const char *what)
 {
-    if (!what[0]) { t_say(s, "point at whom?  a found name, or an address."); return; }
+    if (!what[0]) { t_say(s, "point at which node?  a found name or an address."); return; }
 
     u8 ip[4] = { 0, 0, 0, 0 };
     u32 port = 7800;
@@ -1636,10 +1636,10 @@ static void cmd_point(term_session *s, const char *what)
         have = part == 4;
     }
 
-    if (!have) { t_say(s, "that names no machine i can see."); return; }
+    if (!have) { t_say(s, "no known node or address."); return; }
 
     object *st = settings_object();
-    if (!st) { t_say(s, "no settings stand."); return; }
+    if (!st) { t_say(s, "no settings object."); return; }
     u8 *d = (u8 *)obj_data(st);
     u64 size = obj_size(st);
     u64 len = text_len(d, size);
@@ -1757,9 +1757,9 @@ static void cmd_find(term_session *s, const char *words)
         if (full) break;
     }
 
-    if (hits == 0) t_say(s, "nothing holds those words.");
-    if (hits >= FIND_HITS) t_say(s, "...and maybe more; the first sixteen are shown.");
-    if (full) t_say(s, "(the walk was cut short; the graph is larger than the search.)");
+    if (hits == 0) t_say(s, "no match.");
+    if (hits >= FIND_HITS) t_say(s, "...more may exist; the first sixteen are shown.");
+    if (full) t_say(s, "(search limit reached; not everything was searched.)");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1770,9 +1770,9 @@ static void cmd_journal(term_session *s)
 {
     object *j = journal_object();
     const u8 *d = j ? (const u8 *)obj_data(j) : NULL;
-    if (!d) { t_say(s, "no journal stands."); return; }
+    if (!d) { t_say(s, "no journal object."); return; }
     u64 len = text_len(d, obj_size(j));
-    if (len == 0) { t_say(s, "nothing has happened yet."); return; }
+    if (len == 0) { t_say(s, "the journal is empty."); return; }
 
     u64 from = len, lines = 0;
     while (from > 0 && lines < 12) {
@@ -1804,67 +1804,67 @@ static void cmd_time(term_session *s)
 
 static void cmd_help(term_session *s)
 {
-    t_say(s, "one shape, always: a verb, a name, and 'to' or 'at' when");
-    t_say(s, "two things meet.  names may have spaces; numbers count slots.");
+    t_say(s, "syntax: a verb, a name, and 'to', 'at' or 'with' before a second name.");
+    t_say(s, "names may contain spaces; numbers count slots.");
     t_end(s);
     t_say(s, "looking around");
-    t_say(s, "  look [name]      what stands here, or what that points at");
+    t_say(s, "  look [name]      list the references here, or of that object");
     t_say(s, "  go <name>        follow a reference");
     t_say(s, "  back             one step back;  home  returns to the start");
-    t_say(s, "  where            the walk so far");
-    t_say(s, "  find <words>     search names and texts, everywhere you reach");
+    t_say(s, "  where            the path from home");
+    t_say(s, "  find <words>     search names and texts in everything reachable");
     t_end(s);
     t_say(s, "things");
-    t_say(s, "  read [name]      the thing itself: letters, bytes, size");
+    t_say(s, "  read [name]      the object: text, bytes, size");
     t_say(s, "  write <words>    add a line to the text you stand on");
-    t_say(s, "  make text <name>     a fresh text, laid in here");
-    t_say(s, "  make list <name>     a fresh list, laid in here");
-    t_say(s, "  copy <name>      a copy, laid beside it");
+    t_say(s, "  make text <name>     a new text in this list");
+    t_say(s, "  make list <name>     a new list in this list");
+    t_say(s, "  copy <name>      a copy in the same list");
     t_say(s, "  rename <name> to <new name>");
-    t_say(s, "  let go <name>    into the bin; in the bin, for good");
+    t_say(s, "  let go <name>    into the bin; from the bin: delete");
     t_end(s);
     t_say(s, "programs");
-    t_say(s, "  run <name>       run that text, or that image, as a program, here");
-    t_say(s, "  assemble <name>  turn that text of instructions into an image");
-    t_say(s, "  compile <name>   turn that text of c into assembly, and that into an image");
+    t_say(s, "  run <name>       run a text (script) or an image as a program");
+    t_say(s, "  assemble <name>  assemble a text into an image");
+    t_say(s, "  compile <name>   compile a c text into assembly and an image");
     t_say(s, "  link <list>      join the objects in a list into one image, or a kernel");
     t_say(s, "  build <list>     compile and assemble every text in a list, then link");
     t_say(s, "  take in <list>   the exchange disk's files, into the list");
     t_say(s, "  write out <list> the list's texts and bytes, onto the exchange disk");
-    t_say(s, "  install <name>   make that kernel the one the next start runs");
-    t_say(s, "  install this kernel   put the loader and kernel this machine started with");
-    t_say(s, "                   onto the boot disk; the store stays as it is");
-    t_say(s, "  restart          start the machine again");
+    t_say(s, "  install <name>   install that kernel for the next start");
+    t_say(s, "  install this kernel   copy the loader and kernel this machine booted from");
+    t_say(s, "                   onto the boot disk; the store is unchanged");
+    t_say(s, "  restart          restart the machine");
     t_say(s, "  disks            the disks on the bus, and what is on them");
-    t_say(s, "  settle on disk N                     make that disk this machine's: boot volume and store");
+    t_say(s, "  settle on disk N                     erase that disk: boot volume and store");
     t_say(s, "  settle in partition P of disk N      make that partition the store");
-    t_say(s, "  settle in the free space of disk N   make a store in the room left, touching nothing else");
-    t_say(s, "  yes              go ahead with what 'settle' offered");
-    t_say(s, "  networks         the wireless networks in the air");
+    t_say(s, "  settle in the free space of disk N   make a store in the free space; nothing else changes");
+    t_say(s, "  yes              confirm the settle offer");
+    t_say(s, "  networks         the wireless networks in range");
     t_say(s, "  join <name> [with <passphrase>]   join one; the passphrase is asked for if not given");
     t_say(s, "  leave            leave the wireless network");
-    t_say(s, "  wifi             the station: joined where, how, and its address");
-    t_say(s, "  address          which card carries the traffic, and the address it holds");
-    t_say(s, "  version          what the running kernel calls itself");
-    t_say(s, "  nodes            the machines met through the pipe, and what each may do here");
-    t_say(s, "  allow <node> work|update|all|nothing   what that node may ask of this machine");
+    t_say(s, "  wifi             wireless state: network, security, address");
+    t_say(s, "  address          the active network card and its address");
+    t_say(s, "  version          the version of the running kernel");
+    t_say(s, "  nodes            the nodes table: machines met through the pipe and their rights here");
+    t_say(s, "  allow <node> work|update|all|nothing   rights of that node on this machine");
     t_say(s, "  update <node>    send this kernel to that node; it installs and restarts.  'update all'; '... with <kernel.elf>'");
-    t_say(s, "  receive <n> bytes as <name>   a text made here, filled with the next n bytes");
-    t_say(s, "                   of this session as they are; how a file comes in through the door");
-    t_say(s, "  give <name> to <program>   hand it a reference");
+    t_say(s, "  receive <n> bytes as <name>   a new text filled with the next n raw bytes");
+    t_say(s, "                   of this session (file transfer through the door)");
+    t_say(s, "  give <name> to <program>   pass a reference to a program");
     t_say(s, "  end <name>       end a running program");
     t_end(s);
-    t_say(s, "the other machines");
-    t_say(s, "  scan             call out: who else is on the wire?");
+    t_say(s, "other nodes");
+    t_say(s, "  scan             broadcast a SEEK; 'found' lists the answers");
     t_say(s, "  found            who answered");
     t_say(s, "  point at <name or address>   choose the peer");
-    t_say(s, "  send <name>      carry a thing to the peer");
-    t_say(s, "  ask <name>       have the machines work a task text");
-    t_say(s, "  say <words>      speak on the line");
+    t_say(s, "  send <name>      transfer an object to the peer");
+    t_say(s, "  ask <name>       run a task text on other machines");
+    t_say(s, "  say <words>      append a line to the shared line");
     t_end(s);
     t_say(s, "the machine");
-    t_say(s, "  journal          the last things that happened");
-    t_say(s, "  time             the wall clock, and how long it has run");
+    t_say(s, "  journal          the journal");
+    t_say(s, "  time             wall clock and uptime");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1884,16 +1884,16 @@ static void say_to(void *ctx, const char *line)
 
 static const char *security_word(u8 s)
 {
-    return s == WIFI_OPEN ? "open" : s == WIFI_WPA2 ? "wpa2" : "not one this station speaks";
+    return s == WIFI_OPEN ? "open" : s == WIFI_WPA2 ? "wpa2" : "unsupported";
 }
 
 static void cmd_networks(term_session *s)
 {
-    if (!wifi_radio_present()) { t_say(s, "no radio, and no wire to carry the test bench's air."); return; }
+    if (!wifi_radio_present()) { t_say(s, "no radio and no test-bench wire."); return; }
     wifi_scan();
     wifi_net list[16];
     u32 n = wifi_networks(list, 16);
-    if (n == 0) { t_say(s, "nothing heard yet; the radio listens.  ask again in a moment."); return; }
+    if (n == 0) { t_say(s, "nothing received yet; try again shortly."); return; }
     for (u32 i = 0; i < n; i++) {
         t_puts(s, "  ");
         t_puts(s, list[i].ssid);
@@ -1908,7 +1908,7 @@ static void cmd_networks(term_session *s)
         else if (list[i].remembered) t_puts(s, "  (remembered)");
         t_end(s);
     }
-    t_say(s, "join <name> joins one; a passphrase is asked for when the network wants one.");
+    t_say(s, "'join <name>' joins; a passphrase is asked for when needed.");
 }
 
 static void cmd_join(term_session *s, const char *what)
@@ -1923,8 +1923,8 @@ static void cmd_join(term_session *s, const char *what)
     wifi_net *found = NULL;
     for (u32 i = 0; i < n && !found; i++)
         if (strcmp(list[i].ssid, name) == 0) found = &list[i];
-    if (!found) { t_puts(s, "no network called "); t_puts(s, name); t_say(s, " has been heard; 'networks' lists them."); return; }
-    if (found->security == WIFI_OTHER) { t_say(s, "that network's protection is not one this station speaks; wpa2 with a passphrase is."); return; }
+    if (!found) { t_puts(s, "no network called "); t_puts(s, name); t_say(s, " has been seen; 'networks' lists them."); return; }
+    if (found->security == WIFI_OTHER) { t_say(s, "unsupported security; wpa2 with a passphrase and open networks are supported."); return; }
 
     char had[64];
     if (pass) wifi_join(name, pass);
@@ -1937,12 +1937,12 @@ static void cmd_join(term_session *s, const char *what)
         s->secret_for[i] = 0;
         t_puts(s, "the passphrase for ");
         t_puts(s, name);
-        t_say(s, "?  (the letters will not show)");
+        t_say(s, "?  (not echoed)");
         return;
     }
     t_puts(s, "joining ");
     t_puts(s, name);
-    t_say(s, "; the journal says how it went, and so does 'wifi'.");
+    t_say(s, "; the journal and 'wifi' report the outcome.");
 }
 
 static void cmd_leave(term_session *s)
@@ -1971,14 +1971,14 @@ static void cmd_wifi(term_session *s)
  * from elsewhere needs the number without restarting to read it. */
 static void cmd_address(term_session *s)
 {
-    if (!nic_up()) { t_say(s, "no card carries traffic; the wire goes nowhere."); return; }
+    if (!nic_up()) { t_say(s, "no network card is active."); return; }
     const u8 *m = nic_mac();
     char line[96];
     u32 at = 0;
     const char *p = nic_name();
     while (*p && at < 40) line[at++] = *p++;
     static const char hex[] = "0123456789abcdef";
-    const char *q = " on the wire as ";
+    const char *q = " mac ";
     while (*q) line[at++] = *q++;
     for (u32 i = 0; i < 6; i++) {
         if (i) line[at++] = ':';
@@ -1994,7 +1994,7 @@ static void cmd_address(term_session *s)
         put_ip(s, ip);
         t_end(s);
     } else {
-        t_say(s, "no address yet; nobody has leased one and none was claimed.");
+        t_say(s, "no address yet: no lease and none claimed.");
     }
     if (wifi_up()) t_say(s, wifi_state(line, sizeof(line)));
 }
@@ -2018,11 +2018,11 @@ void term_line(term_session *s, const char *line)
         s->secret = false;
         s->last_line[0] = 0;
         t_say(s, "> (a passphrase, not shown)");
-        if (!*line) { t_say(s, "nothing given; the network stays unjoined."); return; }
+        if (!*line) { t_say(s, "no passphrase given; not joined."); return; }
         wifi_join(s->secret_for, line);
         t_puts(s, "joining ");
         t_puts(s, s->secret_for);
-        t_say(s, "; the journal says how it went, and so does 'wifi'.");
+        t_say(s, "; the journal and 'wifi' report the outcome.");
         return;
     }
 
@@ -2079,9 +2079,9 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "allow", &rest))   cmd_allow(s, rest);
     else if (word_starts(line, "update", &rest))  cmd_update(s, rest);
     else {
-        t_puts(s, "i do not know '");
+        t_puts(s, "unknown word '");
         t_puts(s, line);
-        t_say(s, "'.  'help' names the words.");
+        t_say(s, "'.  'help' lists the words.");
     }
 }
 

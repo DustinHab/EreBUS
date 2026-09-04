@@ -3,35 +3,31 @@
 # - the store partition on the boot disk must be found; what is typed on boot 1 must be back on boot 2
 
 cd "$(dirname "$0")/.."
-BUILD=build
-sh tools/mkusb.sh >/dev/null || exit 1
-cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/test-vars.fd
+. tools/testlib.sh
+need_stick
+fresh_vars $BUILD/test-vars.fd
 rm -f $BUILD/stick-1.log $BUILD/stick-2.log
 
-keys() {
-    for k in "$@"; do echo "sendkey $k"; sleep 0.3; done
-}
-
 boot() {
-    qemu-system-x86_64 -machine q35 -m 512M -cpu max \
-      -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    qemu-system-x86_64 $QEMU_BASE \
       -drive if=pflash,format=raw,file=$BUILD/test-vars.fd \
       -drive format=raw,file=$BUILD/stick.img \
-      -vga none -device VGA,edid=on,xres=1280,yres=800 \
       -device e1000,netdev=n0 -netdev user,id=n0 \
-      -display none -monitor stdio \
       -serial file:$1 >/dev/null 2>&1
 }
 
 {
-    sleep 24
+    bootwait $BUILD/stick-1.log
     keys right o n e spc d i s k
-    sleep 5
+    waitlog $BUILD/stick-1.log 'generation 1 written' 40
+    sleep 1
     echo quit
 } | boot $BUILD/stick-1.log
 
 {
-    sleep 22
+    bootwait $BUILD/stick-2.log
+    waitlog $BUILD/stick-2.log 'graph restored' 20
+    sleep 1
     echo quit
 } | boot $BUILD/stick-2.log
 

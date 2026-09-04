@@ -270,6 +270,13 @@ again:
     tentative = 24;
     check(24, tentative == 24);
 
+    /* 25: a struct with an inner struct body whose member shares a name:
+     * the outer members are found by name and by position */
+    struct { long pad[3]; struct { unsigned at, len; } strs[2]; unsigned nstrs; long len; } nest =
+        { { 1, 2, 3 }, { { 4, 5 }, { 6, 7 } }, 8, 9 };
+    check(25, nest.len == 9 && nest.nstrs == 8 && nest.strs[1].len == 7 &&
+              (char *)&nest.len - (char *)&nest == 48);
+
     if (bad_count == 0) say("all checks ok");
     else say("some checks bad");
     return bad_count;

@@ -35,7 +35,7 @@ while [ $i -le $rounds ]; do
 done
 sleep 2
 echo "--- the log, as the machine told it ---"
-grep -a 'blob:\|let go\|snap: no room\|snap: could not\|snap: the log' $DOOR_SERIAL | cut -c1-110
+grep -a 'blob:\|dropped\|snap: no room\|snap: could not\|snap: the log' $DOOR_SERIAL | cut -c1-110
 door_stop
 cp $DOOR_SERIAL $BUILD/logfull/serial-1.log
 
@@ -57,6 +57,6 @@ more=$(grep -a -o 'and [0-9]* more letters' $BUILD/logfull/answer.txt | head -1 
 got=$((2000 + ${more:-0}))
 if [ "$got" = "$want" ]; then echo "cc.c: $got letters, the source plus $rounds lines"; else echo "cc.c: $got letters, but $want were expected"; ok=0; fi
 if grep -a -q 'blob: compacted' $BUILD/logfull/serial-1.log; then echo "the log was compacted"; else echo "the log was never compacted"; ok=0; fi
-if grep -a -q 'let go' $BUILD/logfull/serial-1.log; then echo "old generations were let go"; else echo "no generation was let go"; ok=0; fi
+if grep -a -q 'dropped' $BUILD/logfull/serial-1.log; then echo "old generations were dropped"; else echo "no generation was dropped"; ok=0; fi
 if grep -a -q 'snap: could not\|snap: no room' $BUILD/logfull/serial-1.log; then echo "a save failed"; ok=0; fi
 [ $ok = 1 ] && echo "the full log was handled" || echo "something went wrong with the full log"

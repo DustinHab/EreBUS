@@ -75,15 +75,14 @@ static object *seed_graph(void)
     obj_set_name(root, "home");
 
     static const char notes_text[] =
-        "type here. this is an object, not a file.\n"
-        "nothing is saved, because nothing was ever\n"
-        "loaded. it simply stays.\n";
+        "type here. this is a text object, not a file.\n"
+        "it is kept in the object graph and saved\n"
+        "with it.\n";
     static const char idea_text[] =
         "a name belongs to the reference, not to\n"
-        "the thing it points at. you wrote it down\n"
-        "about something you already held, so an\n"
-        "object handed to you cannot announce\n"
-        "itself as something it is not.\n"
+        "the object. a name is given by whoever\n"
+        "holds the reference, so an object cannot\n"
+        "name itself.\n"
         "\n"
         "this text is reachable twice, under two\n"
         "names, with different rights each time.\n";
@@ -312,7 +311,7 @@ object *work_launch(object *script, object *reply, u64 budget_seconds,
         proc_grant_word(prog, input, CAP_READ, (u64)hi);
     }
 
-    kprintf("proc: %llu (work) running a visiting text\n", proc_id(p));
+    kprintf("proc: %llu (work) running a task text\n", proc_id(p));
     return prog;
 }
 
@@ -363,16 +362,16 @@ static object *persistent_root;
  * understands, and a page describing yesterday's language would be
  * documentation lying about its subject. */
 static const char lang_text[] =
-    "any text can be a program. stand on it, press run.\n"
+    "any text can be a program: stand on it and press run.\n"
     "\n"
     "the first gift is the text itself. \"it\" is the\n"
     "latest gift after that: point the running script at\n"
-    "something and the script can reach it. variables a\n"
-    "to z hold numbers. r holds how the last get, put or\n"
-    "tell went: 0 for done, -1 for refused.\n"
+    "an object and the script can use it. variables a\n"
+    "to z hold numbers. r holds the result of the last\n"
+    "get, put or tell: 0 done, -1 refused.\n"
     "\n"
     "say <words>      up to 24 letters, to the console\n"
-    "tell <words>     the same, to it -- when it listens\n"
+    "tell <words>     the same, to it (a port)\n"
     "answer <n or v>  the value, in digits, to the first gift after the words (the way home), else to it\n"
     "show x           say a variable and its value\n"
     "wait             sleep until the next gift\n"
@@ -390,22 +389,23 @@ static const char lang_text[] =
     "edit a running script and the next pass through a\n"
     "line runs the new words.\n"
     "\n"
-    "a text can also be asked of another machine: press\n"
-    "ask beside send, and it runs over there. it arrives\n"
-    "holding the way home as its first gift -- wait, then\n"
-    "answer sends the result back. it must finish inside\n"
-    "its budget, and the far machine only works at all\n"
-    "when its settings say \"work | welcomed\".\n"
+    "a text can also be run on another machine: press\n"
+    "ask beside send. there it starts with a reply port\n"
+    "as its first gift: wait, then answer sends the\n"
+    "result back. it must finish within its budget, and\n"
+    "the machine runs it only with \"work | welcomed\"\n"
+    "or the work right in its nodes table.\n"
     "\n"
-    "a first line \"split P from LO to HI\" divides such\n"
-    "a task among the machines that answer the scan\n"
-    "willing: each part runs with its own stretch -- the\n"
-    "first wait says the low end as m, the second wait\n"
-    "the high end -- and the parts' numbers are summed.\n"
-    "the answer is written back into the task. point a\n"
-    "task at the foreman program and it is seen through\n"
-    "without another click; \"again N\" in the first line\n"
-    "hands it in anew every n seconds.\n";
+    "a first line \"split P from LO to HI\" divides the\n"
+    "task among the machines that answered the scan with\n"
+    "the work flag: each part gets its own range (the\n"
+    "first wait sets m to the low end, the second to the\n"
+    "high end) and the parts' numbers are summed. the\n"
+    "answer is written back into the task. a task given\n"
+    "to the foreman program is submitted automatically;\n"
+    "\"again N\" in its first line repeats it every n\n"
+    "seconds. ask <task> with <object> sends the object\n"
+    "as the third gift.\n";
 
 /* Finds a reference by petname and type, on the root or one list
  * below it -- the one search the shelved graph needs everywhere. */
@@ -523,18 +523,18 @@ static void ensure_structure(object *root, object **progs_out,
  * A program made on this machine starts with two handles and the
  * eight calls, and nothing else; this is the whole of it. */
 static const char machine_text[] =
-    "; the machine, as a program sees it.\n"
+    "; the machine interface for programs.\n"
     ";\n"
-    "; a program starts holding two things and nothing else:\n"
+    "; a program starts with two capabilities:\n"
     ";   rdi  a handle to speak to the console (send, tag TEXT)\n"
-    ";   rsi  a handle to its own letter box (receive)\n"
+    ";   rsi  a handle to its own message port (receive)\n"
     "; the stack is ready at rsp. the code lies at 0x1000000,\n"
     "; read and run, never written; the data at 0x1100000, read\n"
     "; and written, never run -- one page at least.\n"
     ";\n"
     "; a system call: the number in rax, the arguments in\n"
     "; rdi rsi rdx r10 r8, the answer in rax. rcx and r11 are\n"
-    "; lost across it.\n"
+    "; clobbered.\n"
     ";   0 exit                1 yield\n"
     ";   2 send     handle, tag, w0, w1, w2\n"
     ";   3 receive  handle, buffer, no_wait   (72 bytes land)\n"
@@ -549,7 +549,7 @@ static const char machine_text[] =
     ";   8   nwords   4 bytes      48  handles  2 x 8\n"
     ";   12  ncaps    4 bytes      64  masks    2 x 4\n"
     "; a gift is tag 0x4556494721: the handle at 48, the rights\n"
-    "; at 16, and a number that rode along at 24. TEXT is\n"
+    "; at 16, and an attached number at 24. TEXT is\n"
     "; 0x54584554: three words of eight letters to the console.\n"
     ";\n"
     "; the words: mov lea movzx add sub and or xor cmp test\n"
@@ -560,7 +560,7 @@ static const char machine_text[] =
     "; it: byte [rdi], qword [rsp - 8]. section code, section\n"
     "; data; db dw dd dq lay values down, res n lays n zeros.\n"
     ";\n"
-    "; stand on this page, press assemble, then run what it made.\n"
+    "; stand on this page, press assemble, then run the image.\n"
     "\n"
     "section data\n"
     "hello: db \"hello fr\", \"om the m\", \"achine  \"\n"
@@ -655,7 +655,7 @@ static void ensure_page(object *root, const char *name,
     char note[64];
     u32 at = 0;
     for (u32 i = 0; name[i] && at < 30; i++) note[at++] = name[i];
-    const char *tail = " page speaks today's words";
+    const char *tail = " page refreshed";
     for (u32 i = 0; tail[i] && at < sizeof(note) - 1; i++) note[at++] = tail[i];
     note[at] = 0;
     journal_says("system", note);
@@ -664,12 +664,12 @@ static void ensure_page(object *root, const char *name,
 /* The compiler's page: c as this machine speaks it, and a program
  * in it. Stand on the page, press compile, run what it made. */
 static const char compiler_text[] =
-    "/* the compiler: c, the way this machine speaks it.\n"
+    "/* the c compiler.\n"
     " *\n"
     " * a program is a text like this one. stand on it, press\n"
-    " * compile: beside it lands the assembly it became, to be read,\n"
-    " * and the image that runs. main is called with the two things\n"
-    " * a program starts holding, and its answer is the exit code.\n"
+    " * compile: the assembly and the runnable image are created\n"
+    " * beside it. main is called with the two handles a program\n"
+    " * starts with; its return value is the exit code.\n"
     " *\n"
     " * types: char (1 byte), short (2), int (4), long (8), signed\n"
     " * or not; float and double; pointers, arrays, struct, union,\n"
@@ -684,7 +684,7 @@ static const char compiler_text[] =
     " * #elif with arithmetic and defined(), #include \"name\" (a\n"
     " * text beside this one), <stdarg.h> <stdbool.h> <stdint.h>\n"
     " * <stddef.h> from inside. comments both ways.\n"
-    " * syscall(nr, a0, a1, a2, a3, a4) is the door to the kernel;\n"
+    " * syscall(nr, a0, a1, a2, a3, a4) is the system call;\n"
     " * the machine page names the calls.\n"
     " *\n"
     " * inline assembly the way the kernel writes it: asm volatile\n"
@@ -693,15 +693,15 @@ static const char compiler_text[] =
     " * back by value; (type){ ... } literals; a variadic call of any\n"
     " * length.\n"
     " *\n"
-    " * a text without main becomes an object: bytes that still\n"
-    " * wait for other texts' names. 'link' on a list of objects\n"
+    " * a text without main becomes an object with undefined\n"
+    " * names. 'link' on a list of objects\n"
     " * joins them into one image -- or into a kernel, when one of\n"
     " * them lays down kmain. 'build' on a list of texts does all\n"
     " * of it: every .c through this compiler, every .S (the gnu\n"
     " * dialect the kernel's own assembly is written in) through\n"
     " * the translator, and the objects through the linker. the\n"
-    " * kernel's own sources, taken in from the exchange disk, build\n"
-    " * this way into a kernel.elf that boots.\n"
+    " * kernel's own sources build this way into a bootable\n"
+    " * kernel.elf.\n"
     " *\n"
     " * not here: a 128-bit type, and va_arg of a struct.\n"
     " */\n"
@@ -780,7 +780,7 @@ object *system_served(void)
  * of left looking frozen. */
 void system_off(void)
 {
-    journal_says("system", "going to rest");
+    journal_says("system", "shutting down");
 
     object *roots[2] = { persistent_root, shell_session() };
     if (persistent_root && blk_present())
@@ -792,7 +792,7 @@ void system_off(void)
     outw(0xB004, 0x2000);             /* bochs, older qemu */
     outw(0x4004, 0x3400);             /* virtualbox */
 
-    journal_says("system", "the machine would not sleep");
+    journal_says("system", "the firmware did not power off");
 }
 
 void system_restart(void)
@@ -1185,7 +1185,7 @@ void kmain(eb_boot_info *bi)
         loader_file_size = bi->loader_file_size;
         kernel_file = (const u8 *)phys_to_virt(bi->kernel_file);
         kernel_file_size = bi->kernel_file_size;
-        kprintf("boot: the loader handed its files over, %llu and %llu bytes\n",
+        kprintf("boot: the loader passed its files, %llu and %llu bytes\n",
                 loader_file_size, kernel_file_size);
     }
 #ifdef __erebus__
@@ -1413,7 +1413,7 @@ void kmain(eb_boot_info *bi)
         got = obj_collect();
         t1 = time_ns();
         kprintf("stress: swept %llu objects in %llu ms -- the machine "
-                "stood still for exactly that long\n",
+                "was paused for that long\n",
                 got, (t1 - t0) / 1000000);
 
         t0 = time_ns();
@@ -1488,7 +1488,7 @@ void kmain(eb_boot_info *bi)
             standard_obj[i] = proc_object(proc);
             obj_retain(standard_obj[i]);
             standard_wire(standard[i].name, standard_obj[i]);
-            kprintf("proc: %llu (%s) waiting on its letter box\n",
+            kprintf("proc: %llu (%s) waiting on its port\n",
                     proc_id(proc), proc_name(proc));
         }
     }
@@ -1541,7 +1541,7 @@ void kmain(eb_boot_info *bi)
     }
 
     if (!net_start())
-        kprintf("net:  no network card found; the wire goes nowhere\n");
+        kprintf("net:  no network card found\n");
 
     /* --- the desktop ------------------------------------------------- */
 
@@ -1856,11 +1856,9 @@ void kmain(eb_boot_info *bi)
             if (ln) pipe_line_set(ln);
         }
 
-        /* The nodes: one row per machine met through the pipe, with
-         * the person's column of what each may do here. Read and write
-         * -- the trust in the table is theirs to give and take. Beside
-         * it "network", which the kernel rewrites with what it sees on
-         * the wire; read-only, like activity. */
+        /* The nodes table: one row per machine met through the pipe;
+         * the may column is edited by the person (read and write).
+         * "network": rewritten by the kernel every 2 s, read-only. */
         {
             object *nd = find_petnamed(root, "nodes", TYPE_TEXT, NULL, NULL);
             if (nd) nodes_adopt(nd);
@@ -1960,7 +1958,7 @@ void kmain(eb_boot_info *bi)
 
         ensure_language(root);
 
-        journal_says("system", session ? "started; everything is as it was left"
+        journal_says("system", session ? "started; graph restored"
                                        : "started fresh");
 
         /* One capability, held by the shell, carrying everything we can
@@ -2005,8 +2003,8 @@ void kmain(eb_boot_info *bi)
         thread_create("shell", shell_run, NULL, kernel_domain);
         thread_create("activity", activity_thread, NULL, kernel_domain);
         if (!blk_present())
-            journal_says("system", "nothing keeps the graph between starts; "
-                                   "'disks' in the terminal shows where a store could be made");
+            journal_says("system", "no store; the graph is not saved.  "
+                                   "'disks' and 'settle' in the terminal make one");
     }
 
     /* The kernel is up: the loader's count of starts goes back to
@@ -2018,7 +2016,7 @@ void kmain(eb_boot_info *bi)
             kprintf("boot: the installed kernel did not come up twice; the previous one is back as kernel.elf\n");
             journal_says("system", "the new kernel did not come up; the previous one is back");
         } else if (was > 1) {
-            journal_says("system", "the machine is up after a start that did not finish");
+            journal_says("system", "started after an incomplete previous start");
         }
     }
 

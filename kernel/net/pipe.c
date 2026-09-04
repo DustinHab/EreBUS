@@ -1,12 +1,12 @@
 /*
  * pipe.c -- objects, words, work and kernels between machines, UDP datagrams.
  * - SEEK/HERE plain: name, work flag, free memory, key claim, version, up to four other machines heard
- * - HELLO/WELCOME: fresh x25519 keys, signed with the door key; a node is its key, one row in the nodes table
- * - SEALED envelopes: AES-128-GCM, one key per direction, counter per record, replay refused
- * - OFFER/CHUNK/HAVE/TAKEN: windowed transfer straight from and into objects, up to 8 MiB; kind 4 = a kernel
- * - a kernel is installed and booted only when the sender's row says "update"; work only with "work | welcomed" or the row's "work"
+ * - HELLO/WELCOME: x25519 handshake signed with the door key (ed25519); the key identifies the node, one row in the nodes table
+ * - SEALED: AES-128-GCM records, one key per direction, counter per record, replays dropped
+ * - OFFER/CHUNK/HAVE/TAKEN: windowed transfer directly from and into objects, up to 8 MiB; kind 4 = kernel image
+ * - a kernel is installed only when the sender's nodes row contains "update"; work runs only with "work | welcomed" or the row's "work"
  * - heartbeat: SEEK to every node with an address every 30 s; the "network" page is rewritten every 2 s
- * - limit: identity is trust on first meeting; a key met once must answer again from its address
+ * - identity is trust on first use; a different key from a known address is rejected
  */
 #include <eb/pipe.h>
 #include <eb/nodes.h>
@@ -269,8 +269,9 @@ static void line_append(const char *who, const char *what)
 /* Company on the wire                                                 */
 /* ------------------------------------------------------------------ */
 
-/* Every machine heard, by address: what it claimed and when. The
- * "found" of a scan are the ones heard since the scan began. */
+/* Machines heard on the wire, by address: name, flags, key claim,
+ * version, time of the last datagram. "found" = heard since the last
+ * scan began. */
 #define HEARD_MAX 16
 
 typedef struct {
@@ -297,7 +298,7 @@ void pipe_scan(void)
     scan_started_ns = time_ns();
     scan_until_ns = scan_started_ns + 3ULL * SECOND;
     scan_last_call_ns = 0;
-    journal_says("pipe", "calling out on the wire");
+    journal_says("pipe", "scan: SEEK sent");
 }
 
 bool pipe_scanning(void)
@@ -379,11 +380,10 @@ static heardrec *heard_note(const u8 *ip, u16 port, const u8 *name, u32 nmax,
     return h;
 }
 
-/* magic, kind, pad, the name; whether we take work from the asker and
- * how much air we have; our key as a claim, our version, and up to four
- * other machines heard lately -- so a wire's company spreads past
- * where a broadcast reaches. An older machine reads the first 40 bytes
- * and ignores the rest. */
+/* SEEK/HERE: magic, kind, pad, name (24); work flag for the recipient;
+ * free memory in MiB; own key (32, unverified claim); version (24);
+ * count and up to four (ip, port) pairs heard within QUIET_S, for
+ * discovery across routers. Older versions read the first 40 bytes. */
 static void say_who(u8 kind, const u8 dst[4], u16 dport)
 {
     u8 pkt[128];
@@ -421,8 +421,8 @@ static void say_who(u8 kind, const u8 dst[4], u16 dport)
     net_udp_send(dst, PIPE_PORT, dport, pkt, 97 + 6 * n);
 }
 
-/* An address another machine says it heard: asked once a minute at
- * most, and only when we have not heard it ourselves lately. */
+/* An address reported by another machine: one SEEK at most per minute,
+ * and only when it has not been heard directly within QUIET_S. */
 static struct { u8 ip[4]; u64 ns; } gossip_asked[8];
 static u32 gossip_at;
 
@@ -513,8 +513,8 @@ static sealrec *seal_slot_for(const u8 *ip)
     return old;
 }
 
-/* Whether the machine behind a session may do this here: proven, and
- * its row in the nodes table says so. */
+/* Whether the node behind a session has a right: authenticated, and
+ * its nodes row contains the right. */
 static bool may(const sealrec *s, u32 right)
 {
     if (!s || !s->proven) return false;
@@ -522,8 +522,8 @@ static bool may(const sealrec *s, u32 right)
     return i >= 0 && (nodes_may_at((u32)i) & right) != 0;
 }
 
-/* A machine's name for the journal: its row's name, else what it
- * called itself on the wire, else its address. */
+/* A machine's name for log lines: its nodes row, else the name it sent
+ * in HERE, else its address. */
 static void name_of(const u8 *ip, const sealrec *s, char out[24])
 {
     i32 i = (s && s->proven) ? nodes_by_key(s->idkey) : nodes_by_address(ip);
@@ -618,9 +618,9 @@ static void welcome_message(u8 *m, u32 sid, const u8 *their_eph, const u8 *my_ep
     memcpy(m + 48, my_eph, 32);
 }
 
-/* The name and version this machine claims, after a signed knock:
- * claims, not proven, like the ones in a HERE -- but they let the row a
- * first meeting writes carry a name from the start. */
+/* Name and version appended to a signed HELLO/WELCOME. Unverified,
+ * like the ones in HERE; used to name the row written at the first
+ * handshake. */
 static u32 add_claims(u8 *pkt)
 {
     memset(pkt + KNOCK_SIGNED, 0, KNOCK_NAMED - KNOCK_SIGNED);
@@ -631,10 +631,10 @@ static u32 add_claims(u8 *pkt)
     return KNOCK_NAMED;
 }
 
-/* A knock or its answer: the fresh key and, when the machine has an
- * identity, that identity's key, a signature over the exchange, and
- * the name and version it claims. 44 bytes without an identity, 188
- * with; an older machine reads the first 44 or 140. */
+/* HELLO and WELCOME: the ephemeral x25519 key; with an identity also
+ * the identity key, a signature over the exchange, and the claimed name
+ * and version. 44 bytes without an identity, 188 with; older versions
+ * read the first 44 or 140. */
 static u32 build_hello(u8 *pkt)
 {
     wr32(pkt, MAGIC);
@@ -668,8 +668,8 @@ static void knock_send(void)
     net_udp_send(knock.ip, PIPE_PORT, knock.port, pkt, n);
 }
 
-/* What a knock claimed beyond its proof, written into the heard cache
- * so the row and the journal have a name for the machine at once. */
+/* Name, version and key from a signed handshake, written into the
+ * heard cache. */
 static void knock_claims(const u8 *ip, u16 port, const u8 *p, u32 len)
 {
     if (len < KNOCK_NAMED) return;
@@ -697,31 +697,30 @@ static void knock_claims(const u8 *ip, u16 port, const u8 *p, u32 len)
     memcpy(h->key, p + 44, 32);
 }
 
-/* Who a machine is, held against the nodes table. A key met before is
- * that node, wherever it answers from; the row follows it. A key never
- * met is a new node -- unless the address it answers from belongs to a
- * node already, which is the one case turned away: the machine at a
- * known address must be the one met there, until the person removes
- * that row. -1: turned away. 0: known, or unproven and unclaimed. 1:
- * met for the first time. */
+/* Identity check against the nodes table. Known key: its row is
+ * updated (address, version, name if still unnamed). Unknown key from
+ * an address bound to another row: rejected until that row is removed.
+ * Unknown key otherwise: a new row. No key: rejected when the address
+ * is bound to a row, else an unauthenticated session. Returns -1
+ * rejected, 0 known or unauthenticated, 1 first handshake. */
 static i32 identity_verdict(const u8 *ip, u16 port, const u8 *idkey)
 {
     nodes_apply();
     i32 at = nodes_by_address(ip);
     if (!idkey) {
         if (at < 0) return 0;
-        kprintf("pipe: %u.%u.%u.%u comes without its key, though one is remembered for it; turned away\n",
+        kprintf("pipe: %u.%u.%u.%u sent no identity key, but the address is bound to a node; rejected\n",
                 ip[0], ip[1], ip[2], ip[3]);
-        journal_says("pipe", "a machine came without the key remembered for it; turned away");
+        journal_says("pipe", "a machine without a key at a bound address was rejected");
         return -1;
     }
     char fp[64];
     ssh_fingerprint_of(idkey, fp);
     i32 me = nodes_by_key(idkey);
     if (me < 0 && at >= 0) {
-        kprintf("pipe: %u.%u.%u.%u comes with a key that is not the one remembered for it (%s); turned away\n",
+        kprintf("pipe: %u.%u.%u.%u: key %s is not the one remembered for this address; rejected\n",
                 ip[0], ip[1], ip[2], ip[3], fp);
-        journal_says("pipe", "a machine came with a key that is not the one remembered for it; turned away");
+        journal_says("pipe", "a different key from a known address was rejected");
         return -1;
     }
     heardrec *h = heard_by_ip(ip);
@@ -730,7 +729,7 @@ static i32 identity_verdict(const u8 *ip, u16 port, const u8 *idkey)
     if (row < 0) {
         kprintf("pipe: no room in nodes for %u.%u.%u.%u (%s)\n",
                 ip[0], ip[1], ip[2], ip[3], fp);
-        journal_says("pipe", "the nodes table has no room left for another machine");
+        journal_says("pipe", "the nodes table is full");
         return 0;
     }
     return me < 0 ? 1 : 0;
@@ -1018,11 +1017,11 @@ bool pipe_ask(object *o, bool writable)
 bool pipe_ask_with(object *o, bool writable, object *input)
 {
     if (!input || wire_kind_of(obj_type(input)) == 0) {
-        journal_says("pipe", "an input for work is a text, bytes or a picture");
+        journal_says("pipe", "a work input must be a text, bytes or a picture");
         return false;
     }
     if (obj_size(input) == 0 || obj_size(input) > CARRY_MAX_BYTES) {
-        journal_says("pipe", "that input does not fit through");
+        journal_says("pipe", "the input exceeds 8 MiB");
         return false;
     }
     return ask_take(o, writable, input);
@@ -1033,8 +1032,8 @@ static bool ask_take(object *o, bool writable, object *input)
     if (!o) return false;
 
     if (!net_crypto_ok()) {
-        journal_says("pipe", "the seal cannot prove itself; "
-                             "nothing goes");
+        journal_says("pipe", "crypto self test failed; "
+                             "the pipe is disabled");
         return false;
     }
     if (obj_type(o) != TYPE_TEXT) {
@@ -1046,8 +1045,8 @@ static bool ask_take(object *o, bool writable, object *input)
     for (u32 i = 0; i < DESK_JOBS; i++)
         if (!desk[i].used) { j = &desk[i]; break; }
     if (!j) {
-        journal_says("pipe", "the desk is full; it will take more "
-                             "later");
+        journal_says("pipe", "the desk is full "
+                             "(4 jobs)");
         return false;
     }
 
@@ -1068,7 +1067,7 @@ static bool ask_take(object *o, bool writable, object *input)
     }
     while (len > 0 && d[len - 1] == '\n') len--;
     if (len == 0) {
-        journal_says("pipe", "there is nothing in it to ask");
+        journal_says("pipe", "the task is empty");
         return false;
     }
 
@@ -1105,12 +1104,12 @@ static bool ask_take(object *o, bool writable, object *input)
     }
 
     if (recipe_at >= len) {
-        journal_says("pipe", "the task has no recipe under its line");
+        journal_says("pipe", "no recipe after the split line");
         return false;
     }
     u64 rlen = len - recipe_at;
     if (rlen > RECIPE_MAX) {
-        journal_says("pipe", "that recipe is too long to send");
+        journal_says("pipe", "the recipe exceeds 1024 bytes");
         return false;
     }
 
@@ -1161,8 +1160,8 @@ static bool ask_take(object *o, bool writable, object *input)
 /* Sending                                                             */
 /* ------------------------------------------------------------------ */
 
-/* One thing in flight at a time, read straight from its source: the
- * object, retained for the journey, or the running kernel's bytes. */
+/* One outgoing transfer at a time, read directly from its source: a
+ * retained object, or the running kernel's bytes. */
 static struct {
     bool     busy;
     u8       kind;
@@ -1184,7 +1183,7 @@ static struct {
     u32      work_cand;
 } out;
 
-/* Updates waiting their turn: node rows, one kernel image for all. */
+/* Queue for 'update all': node rows, and the image to send to each. */
 static struct {
     i32     rows[NODES_MAX];
     u32     n, at;
@@ -1196,8 +1195,8 @@ static const u8 *out_bytes(void)
     return out.obj ? (const u8 *)obj_data(out.obj) : out.raw;
 }
 
-/* A transfer is over, one way or the other. An input that was going
- * ahead of a job's part tells the desk whether it got there. */
+/* End of an outgoing transfer. For a work input, the desk's state for
+ * that candidate becomes delivered or failed. */
 static void out_end(bool ok)
 {
     if (out.work_job >= 0 && out.work_job < DESK_JOBS &&
@@ -1238,14 +1237,14 @@ bool pipe_post(object *o)
     if (!o) return false;
 
     if (!net_crypto_ok()) {
-        journal_says("pipe", "the seal cannot prove itself; "
-                             "nothing goes");
+        journal_says("pipe", "crypto self test failed; "
+                             "the pipe is disabled");
         return false;
     }
 
     u8 kind = wire_kind_of(obj_type(o));
     if (kind == 0) {
-        journal_says("pipe", "only plain things can cross");
+        journal_says("pipe", "only text, bytes and pictures can be sent");
         return false;
     }
 
@@ -1258,14 +1257,14 @@ bool pipe_post(object *o)
     }
 
     if (out.busy) {
-        journal_says("pipe", "still carrying the last thing");
+        journal_says("pipe", "a transfer is still in progress");
         return false;
     }
 
     const u8 *d = (const u8 *)obj_data(o);
     u64 size = obj_size(o);
     if (!d || size == 0 || size > CARRY_MAX_BYTES) {
-        journal_says("pipe", "that does not fit through");
+        journal_says("pipe", "the object exceeds 8 MiB");
         return false;
     }
 
@@ -1293,7 +1292,7 @@ static bool update_start(i32 row, object *image, char *why, u32 max)
     char nm[24];
     nodes_name_at((u32)row, nm);
     if (!nodes_address_at((u32)row, ip, &port)) {
-        copy_why(why, max, "no address is known for that node yet; it must be heard on the wire first.");
+        copy_why(why, max, "no address known for that node.");
         return false;
     }
     const u8 *src;
@@ -1305,19 +1304,19 @@ static bool update_start(i32 row, object *image, char *why, u32 max)
         const u8 *l, *k;
         u64 ls, ks;
         if (!system_boot_files(&l, &ls, &k, &ks)) {
-            copy_why(why, max, "the loader did not hand this kernel over at start; 'update <node> with <kernel.elf>' sends a built one.");
+            copy_why(why, max, "the running kernel's bytes are not available; use 'update <node> with <kernel.elf>'.");
             return false;
         }
         src = k;
         len = ks;
     }
     if (!looks_like_kernel(src, len)) {
-        copy_why(why, max, "that is not a kernel: the kernel.elf a build makes is.");
+        copy_why(why, max, "not a kernel image (kernel.elf).");
         return false;
     }
     if (!out_begin(W_KERNEL, "kernel.elf", image, image ? NULL : src,
                    (u32)len, ip, port, row)) {
-        copy_why(why, max, "still carrying the last thing.");
+        copy_why(why, max, "a transfer is in progress.");
         return false;
     }
     char line[64];
@@ -1332,17 +1331,17 @@ static bool update_start(i32 row, object *image, char *why, u32 max)
 
 bool pipe_update(const char *node, object *image, char *why, u32 max)
 {
-    if (!net_crypto_ok()) { copy_why(why, max, "the seal cannot prove itself; nothing goes."); return false; }
+    if (!net_crypto_ok()) { copy_why(why, max, "crypto self test failed; the pipe is disabled."); return false; }
     nodes_apply();
     i32 row = nodes_by_name(node);
     if (row < 0) { copy_why(why, max, "no node of that name in nodes.  'nodes' lists them."); return false; }
-    if (out.busy) { copy_why(why, max, "still carrying the last thing; try again in a moment."); return false; }
+    if (out.busy) { copy_why(why, max, "a transfer is in progress; retry later."); return false; }
     return update_start(row, image, why, max);
 }
 
 u32 pipe_update_all(object *image, char *why, u32 max)
 {
-    if (!net_crypto_ok()) { copy_why(why, max, "the seal cannot prove itself; nothing goes."); return 0; }
+    if (!net_crypto_ok()) { copy_why(why, max, "crypto self test failed; the pipe is disabled."); return 0; }
     nodes_apply();
     if (upq.image) obj_release(upq.image);
     upq.image = image;
@@ -1351,7 +1350,7 @@ u32 pipe_update_all(object *image, char *why, u32 max)
     for (u32 i = 0; i < nodes_count(); i++)
         if (nodes_address_at(i, NULL, NULL)) upq.rows[upq.n++] = (i32)i;
     if (upq.n == 0) {
-        copy_why(why, max, "no node with an address in nodes; nobody to send to.");
+        copy_why(why, max, "no node with an address in nodes.");
         if (upq.image) obj_release(upq.image);
         upq.image = NULL;
         return 0;
@@ -1406,8 +1405,8 @@ static struct {
 static u64 last_taken_id;
 static u64 restart_at_ns;
 
-/* Inputs sent ahead of work, one per asking machine, held until the
- * ask names them -- or five minutes, whichever comes first. */
+/* Work inputs received ahead of an ASK, one per sending address, held
+ * for up to five minutes. */
 static struct {
     bool    used;
     u8      from[4];
@@ -1508,8 +1507,9 @@ static void lay_answer(u32 no, const u8 *text)
     if (!arrivals_place(o)) obj_release(o);
 }
 
-/* The last byte is in. A kernel is installed for the next start and the
- * machine restarts in a moment; anything else lies in arrivals. */
+/* Transfer complete. Kernel: installed for the next start, restart in
+ * 3 s. Work input: held for the ASK. Anything else: placed in
+ * arrivals. */
 static void arrival_done(sealrec *s)
 {
     char who[24];
@@ -1519,11 +1519,11 @@ static void arrival_done(sealrec *s)
         const u8 *d = (const u8 *)obj_data(in.obj);
         char why[120];
         if (!looks_like_kernel(d, in.total)) {
-            kprintf("pipe: what came from %s as a kernel is not one\n", who);
-            journal_says("pipe", "what came as a kernel is not one; dropped");
+            kprintf("pipe: the kernel from %s is not an elf image; dropped\n", who);
+            journal_says("pipe", "a received kernel was not an elf image; dropped");
         } else if (!fat_install_kernel(d, in.total, why, sizeof(why))) {
             kprintf("pipe: the kernel from %s could not be installed: %s\n", who, why);
-            journal_says("pipe", "a kernel came, but could not be installed");
+            journal_says("pipe", "a received kernel could not be installed");
         } else {
             kprintf("pipe: a kernel of %u bytes came from %s; installed for the next start; restarting in 3 s\n",
                     in.total, who);
@@ -1545,7 +1545,6 @@ static void arrival_done(sealrec *s)
     in.active = false;
 
     if (in.for_work) {
-        /* Not material for the person: the input a job will name. */
         input_hold(in.from, o);
         kprintf("pipe: an input of %u bytes for work came from %s\n", in.total, who);
         return;
@@ -1565,7 +1564,7 @@ static void arrival_done(sealrec *s)
         for (u32 i = 0; in.name[i] && sa < sizeof(said) - 1; i++)
             said[sa++] = in.name[i];
     else {
-        const char *un = "something unnamed";
+        const char *un = "unnamed";
         while (*un && sa < sizeof(said) - 1) said[sa++] = *un++;
     }
     said[sa] = 0;
@@ -1612,7 +1611,7 @@ bool pipe_say(const char *text)
     u16 pp;
     i32 node;
     if (!target_resolve(peer, &pp, &node)) {
-        journal_says("pipe", "nobody is on the line, and no peer is named");
+        journal_says("pipe", "no session and no peer named");
         return false;
     }
     u32 n = 0;
@@ -1621,7 +1620,7 @@ bool pipe_say(const char *text)
     saypend.active = true;
     saypend.born_ns = time_ns();
     knock_begin(peer, pp, node);
-    journal_says("pipe", "knocking first; the word will follow");
+    journal_says("pipe", "handshake first; the line follows");
     return true;
 }
 
@@ -1631,9 +1630,9 @@ bool pipe_say(const char *text)
 
 static const char *refusal_words(u8 reason)
 {
-    if (reason == R_NOT_ALLOWED) return "it does not let this machine update it";
-    if (reason == R_TOO_BIG)     return "it will not take something that size";
-    return "it declined";
+    if (reason == R_NOT_ALLOWED) return "no update right granted there";
+    if (reason == R_TOO_BIG)     return "size refused";
+    return "declined";
 }
 
 static void inner_input(const u8 src[4], u16 sport, sealrec *s,
@@ -1671,7 +1670,7 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
             return;
         }
         if (in.active && id == in.id) {
-            /* the same offer again: the sender lost track; say how far */
+            /* the same offer again: answer with the current position */
             send_have(s, id, in.have);
             return;
         }
@@ -1730,8 +1729,8 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         }
         in.name[ni] = 0;
         if (wk == W_KERNEL) {
-            kprintf("pipe: %s sends a kernel of %u bytes; taking it\n", who, total);
-            journal_says("pipe", "a kernel is coming in from a node that may update this machine");
+            kprintf("pipe: receiving a kernel of %u bytes from %s\n", total, who);
+            journal_says("pipe", "receiving a kernel from a node with the update right");
         }
         send_have(s, id, 0);
         return;
@@ -1800,7 +1799,7 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         char note[64];
         u32 a = 0;
         while (nm[a] && a < 24) { note[a] = nm[a]; a++; }
-        const char *tail = " spoke on the line";
+        const char *tail = " wrote on the line";
         for (u32 i = 0; tail[i] && a < sizeof(note) - 1; i++)
             note[a++] = tail[i];
         note[a] = 0;
@@ -1828,7 +1827,7 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         nodes_apply();
         if (!settings_work() && !may(s, NODE_MAY_WORK)) {
             answer_send(s, id, A_NOWORK, none);
-            kprintf("pipe: turned away a job (work is refused)\n");
+            kprintf("pipe: turned away a job: work is refused\n");
             return;
         }
         if (workj.active) {
@@ -1837,13 +1836,13 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         }
         if (!pipe_kdom) return;
 
-        /* The input the ask names went ahead of it, or did not. */
+        /* The ASK may refer to an input sent ahead of it. */
         object *input = NULL;
         if (p[5] & F_HAS_INPUT) {
             input = input_from(src);
             if (!input) {
                 answer_send(s, id, A_NOINPUT, none);
-                kprintf("pipe: a job names an input that never came; said so\n");
+                kprintf("pipe: an ask refers to an input that was not received; answered\n");
                 return;
             }
         }
@@ -1851,7 +1850,7 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         object *script = obj_create(TYPE_TEXT, rlen + 512, 0);
         if (!script) return;
         memcpy(obj_data(script), p + 40, rlen);
-        obj_set_name(script, "visiting work");
+        obj_set_name(script, "task text");
 
         object *reply = port_create(4);
         if (!reply) { obj_release(script); return; }
@@ -1924,9 +1923,9 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
                 if (j->pstate[i] == P_DONE) done++;
             if (done < j->parts) return;
 
-            /* The result, and who it came from. Parts that all answer
-             * numbers are summed; parts that answer words are gathered
-             * in their order. */
+            /* The result: numeric part answers are summed, others are
+             * concatenated in part order; the answering machines are
+             * named. */
             static char text[400];
             u32 at = 0;
             if (j->parts == 1) {
@@ -1967,8 +1966,8 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
         }
 
         if (status == A_NOINPUT) {
-            /* The input did not get there, or is gone again: once more
-             * ahead of the part, then that machine is struck. */
+            /* The worker has no input for this ask: resend it once,
+             * then remove the candidate. */
             for (u32 c = 0; c < j->cand_count; c++) {
                 if (!ip4_same(j->cand[c], fask[fi].ip)) continue;
                 if (++j->itries[c] >= 2) cand_strike(j, c);
@@ -1997,7 +1996,7 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
                 break;
             }
             if (j->cand_count == 0) {
-                job_end(j, false, NULL, "nobody takes the work");
+                job_end(j, false, NULL, "no machine accepts work");
                 return;
             }
             j->pstate[part] = P_PEND;
@@ -2052,9 +2051,9 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         }
         if (kind == K_SEEK) say_who(K_HERE, src, sport);
 
-        /* A node we know, by the key it claims: at its own address its
-         * news is taken; from a new address it is knocked, and the
-         * answer moves the row when the key proves. */
+        /* A known key claimed in a HERE: from the row's own address the
+         * version is updated; from another address a handshake is
+         * started, and a verified answer moves the row. */
         if (h->has_key) {
             nodes_apply();
             i32 i = nodes_by_key(h->key);
@@ -2086,7 +2085,7 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
             u8 msg[46];
             hello_message(msg, sid, p + 12);
             if (!ed25519_verify(p + 44, msg, sizeof(msg), p + 76)) {
-                kprintf("pipe: a knock from %u.%u.%u.%u carried a signature that does not check; ignored\n",
+                kprintf("pipe: the handshake from %u.%u.%u.%u has an invalid signature; ignored\n",
                         src[0], src[1], src[2], src[3]);
                 return;
             }
@@ -2114,7 +2113,7 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         s->answer_len = build_welcome(s->answer, sid, p + 12, pub);
         net_udp_send(src, PIPE_PORT, sport, s->answer, s->answer_len);
 
-        kprintf("pipe: sealed with %u.%u.%u.%u, %s\n",
+        kprintf("pipe: session with %u.%u.%u.%u, %s\n",
                 s->ip[0], s->ip[1], s->ip[2], s->ip[3],
                 s->proven ? "proven" : "unproven");
         return;
@@ -2130,7 +2129,7 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
             u8 msg[80];
             welcome_message(msg, knock.sid, knock.pub, p + 12);
             if (!ed25519_verify(p + 44, msg, sizeof(msg), p + 76)) {
-                kprintf("pipe: the answer from %u.%u.%u.%u carried a signature that does not check; ignored\n",
+                kprintf("pipe: the answer from %u.%u.%u.%u has an invalid signature; ignored\n",
                         src[0], src[1], src[2], src[3]);
                 return;
             }
@@ -2139,16 +2138,16 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         }
         i32 verdict = identity_verdict(src, knock.port, idkey);
 
-        /* The knock was for one node in particular: whoever else
-         * answers, even a node known, is not who was meant. */
+        /* The handshake targeted a specific row: a different key, even
+         * a known one, is rejected. */
         if (verdict >= 0 && knock.expect >= 0) {
             u8 ek[32];
             if (!idkey || !nodes_key_at((u32)knock.expect, ek) || memcmp(ek, idkey, 32) != 0) {
                 char nm[24];
                 if (!nodes_name_at((u32)knock.expect, nm)) nm[0] = 0;
-                kprintf("pipe: the machine at %u.%u.%u.%u is not %s; nothing goes there\n",
+                kprintf("pipe: the machine at %u.%u.%u.%u is not %s; transfer cancelled\n",
                         src[0], src[1], src[2], src[3], nm);
-                journal_says("pipe", "the machine that answered is not the node meant; nothing was sent");
+                journal_says("pipe", "the answering machine is not the intended node; nothing was sent");
                 verdict = -1;
             }
         }
@@ -2179,12 +2178,12 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         memset(knock.priv, 0, 32);
         knock.active = false;
 
-        kprintf("pipe: sealed with %u.%u.%u.%u, %s\n",
+        kprintf("pipe: session with %u.%u.%u.%u, %s\n",
                 s->ip[0], s->ip[1], s->ip[2], s->ip[3],
                 s->proven ? "proven" : "unproven");
-        journal_says("pipe", !s->proven ? "the way is sealed, but the machine could not prove itself"
-                             : verdict == 1 ? "the way is sealed; the machine is met for the first time and remembered"
-                                            : "the way is sealed with the machine remembered");
+        journal_says("pipe", !s->proven ? "session opened; the machine sent no identity"
+                             : verdict == 1 ? "session opened; first handshake, key remembered"
+                                            : "session opened with a known node");
         return;
     }
 
@@ -2215,7 +2214,7 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
     }
 
     if (kind == K_OFFER || kind == K_CHUNK || kind == K_TAKEN)
-        kprintf("pipe: a plain offer was turned away\n");
+        kprintf("pipe: an unencrypted offer was ignored\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -2279,7 +2278,7 @@ static void page_write(void)
         if (!h->used || now - h->seen_ns > QUIET_S * SECOND) continue;
         if (h->has_key && nodes_by_key(h->key) >= 0) continue;
         if (nodes_by_address(h->ip) >= 0) continue;
-        if (!head) { at = put(buf, at, "\nheard on the wire, not met:\n"); head = true; }
+        if (!head) { at = put(buf, at, "\nheard, not authenticated:\n"); head = true; }
         at = put(buf, at, "  ");
         u32 col = at;
         at = put_ip(buf, at, h->ip);
@@ -2356,9 +2355,9 @@ static void carry(void)
                 line[at] = 0;
                 journal_says("pipe", line);
             } else if (out.work_job >= 0) {
-                journal_says("pipe", "the input for the work is there");
+                journal_says("pipe", "the work input was delivered");
             } else {
-                journal_says("pipe", "carried it across, sealed");
+                journal_says("pipe", "transfer complete");
             }
             out_end(true);
         } else if (out.taken_status == T_BUSY) {
@@ -2388,7 +2387,7 @@ static void carry(void)
     sealrec *s = seal_by_ip(out.to);
     if (!s) {
         knock_begin(out.to, out.to_port, out.node);
-        return;                              /* the knock's own clock gives up on it */
+        return;                              /* the handshake has its own timeout */
     }
 
     if (!out.offered) {
@@ -2404,14 +2403,14 @@ static void carry(void)
     if (now - out.last_progress_ns > 700 * MS) {
         if (++out.stalls > 20) {
             name_of(out.to, s, who);
-            journal_says("pipe", "the far side did not take it");
+            journal_says("pipe", "the transfer stalled; cancelled");
             kprintf("pipe: %s went quiet after %u of %u bytes\n", who, out.acked, out.len);
             out_end(false);
             return;
         }
         out.sent = out.acked;
         out.last_progress_ns = now;
-        send_offer(s);                       /* the far side answers with how far it is */
+        send_offer(s);                       /* the receiver answers with its position */
     }
 
     u32 burst = 0;
@@ -2441,8 +2440,8 @@ void pipe_service(void)
         if (settings_peer(peer, &pp)) say_who(K_SEEK, peer, pp);
     }
 
-    /* The heartbeat: every node with an address is called by name, so
-     * the network page stays current and a node that moved is found. */
+    /* Heartbeat: a SEEK to every node with an address. Keeps the
+     * network page current and finds nodes that changed address. */
     static u64 beat_ns;
     if (now - beat_ns > BEAT_S * SECOND) {
         beat_ns = now;
@@ -2477,8 +2476,8 @@ void pipe_service(void)
             if (knock.tries >= 3) {
                 knock.active = false;
                 if (out.busy && ip4_same(out.to, knock.ip)) {
-                    journal_says("pipe", "nobody answered the knock");
-                    kprintf("pipe: the knock went unanswered\n");
+                    journal_says("pipe", "no answer to the handshake");
+                    kprintf("pipe: the handshake went unanswered\n");
                     out_end(false);
                 }
             } else {
@@ -2498,7 +2497,7 @@ void pipe_service(void)
             say_wire(saypend.text);
         } else if (now - saypend.born_ns > 10 * SECOND) {
             saypend.active = false;
-            journal_says("pipe", "the word found no open door");
+            journal_says("pipe", "no session for the line");
         }
     }
 
@@ -2601,7 +2600,7 @@ void pipe_service(void)
                 }
             }
             if (j->cand_count == 0) {
-                job_end(j, false, NULL, "nobody on the wire takes work");
+                job_end(j, false, NULL, "no machine accepts work");
                 j = NULL;
             } else {
                 char line[48];
@@ -2618,7 +2617,7 @@ void pipe_service(void)
         if (j && j->state == DJ_RUN) {
             if (now > j->deadline_ns) {
                 job_end(j, false, NULL,
-                        "the work did not come back in time");
+                        "the job timed out");
             } else {
                 for (u32 pi = 0; pi < j->parts; pi++) {
                     if (j->pstate[pi] != P_PEND) continue;
@@ -2632,8 +2631,9 @@ void pipe_service(void)
 
                     u32 c = j->next_cand % j->cand_count;
 
-                    /* The input goes ahead of the first part a machine
-                     * gets; a machine it cannot reach gets no part. */
+                    /* The input is transferred before a machine's first
+                     * part; a machine the input cannot reach gets no
+                     * part. */
                     if (j->input && j->istate[c] != 2) {
                         if (j->istate[c] == 3) {
                             cand_strike(j, c);
@@ -2702,7 +2702,7 @@ void pipe_service(void)
         }
     }
 
-    /* Updates queued for many nodes go one after the other. */
+    /* 'update all': the next queued node when no transfer is in flight. */
     if (!out.busy && upq.at < upq.n) {
         char why[120];
         i32 row = upq.rows[upq.at++];

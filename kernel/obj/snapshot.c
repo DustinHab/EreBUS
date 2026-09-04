@@ -285,7 +285,7 @@ static bool drop_oldest(void)
 
     static u8 zero[BLK_SECTOR_SIZE];
     if (!blk_write(slot_lba((u32)slot), 1, zero)) return false;
-    kprintf("snap: generation %llu let go, to make room in the log\n", oldest);
+    kprintf("snap: generation %llu dropped to make room in the log\n", oldest);
     return true;
 }
 

@@ -683,8 +683,8 @@ static void dhcp_run(void)
     ip_gw[0] = 10; ip_gw[1] = 0; ip_gw[2] = 2; ip_gw[3] = 2;
     ip_dns[0] = 10; ip_dns[1] = 0; ip_dns[2] = 2; ip_dns[3] = 3;
     configured = true;
-    kprintf("net:  nobody leases here; assuming the emulator's "
-            "10.0.2.15\n");
+    kprintf("net:  no dhcp answer; assuming 10.0.2.15 "
+            "(emulator)\n");
 }
 
 static bool gateway_find(void)
@@ -995,7 +995,7 @@ static u32 web_answer(const char *path)
             blen = (u32)size;
         } else {
             blen = wput(web_body, 0,
-                        "a list; open its things one by one\n");
+                        "a list; open its entries individually\n");
         }
     } else {
         found = false;
@@ -1224,7 +1224,7 @@ static void door_service(void)
     if (door.tries >= 8) {
         door.dead = true;
         door.active = false;
-        kprintf("door: the visitor went quiet; the visit is over\n");
+        kprintf("door: the client timed out; session closed\n");
         return;
     }
     u32 n = door.snd_nxt - door.snd_una;
@@ -1473,7 +1473,7 @@ static void fetch_into(object *o)
     u32 body = 0;
 
     if (!nic_up() || !gateway_find()) {
-        said = "the wire goes nowhere.\n";
+        said = "no network card.\n";
         goto answer;
     }
 
@@ -1483,15 +1483,15 @@ static void fetch_into(object *o)
      * goes through tls; the others go plainly. */
     for (u32 hop = 0; hop < 5; hop++) {
         if (!dns_resolve(host, hlen, addr)) {
-            said = "the name service does not know it.\n";
+            said = "dns: no such name.\n";
             break;
         }
         bool ok = secure
                 ? tls_get(addr, host, hlen, path, plen, page, sizeof(page), &got)
                 : http_fetch(addr, host, hlen, path, plen, page, sizeof(page), &got);
         if (!ok) {
-            said = secure ? "the sealed channel did not open.\n"
-                          : "no answer from there.\n";
+            said = secure ? "tls: the connection did not open.\n"
+                          : "no answer.\n";
             break;
         }
 
@@ -1550,7 +1550,7 @@ answer:
         out = write_words(d, out, (u32)size, said);
         for (u64 i = out; i < size; i++) d[i] = 0;
         obj_touch(o);
-        journal_says("net", "a page did not come");
+        journal_says("net", "the page was not fetched");
         return;
     }
 
@@ -1566,8 +1566,8 @@ answer:
     last_verified = secure && tls_last_verified();
 
     obj_touch(o);
-    journal_says("net", secure ? "a sealed page came"
-                               : "a page came");
+    journal_says("net", secure ? "a page arrived (tls)"
+                               : "a page arrived");
 }
 
 static void net_thread(void *arg)
@@ -1685,14 +1685,14 @@ bool net_start(void)
     else
         kprintf("tls:  self test FAILED -- https disabled\n");
     if (crypto_good)
-        kprintf("pipe: transfers travel sealed; a knock is signed with the door's key, "
-                "and a machine met once must answer with the same key\n");
+        kprintf("pipe: ready; the handshake is signed with the door key, "
+                "and a known address must answer with its known key\n");
 
     wifi_init();
     thread_create("net", net_thread, NULL, kdom);
     running = true;
 
-    kprintf("net:  outbound; http, and https sealed but not yet "
-            "verified; one errand at a time\n");
+    kprintf("net:  client only; http, and https without certificate "
+            "verification; one connection at a time\n");
     return true;
 }

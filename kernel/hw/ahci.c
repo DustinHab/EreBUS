@@ -389,7 +389,7 @@ static bool claim(ahci_disk *d, u64 base, u64 span, bool take_blank)
     }
     if (!disk_read(d, base, 1, sector)) return false;
     if (memcmp(sector, STORE_MARK, sizeof(STORE_MARK) - 1) == 0) {
-        kprintf("blk:  %s on port %u carries our mark; it is the store\n", what, port);
+        kprintf("blk:  %s on port %u carries the store mark; it is the store\n", what, port);
         return true;
     }
 
@@ -411,7 +411,7 @@ static bool claim(ahci_disk *d, u64 base, u64 span, bool take_blank)
     memset(sector, 0, BLK_SECTOR_SIZE);
     memcpy(sector, STORE_MARK, sizeof(STORE_MARK) - 1);
     if (!disk_write(d, base, 1, sector)) return false;
-    kprintf("blk:  a blank %s on port %u; it is the store now and carries our mark\n",
+    kprintf("blk:  a blank %s on port %u; it is the store now and carries the store mark\n",
             base ? "partition" : "disk", port);
     return true;
 }
@@ -499,7 +499,7 @@ bool blk_init(void)
         }
         if (!present) store_p = NULL;
     } else {
-        kprintf("blk:  no disk to keep the graph on\n");
+        kprintf("blk:  no disk for the store\n");
     }
 
     if (aux_p)

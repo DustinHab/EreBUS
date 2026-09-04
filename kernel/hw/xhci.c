@@ -754,7 +754,7 @@ static void hub_up(usbdev *d)
      * kind, so ask for the one that fits the wire. */
     u16 type = d->speed >= 4 ? 0x2A00 : 0x2900;
     if (!control(d, 0xA0, 6, type, 0, 8, d->buf_pa + 320)) {
-        kprintf("usb:  the hub would not say how many ports it has\n");
+        kprintf("usb:  the hub did not report its port count\n");
         return;
     }
     u32 ports = d->buf[320 + 2];
@@ -770,7 +770,7 @@ static void hub_up(usbdev *d)
     sl[0] |= (1u << 26);                            /* it is a hub */
     sl[1] = (sl[1] & 0x00FFFFFFu) | (ports << 24);
     if (command(d->ictx_pa, TRB_TYPE(T_CONFIGURE_EP) | TRB_SLOT(d->slot), NULL) != 1) {
-        kprintf("usb:  the controller would not accept the hub\n");
+        kprintf("usb:  the controller rejected the hub configuration\n");
         return;
     }
 
@@ -805,8 +805,8 @@ static void look_at_hub(usbdev *h)
             }
             hub_clear(h, p, HUB_C_RESET);
             if (!done || !(st & ST_ENABLE)) {
-                kprintf("usb:  port %u of a hub: something is there, "
-                        "but it would not come up\n", p);
+                kprintf("usb:  port %u of a hub: a device is present "
+                        "but did not enable\n", p);
                 continue;
             }
             wait_ms(20);
@@ -865,7 +865,7 @@ static bool device_up(const where *w)
 
     u32 slot = 0;
     if (command(0, TRB_TYPE(T_ENABLE_SLOT), &slot) != 1 || slot == 0 || slot > max_slots) {
-        kprintf("usb:  port %u: the controller gave no slot\n", port);
+        kprintf("usb:  port %u: no slot from the controller\n", port);
         return false;
     }
     usbdev *d = dev_new(w);
@@ -890,14 +890,14 @@ static bool device_up(const where *w)
     e0[4] = 8;
 
     if (command(d->ictx_pa, TRB_TYPE(T_ADDRESS_DEVICE) | TRB_SLOT(slot), NULL) != 1) {
-        kprintf("usb:  port %u: the device took no address\n", port);
+        kprintf("usb:  port %u: the device did not accept an address\n", port);
         return false;
     }
 
     /* Who it is: the device descriptor, first eight bytes for the
      * packet size of endpoint zero, then all of it. */
     if (!control(d, 0x80, 6, 0x0100, 0, 8, d->buf_pa)) {
-        kprintf("usb:  port %u: no answer to the first question\n", port);
+        kprintf("usb:  port %u: no answer to the first descriptor request\n", port);
         return false;
     }
     if (speed < 3 && d->buf[7] != ep0_packet(speed)) {
@@ -998,7 +998,7 @@ static bool device_up(const where *w)
                 at, d->name, vendor, product, dclass);
         for (u32 k = 0; k < nclass; k++) kprintf(" %u", seen_class[k]);
         if (!nclass) kprintf(" none");
-        kprintf("; nothing here to type or point with\n");
+        kprintf("; no keyboard or pointer interface\n");
         return true;
     }
 
@@ -1088,15 +1088,15 @@ static bool device_up(const where *w)
                     in->map.buttons_bits, in->map.x_bits,
                     in->map.wheel_bits ? ", and a wheel" : ", and no wheel");
         else
-            kprintf("usb:  its pointer would not describe itself; "
-                    "read the boot way, without a wheel\n");
+            kprintf("usb:  no report descriptor from the pointer; "
+                    "boot protocol, no wheel\n");
     }
 
     if (nfound == 1) {
         kprintf("usb:  %s: %s (%04x:%04x), a %s\n", at, d->name, vendor, product,
                 d->in[0].kind == KIND_KEYBOARD ? "keyboard" : "mouse");
     } else {
-        kprintf("usb:  %s: %s (%04x:%04x), carrying", at, d->name, vendor, product);
+        kprintf("usb:  %s: %s (%04x:%04x), with", at, d->name, vendor, product);
         for (u32 k = 0; k < nfound; k++)
             kprintf("%s a %s", k ? " and" : "",
                     d->in[k].kind == KIND_KEYBOARD ? "keyboard" : "mouse");
@@ -1272,7 +1272,7 @@ static void look_at_ports(void)
                  * broken in it does not fill the log forever. Pulling
                  * whatever it is starts the count again. */
                 port_seen[p] = true;
-                kprintf("usb:  port %u: something is there, but it would not come up "
+                kprintf("usb:  port %u: a device is present but did not enable "
                         "(port register %08x)\n", p, op[OP_PORTSC(p)]);
             }
         } else if (!connected && port_seen[p]) {
@@ -1368,7 +1368,7 @@ static void claim_shared_ports(const pci_device *pd)
     if (slow) pci_write32(pd, 0xD0, slow);
 
     if (super || slow)
-        kprintf("usb:  took the shared sockets off the older controller "
+        kprintf("usb:  routed the shared ports from the ehci controller "
                 "(%u fast, %u slow)\n", popcount32(super), popcount32(slow));
 }
 
@@ -1464,13 +1464,13 @@ bool xhci_init(void)
     since = time_ns();
     while ((op[OP_USBSTS] & STS_HALTED) && time_ns() - since < 1000000000ULL) sched_yield();
     present = !(op[OP_USBSTS] & STS_HALTED);
-    if (!present) { kprintf("usb:  the controller would not run\n"); return false; }
+    if (!present) { kprintf("usb:  the controller did not start\n"); return false; }
 
     kprintf("usb:  xhci at %02x:%02x.%u, %u ports, %u slots, %u-byte contexts\n",
             pd->bus, pd->device, pd->function, max_ports, max_slots, csz);
     kprintf("usb:  %s\n", pointer_selftest()
-            ? "self test passed -- a pointer's own layout is read as written"
-            : "SELF TEST FAILED -- pointers will be read the boot way, without wheels");
+            ? "self test passed -- a pointer descriptor parses correctly"
+            : "SELF TEST FAILED -- boot protocol only, no wheels");
 
     /* Power anything that is not powered, then give the ports a moment
      * to show what is plugged in. */
@@ -1482,7 +1482,7 @@ bool xhci_init(void)
      * one line is the difference between a driver that failed and a
      * driver that was never given anything to find. */
     u32 live = 0;
-    kprintf("usb:  ports with something on them:");
+    kprintf("usb:  ports with devices:");
     for (u32 p = 1; p <= max_ports && p < 256; p++) {
         u32 sc = op[OP_PORTSC(p)];
         if (!(sc & PORT_CONNECTED)) continue;
@@ -1497,8 +1497,8 @@ bool xhci_init(void)
         u32 unpowered = 0;
         for (u32 p = 1; p <= max_ports && p < 256; p++)
             if (!(op[OP_PORTSC(p)] & PORT_POWER)) unpowered++;
-        kprintf("usb:  %u ports, %u of them without power; nothing is plugged in "
-                "that this controller owns\n", max_ports, unpowered);
+        kprintf("usb:  %u ports, %u of them without power; no device on "
+                "this controller's ports\n", max_ports, unpowered);
     }
 
     look_at_ports();

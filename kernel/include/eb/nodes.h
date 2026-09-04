@@ -34,10 +34,10 @@ bool nodes_version_at(u32 i, char out[24]);
 u32  nodes_may_at(u32 i);
 void nodes_may_words(u32 may, char out[24]);
 
-/* A machine that proved its key: its row is made or brought up to date
- * (address, version, a name for one still unnamed). The row's index, or
- * -1 when the table is full. Quiet: no journal line, for rows carried
- * over from older settings. */
+/* A machine whose key was verified: its row is created or updated
+ * (address, version, name if still unnamed). Returns the row index, or
+ * -1 when the table is full. quiet: no journal line (rows carried over
+ * from older settings). */
 i32  nodes_meet(const char *claim, const u8 key[32], const u8 ip[4], u16 port,
                 const char *version, bool quiet);
 

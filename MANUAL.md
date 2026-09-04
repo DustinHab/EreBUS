@@ -1,6 +1,6 @@
 # EreBUS Manual
 
-For EreBUS 0.5.0. This manual is updated with every release; the version it describes is the one on the releases page.
+For EreBUS 0.5.1. This manual is updated with every release; the version it describes is the one on the releases page.
 
 Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions
 
@@ -11,11 +11,11 @@ Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The grap
 - An operating system for x86_64 UEFI machines: own loader, own kernel, own compiler, assembler and linker.
 - There are no files and no paths. There is a graph of typed **objects**: texts, bytes, lists, pictures, programs.
 - A **reference** is a slot in an object that points at another object. It carries **rights**: `r` read, `w` write, `g` give (hand the reference on). Rights only narrow on the way, never widen.
-- Nothing can be looked up by name. A program, a person, a visitor reaches exactly what a reference lets them reach. That is the whole security model: no root, no permissions table, no lookup.
-- Names are **petnames** on references, not on objects. The same object can be "notes" for you and "the idea, read only" in a list.
-- The graph is saved by itself: when changes stop, the kernel writes a **snapshot** (a generation) to the store. Older generations can be read back (time travel).
-- Programs run in ring 3 and start holding two things: a way to speak to the console and their own letter box. Everything else is handed to them by pointing them at things.
-- Machines running EreBUS are **nodes**: they find one another on the wire, prove who they are with a key, exchange objects, do work for one another and update one another, each within what the other has allowed.
+- Nothing can be looked up by name. A program, a person or an ssh visitor reaches exactly what a reference grants. There is no root account, no permissions table and no lookup by name.
+- Names are **petnames** on references, not on objects. The same object can be "notes" in one list and "the idea, read only" in another.
+- The graph is saved automatically: when changes stop, the kernel writes a **snapshot** (a generation) to the store. Older generations can be read (time travel).
+- Programs run in ring 3 and start with two capabilities: a send-only port to the console and their own message port. Everything else is handed to them explicitly.
+- Machines running EreBUS are **nodes**: they discover one another on the network, authenticate with an Ed25519 key, exchange objects, run tasks for one another and install kernels on one another, each within the rights the other has granted.
 
 Vocabulary used below:
 
@@ -29,8 +29,9 @@ Vocabulary used below:
 | store | the partition the graph is saved on |
 | generation | one snapshot of the graph |
 | the door | the ssh server |
-| the pipe | the sealed channel to other nodes |
-| the desk | where tasks for other machines queue |
+| the pipe | the encrypted UDP channel to other nodes |
+| the desk | the queue of tasks for other machines |
+| knock | the pipe's session handshake (HELLO/WELCOME); signed with the door key |
 
 ---
 
@@ -59,7 +60,7 @@ Vocabulary used below:
 
 ## 3 The screen
 
-There are no windows, no task bar and no menus. Everything visible is clickable; keys are shortcuts.
+There are no windows, no task bar and no menus. Every visible control is clickable; keys are shortcuts for the same actions.
 
 ### 3.1 Layout
 
@@ -229,7 +230,7 @@ All on the `system` shelf; all ordinary objects, saved with the graph.
 | `log` | read | the journal: uptime, who, what; a ring of 8 KiB |
 | `settings` | read, write | chapter 6 |
 | `activity` | read | uptime, cpu, memory, heap, objects, threads, and one row per process with cpu share, holds, memory; rewritten every second |
-| `network` | read | every node with address, version, last heard, free memory, work flag, seal state; machines heard but not met; desk and transfer state; rewritten every 2 s |
+| `network` | read | every node with address, version, seconds since last heard, free memory, work flag, session state; machines heard but not authenticated; desk and transfer state; rewritten every 2 s |
 | `nodes` | read, write | chapter 13.2 |
 | `the time` | read | the wall clock, ticking |
 | `the line` | read | the conversation with other nodes (`say`) |
@@ -293,15 +294,15 @@ Any text can be a program: stand on it and press `run`, or `run <name>`. The tex
 | `note ...` | a remark |
 | `stop` | the end |
 
-- Variables `a`..`z` hold signed numbers. `r` holds how the last get, put, tell or answer went: 0 done, -1 refused.
-- "it" is the latest thing the script was given after its words. `m` is the number that rode along with the latest gift or message.
-- Refusal is not an error: the kernel declines to produce an object for a right the script does not hold.
+- Variables `a`..`z` hold signed 64-bit numbers. `r` holds the result of the last get, put, tell or answer: 0 done, -1 refused.
+- "it" is the latest capability the script was given after its words. `m` is the number attached to the latest gift or message.
+- A refused get, put or tell sets r to -1 and continues; the kernel does not hand out an object the script has no right to.
 
 ### 9.2 Far work
 
-A task is a text asked of other machines (`ask <task>`, or the ask chip). It runs over there in the interpreter with a time budget (20 s) and holds only its words and the way home.
+A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs there in the interpreter with a time budget (20 s) and holds only its words and a reply port ("the way home").
 
-- The recipe begins with `wait`: the first gift is the way home; `m` is the low end of the range. A second `wait` brings the high end as `m`. `answer <v>` sends the result home.
+- The recipe begins with `wait`: the first gift is the reply port; `m` is the low end of the range. A second `wait` delivers the high end as `m`. `answer <v>` sends the result to the reply port.
 - `split P from LO to HI` as the first line divides the task into P parts over the machines that answered the scan willing; each part runs with its own stretch; numeric answers are summed, word answers are gathered in order.
 - The answer is written back into the task as a `= ...` line when the task came writable, else laid into arrivals as `answer N`. It names the machines that gave it: `50005000 (4 parts by alpha, beta)`.
 - `ask <task> with <object>`: the object (text, bytes or picture, up to 8 MiB) goes ahead of every part; the script receives it as its third gift, so a third `wait` makes it "it" and `get` reads it.
@@ -361,7 +362,7 @@ A task is a text asked of other machines (`ask <task>`, or the ask chip). It run
 ### 12.1 Address and pages
 
 - The address comes by DHCP, or is claimed with `address | a.b.c.d`; `address` shows the card, its MAC and the address.
-- `fetch`: point a text at it whose first line is `host/path`; the page is written into the text and shown through the page lens. `https` pages arrive sealed with TLS 1.3 but the certificate is not verified; the shell says so.
+- `fetch`: point a text at it whose first line is `host/path`; the page is written into the text and shown through the page lens. `https` pages arrive over TLS 1.3 without certificate verification; the shell marks them accordingly.
 - The palette's `page` is a text template for this.
 
 ### 12.2 The door (ssh)
@@ -388,9 +389,9 @@ A task is a text asked of other machines (`ask <task>`, or the ask chip). It run
 
 ### 13.1 What a node is
 
-- A node is its key: the door key. Every knock on the pipe is signed with it.
-- The first meeting is trust on first use: the key is written into the nodes table with the name the machine claimed. From then on a key met once must answer again from its address; a different key at that address is turned away until the person removes the row. A node that moves to a new address is followed by its key.
-- Names are claims. What a node may do here is not: that is the `may` column, written by the person.
+- A node is identified by its door key (Ed25519). Every session handshake on the pipe is signed with it.
+- Trust on first use: at the first handshake the key is written into the nodes table together with the name the machine sent. Afterwards the address is bound to that key: a different key from a known address is rejected until the row is removed. A known key from a new address updates the row's address.
+- Names are unverified claims. Rights are not: the `may` column is written locally.
 
 ### 13.2 The nodes table
 
@@ -404,42 +405,42 @@ A task is a text asked of other machines (`ask <task>`, or the ask chip). It run
 - Removing a row forgets the node. Adding a row by hand (name, key) trusts a node before it is met.
 - `nodes` in the terminal lists the rows with when each was last heard.
 
-### 13.3 Finding one another
+### 13.3 Discovery
 
-- `scan` calls out on the wire (broadcast) and to the peer; `found` lists who answered: address, name, whether it takes work, free memory.
-- Every node with an address is called by heartbeat every 30 s, so the `network` page stays current.
-- Answers carry the node's key, version and up to four other machines it heard lately; a node that hears of a machine it does not know calls it once. So company spreads past where a broadcast reaches.
-- `point at <name or address>` writes the peer line in the settings; the send chooser does the same with one click.
+- `scan` sends a SEEK datagram by broadcast and to the peer; `found` lists the answers: address, name, work flag, free memory.
+- Every node with an address receives a SEEK every 30 s (heartbeat); the `network` page is updated from the answers.
+- A HERE answer carries the node's key, version and up to four other addresses heard within the last 90 s; an address not known locally is sent one SEEK per minute at most. This propagates discovery across routers, where broadcast does not reach.
+- `point at <name or address>` writes the `peer` line in the settings; the send chooser does the same with one click.
 
 ### 13.4 Sending objects
 
-- `send <name>` or the send chip carries a readable text, bytes or picture to the peer, sealed. It lands in the receiver's `arrivals` list, read and write, wearing the sender's name as a claim.
-- Only substance crosses: type, name, payload. No references, no rights, nothing that runs, nothing that grants.
-- Transfers go straight from and into objects, windowed, up to 8 MiB; a refusal comes back with its reason.
-- `pack` folds a list into one bytes object for the journey; `unpack` builds the list again.
+- `send <name>` or the send chip transfers a readable text, bytes or picture to the peer, encrypted. It is placed in the receiver's `arrivals` list with read and write rights, named as the sender named it.
+- Only data crosses: type, name, payload. No references, no rights, no programs.
+- Transfers read from and write into objects directly, windowed (HAVE every 8 chunks, TAKEN at the end), up to 8 MiB; a refusal is answered with a reason code.
+- `pack` folds a list into one bytes object; `unpack` rebuilds the list.
 
-### 13.5 Speaking
+### 13.5 The line
 
-- `say <words>` puts a line onto `the line` of every node with a sealed session; with none, the peer is knocked first. What others say appears on the line under their names.
+- `say <words>` appends a line to `the line` on every node with an open session; without one, a session with the peer is opened first. Lines from other nodes appear under their names.
 
 ### 13.6 Work
 
-- Chapter 9.2. A far machine runs a task when its settings say `work | welcomed` (everyone proven) or its row for the asker says `work`.
-- The desk deals divided tasks round-robin to the machines that answered the scan willing; a busy machine is asked again later; one that refuses is struck.
-- Answers name the machines that gave them; results are their claims.
+- See 9.2. A machine runs a task when its settings say `work | welcomed` (any authenticated node) or its row for the requesting node contains `work`.
+- Divided tasks are dealt round-robin to the machines that answered the scan with the work flag set; a busy machine is asked again after 2 s; a refusing machine is removed from the job.
+- Answers name the machines that produced them; results are not verified.
 
 ### 13.7 Updating a node
 
 - On the machine to be updated: `allow <sender> update`.
-- On the sender: `update <node>` sends the kernel this machine runs; `update <node> with <kernel.elf>` a built one; `update all` every node with an address, one after the other.
-- The receiver checks the sender's key against its row, installs the kernel for the next start and restarts after 3 s. If the new kernel does not come up twice, the loader returns to the previous one.
-- The journal on both sides says what happened; the `network` page shows the new version after the node's next heartbeat.
+- On the sender: `update <node>` sends the kernel this machine booted from; `update <node> with <kernel.elf>` sends a built kernel object; `update all` sends to every node with an address, one after the other.
+- The receiver checks the sender's key against its nodes row, installs the kernel as kernel.elf (the previous one as kernel.old) and restarts after 3 s. If the new kernel fails to start twice, the loader boots kernel.old.
+- Both journals record the outcome; the `network` page shows the new version after the node's next heartbeat.
 
 ### 13.8 Limits
 
-- Identity is trust on first meeting; no third party vouches for a key.
-- Results of far work are claims; nothing is cross-checked.
-- Broadcast discovery reaches the local wire only; across routers a node must be named as peer once, then gossip and heartbeat keep it known.
+- Identity is trust on first use; no third party verifies a key.
+- Results of far work are not verified.
+- Broadcast discovery covers the local network only; across routers a node must be entered as peer once, after which gossip and heartbeat keep it known.
 - One transfer at a time per node; one job at a time per worker.
 
 ---
@@ -459,8 +460,9 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 
 - Requirements (Linux; WSL2 with Ubuntu works): `clang lld nasm make qemu-system-x86 ovmf mtools dosfstools xorriso gdb unifont python3-pil`.
 - `make` builds loader, kernel and `build/esp.img`; `make run` starts QEMU with the serial log on the terminal; `sh tools/mkiso.sh` builds `build/erebus.iso`; `sh tools/mkusb.sh` a stick image.
-- `sh build/battery.sh` runs the regression tests under QEMU (TCG); `sh build/kvm-battery.sh` the same under KVM plus the kernel built on the machine itself.
-- The tests drive the real screen through QEMU's monitor and read the serial log; see the table in README.md.
+- `sh build/battery.sh` runs the regression tests: one build, 18 tests in parallel lanes (`LANES`, default 6), each in its own directory under `build/par/`, then the four tests that use `build/` itself. KVM is used when `/dev/kvm` is writable (`NOKVM=1` forces TCG). The summary lists seconds per test; the full output is in `build/battery.log`. About 7 minutes on 32 cores. `sh build/kvm-battery.sh` adds the kernel built on the machine itself.
+- `sh build/battery.sh --one <test>` runs a single test in its directory; `BUILD=<dir> sh tools/<test>.sh` does the same by hand.
+- The tests drive the real screen through QEMU's monitor and wait on serial log lines (`tools/testlib.sh`: `waitlog`, `waitcount`, `waitfile`, `bootwait`); see the table in README.md.
 - The kernel's version comes from `git describe`; a tag `X.Y.Z` on the commit makes the boot line `EreBUS X.Y.Z (x86_64)`.
 
 ---
@@ -471,3 +473,4 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 |---|---|---|
 | 0.4.4 | 2026-09-04 | first published version: loader, kernel, objects and capabilities, snapshots, desktop and terminal, compiler, assembler and linker, self-build through the door, AHCI and FAT, USB input, Intel and Realtek network cards, TLS client, ssh door, sealed object pipe with far work, WPA2 station, boot-time install offer |
 | 0.5.0 | 2026-09-04 | nodes: identity by key, the nodes table and rights per node, kernel updates through the pipe, the network page, heartbeat and gossip, work with input objects, answers with provenance, `version`, `peer` by name |
+| 0.5.1 | 2026-09-05 | compiler fix: members of a struct that contains an inner struct body were resolved against the inner body's members; a self-built kernel's compiler could not compile anything. selfkernel test extended to a second generation. Runtime messages reworded. Test battery parallel and under KVM: 7 minutes instead of 38. |

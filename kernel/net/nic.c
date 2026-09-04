@@ -23,7 +23,7 @@ static void name_what_was_not_driven(void)
         const pci_device *d = pci_get(i);
         if (!d || d->class_code != 0x02) continue;
         kprintf("net:  a network card at %02x:%02x.%u, %04x:%04x, "
-                "which no driver here knows\n",
+                "no driver\n",
                 d->bus, d->device, d->function, d->vendor, d->device_id);
     }
 }

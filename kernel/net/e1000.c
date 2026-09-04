@@ -240,7 +240,7 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
         if (!(rr(R_STATUS) & STATUS_LU)) return false;
     }
 
-    kprintf("net:  %s at %02x:%02x.%u: taking it\n",
+    kprintf("net:  %s at %02x:%02x.%u: selected\n",
             k->name, dev->bus, dev->device, dev->function);
 
     wr(R_IMC, 0xFFFFFFFFu);         /* no interrupts; this is a polled card */
@@ -303,7 +303,7 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
     for (u32 i = 0; i < 128; i++) wr(R_MTA + i * 4, 0);
 
     wr(R_CTRL, rr(R_CTRL) | CTRL_SLU);
-    kprintf("net:  %s: address read, link asked for\n", k->name);
+    kprintf("net:  %s: mac address read; link requested\n", k->name);
 
     /* The receive ring: a page of descriptors, each with its own
      * buffer. The card owns everything between head and tail. */
@@ -354,7 +354,7 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
     kprintf("net:  %s at %02x:%02x.%u, %02x:%02x:%02x:%02x:%02x:%02x, %s\n",
             k->name, dev->bus, dev->device, dev->function,
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-            (rr(R_STATUS) & STATUS_LU) ? "a cable is in it" : "no cable");
+            (rr(R_STATUS) & STATUS_LU) ? "link up" : "no link");
 
     up = true;
     nic_register(&e1000_ops);

@@ -1,30 +1,33 @@
 #!/bin/sh
-# nictest.sh -- every cabled NIC family, one boot each: e1000, e1000e, igb, rtl8139.
+# nictest.sh -- every cabled NIC family, one boot each: e1000, e1000e, igb, rtl8139; all five boots at once.
 # - pass: a DHCP lease arrives (both rings work) and the MAC given on the command line is read back
 # - last boot: two Intel cards, one with its link set off; the linked one must be taken
 
 cd "$(dirname "$0")/.."
-BUILD=build
+. tools/testlib.sh
 rm -f $BUILD/nic-*.log
 
-COMMON="-machine q35 -m 512M -cpu max \
-  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
-  -drive if=pflash,format=raw,file=$BUILD/nic-vars.fd \
-  -drive format=raw,file=$BUILD/esp.img \
-  -vga none -device VGA,edid=on,xres=1280,yres=800 \
-  -drive id=store,file=$BUILD/nicstore.img,format=raw,if=none \
-  -device ide-hd,drive=store,bus=ide.1 \
-  -display none -monitor stdio"
+# Every boot gets its own copy of the boot image: QEMU locks an image it
+# opens for writing, so five machines cannot share one.
+common() {                    # common <name>
+    echo "$QEMU_BASE \
+      -drive if=pflash,format=raw,file=$BUILD/nic-$1-vars.fd \
+      -drive format=raw,file=$BUILD/nic-$1-esp.img \
+      -drive id=store,file=$BUILD/nic-$1-store.img,format=raw,if=none \
+      -device ide-hd,drive=store,bus=ide.1"
+}
+
+prepare() {                   # prepare <name>
+    fresh_vars $BUILD/nic-$1-vars.fd
+    fresh_store $BUILD/nic-$1-store.img
+    cp $BUILD/esp.img $BUILD/nic-$1-esp.img
+}
 
 one() {                       # one <name> <qemu model> <mac>
-    cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/nic-vars.fd
-    rm -f $BUILD/nicstore.img
-    dd if=/dev/zero of=$BUILD/nicstore.img bs=1M count=32 status=none
-    { sleep 26; echo quit; } | qemu-system-x86_64 $COMMON \
+    prepare $1
+    { waitlog $BUILD/nic-$1.log 'by lease\|net:  no' 60; sleep 1; echo quit; } | qemu-system-x86_64 $(common $1) \
       -device $2,netdev=n0,mac=$3 -netdev user,id=n0 \
-      -serial file:$BUILD/nic-$1.log >/dev/null 2>&1
-    echo "--- $1 ($2, $3) ---"
-    grep -a 'net:  ' $BUILD/nic-$1.log | cut -c1-112
+      -serial file:$BUILD/nic-$1.log >/dev/null 2>&1 &
 }
 
 one legacy e1000  52:54:00:aa:00:01
@@ -34,17 +37,23 @@ one realtek rtl8139 52:54:00:aa:00:04
 
 # Two cards, one cable. The socket on the older-family card is pulled
 # before the machine ever looks at it.
-cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/nic-vars.fd
-rm -f $BUILD/nicstore.img
-dd if=/dev/zero of=$BUILD/nicstore.img bs=1M count=32 status=none
+prepare choice
 {
     echo "set_link n0 off"
-    sleep 26
+    waitlog $BUILD/nic-choice.log 'by lease\|net:  no' 60
+    sleep 1
     echo quit
-} | qemu-system-x86_64 $COMMON \
+} | qemu-system-x86_64 $(common choice) \
   -device e1000e,netdev=n0,mac=52:54:00:aa:00:05 -netdev user,id=n0 \
   -device igb,netdev=n1,mac=52:54:00:aa:00:06 -netdev user,id=n1 \
-  -serial file:$BUILD/nic-choice.log >/dev/null 2>&1
+  -serial file:$BUILD/nic-choice.log >/dev/null 2>&1 &
+wait
+rm -f $BUILD/nic-*-esp.img
+
+for n in legacy pcie queues realtek; do
+    echo "--- $n ---"
+    grep -a 'net:  ' $BUILD/nic-$n.log | cut -c1-112
+done
 echo "--- two cards, one cable ---"
 grep -a 'net:  ' $BUILD/nic-choice.log | cut -c1-112
 

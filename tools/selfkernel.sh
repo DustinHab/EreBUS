@@ -69,38 +69,47 @@ rm -f $BUILD/selfk-known
 
 echo "--- the sources go in ---"
 $SSH < $BUILD/selfk.stream > $BUILD/selfk-up.txt 2>&1
-grep -c 'lies here now' $BUILD/selfk-up.txt | sed 's/$/ texts arrived/'
-grep -v 'lies here now\|send .* bytes now' $BUILD/selfk-up.txt | head -5
+grep -c 'created here' $BUILD/selfk-up.txt | sed 's/$/ texts arrived/'
+grep -v 'created here\|send .* bytes now' $BUILD/selfk-up.txt | head -5
+
+# 'build kernel' runs in the background on the machine. The list is
+# polled for kernel.elf; the journal (a ring that forgets under the
+# door's own lines) is gathered for a line that names a failure.
+build_and_wait() {
+    $SSH build kernel 2>&1 | head -3
+    start=$(date +%s)
+    outcome=""
+    : > $BUILD/selfk-journal.txt
+    while [ -z "$outcome" ]; do
+        sleep 30
+        $SSH journal >> $BUILD/selfk-journal.txt 2>&1
+        printf 'go kernel\nlook\n' | $SSH > $BUILD/selfk-list.txt 2>&1
+        if grep -q 'kernel.elf  bytes' $BUILD/selfk-list.txt; then outcome=built;
+        elif grep -q 'build: [A-Za-z0-9_]*\.[cSs]: ' $BUILD/selfk-journal.txt; then outcome=failed; fi
+        if [ $(( $(date +%s) - start )) -gt 1800 ]; then outcome=timeout; fi
+    done
+    echo "outcome: $outcome after $(( $(date +%s) - start )) s"
+    grep 'build:' $BUILD/selfk-journal.txt | sort -u | tail -6
+}
 
 echo "--- build ---"
-$SSH build kernel 2>&1 | head -3
-start=$(date +%s)
-outcome=""
-# The journal is a ring, and every visit through the door adds two
-# lines to it; asked often enough it forgets the build. So the list is
-# what is asked -- kernel.elf lies in it or it does not -- and the
-# journal is only gathered, every poll appended to one file, for the
-# line that names a failure.
-: > $BUILD/selfk-journal.txt
-while [ -z "$outcome" ]; do
-    sleep 30
-    $SSH journal >> $BUILD/selfk-journal.txt 2>&1
-    printf 'go kernel\nlook\n' | $SSH > $BUILD/selfk-list.txt 2>&1
-    if grep -q 'kernel.elf  bytes' $BUILD/selfk-list.txt; then outcome=built;
-    elif grep -q 'build: [A-Za-z0-9_]*\.[cSs]: ' $BUILD/selfk-journal.txt; then outcome=failed; fi
-    if [ $(( $(date +%s) - start )) -gt 1800 ]; then outcome=timeout; fi
-done
-echo "outcome: $outcome after $(( $(date +%s) - start )) s"
-grep 'build:' $BUILD/selfk-journal.txt | sort -u | tail -6
+build_and_wait
 
 if [ "$outcome" = built ]; then
     echo "--- install and restart ---"
-    # kernel.elf lies in the list the sources went into, so the session
-    # steps in there first; one session, three words.
     # 'restart' takes the machine down under the session; the client
-    # would wait for a close that never comes, so it is given a minute.
-    printf 'go kernel\ninstall kernel.elf\nrestart\n' | timeout 60 $SSH 2>&1 | grep -v 'the terminal\.' | head -6
+    # is given a minute rather than waiting for a close.
+    printf 'go kernel\ninstall kernel.elf\nrestart\n' | timeout 60 $SSH 2>&1 | grep -v 'terminal\.' | head -6
     sleep 45
+    # Second generation: the self-built kernel's own compiler builds
+    # the kernel again. A compiler that compiles itself wrongly boots
+    # and then fails here.
+    echo "--- build again, with the self-built compiler ---"
+    printf 'go kernel\nlet go kernel.elf\n' | $SSH 2>&1 | grep -v 'terminal\.' | head -2
+    outcome1=$outcome
+    build_and_wait
+    outcome2=$outcome
+    outcome=$outcome1
 fi
 touch $BUILD/selfk-quit
 wait
@@ -110,8 +119,9 @@ echo "--- what the machine said about itself, each boot ---"
 grep -a 'EreBUS .* (x86_64)\|the installed kernel\|previous one' $BUILD/selfk.log | cut -c1-100
 echo "--- the checks ---"
 ok=1
-[ "$(grep -c 'lies here now' $BUILD/selfk-up.txt)" -ge 139 ] && echo "every source went in through the door" || { echo "FAILED: sources missing"; ok=0; }
+[ "$(grep -c 'created here' $BUILD/selfk-up.txt)" -ge 139 ] && echo "every source went in through the door" || { echo "FAILED: sources missing"; ok=0; }
 [ "$outcome" = built ] && echo "the machine built a kernel from them with its own tools" || { echo "FAILED: no kernel came of it ($outcome)"; ok=0; }
 grep -aq "EreBUS $SAYS" $BUILD/selfk.log && echo "and booted it: it says it was $SAYS" || { echo "FAILED: the self-built kernel did not come up"; ok=0; }
+[ "$outcome2" = built ] && echo "the self-built kernel built a kernel too (second generation)" || { echo "FAILED: the self-built kernel's compiler did not build a kernel ($outcome2)"; ok=0; }
 [ $ok = 1 ] && echo "the machine builds, installs and boots its own kernel through the door" || echo "the self-built kernel FAILED"
 echo DONE

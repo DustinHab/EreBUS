@@ -559,7 +559,7 @@ static void note_changes(const values *was, const values *now)
                      : "the next start is where you left");
 
     if (strcmp(was->name, now->name) != 0)
-        journal_says("settings", "the machine goes by a new name");
+        journal_says("settings", "the name changed");
 
     if (was->work != now->work)
         journal_says("settings", now->work
@@ -568,14 +568,14 @@ static void note_changes(const values *was, const values *now)
 
     if (was->german_keys != now->german_keys)
         journal_says("settings", now->german_keys
-                     ? "the keys speak german now"
-                     : "the keys speak english now");
+                     ? "keyboard layout: german"
+                     : "keyboard layout: english");
 
     if (was->addr_set != now->addr_set ||
         (now->addr_set && memcmp(was->addr_ip, now->addr_ip, 4) != 0))
         journal_says("settings", now->addr_set
-                     ? "the machine claims its own address now"
-                     : "the machine asks for its address again");
+                     ? "static address set"
+                     : "address by dhcp again");
 
     if (was->peer_set != now->peer_set ||
         (now->peer_set &&

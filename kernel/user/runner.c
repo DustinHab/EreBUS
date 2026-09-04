@@ -320,9 +320,8 @@ static i64 exec_line(const char *s, u32 ln, u64 console,
         return (i64)ln + 1;
     }
 
-    /* The answer goes home: to the first thing given after the words,
-     * which for far work is the way back to the asker -- whatever "it"
-     * has become since, an input included. */
+    /* answer sends to the first capability received after the words
+     * (the reply port for far work), not to "it". */
     if (w == P8('a','n','s','w','e','r',0,0)) {
         bool ok = true;
         i64 n = operand(s, &pos, v, &ok);
@@ -445,8 +444,8 @@ static void complain(u64 console, u32 ln)
     r_say(console,
           P8('l','i','n','e',' ',0,0,0) | (d1 << 40) | (d2 << 48) |
               ((u64)':' << 56),
-          P8(' ','i',' ','d','o',' ','n','o'),
-          P8('t',' ','k','n','o','w',' ',' '));
+          P8(' ','u','n','k','n','o','w','n'),
+          P8(' ','w','o','r','d',' ',' ',' '));
 }
 
 void user_runner(u64 console, u64 inbox);
@@ -459,9 +458,9 @@ void user_runner(u64 console, u64 inbox)
 
     /* say(console, "i run wh", "at i am ", "shown   ") */
     r_say(console,
-          P8('i',' ','r','u','n',' ','w','h'),
-          P8('a','t',' ','i',' ','a','m',' '),
-          P8('s','h','o','w','n',' ',' ',' '));
+          P8('r','u','n','n','i','n','g',' '),
+          P8('t','h','e',' ','t','e','x','t'),
+          P8(' ',' ',' ',' ',' ',' ',' ',' '));
 
     /* The first gift is the program. Until it arrives there is
      * nothing to do and nothing to know. Its second word may carry a

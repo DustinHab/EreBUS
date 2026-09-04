@@ -19,6 +19,7 @@ else
 
     HEADERS="kernel/include/eb/*.h kernel/net/gf25519.h kernel/gfx/*.h common/*.h"
     CS=$(ls kernel/*.c kernel/*/*.c kernel/*/*/*.c 2>/dev/null)
+    [ -f $BUILD/version.c ] && CS="$CS $BUILD/version.c"     # what the kernel calls itself, made by make
     SS=$(ls kernel/arch/x86_64/*.S kernel/user/*.S)
 
     fails=0

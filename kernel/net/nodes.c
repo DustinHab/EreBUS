@@ -318,7 +318,8 @@ u32 nodes_may_at(u32 i)
 /* Changes                                                             */
 /* ------------------------------------------------------------------ */
 
-/* A name no other row wears: the claim, or the claim with a count. */
+/* A name not used by another row: the claim, or the claim with a
+ * number appended. */
 static void unique_name(u32 self, const char *claim, char out[24])
 {
     char base[24];
@@ -372,8 +373,7 @@ i32 nodes_meet(const char *claim, const u8 key[32], const u8 ip[4], u16 port,
     if (ip) {
         i32 j = nodes_by_address(ip);
         if (j >= 0 && j != i) {
-            /* The address stood in another row: that node is not there
-             * any more, as far as this one can tell. */
+            /* the address was in another row: that row's address is cleared */
             rows[j].has_addr = false;
             changed = true;
         }
@@ -382,7 +382,7 @@ i32 nodes_meet(const char *claim, const u8 key[32], const u8 ip[4], u16 port,
             r->port = port;
             r->has_addr = true;
             changed = true;
-            if (!fresh && !quiet) node_says(r->name, " answers from a new address now");
+            if (!fresh && !quiet) node_says(r->name, " has a new address");
         }
     }
     if (version && version[0] && strcmp(r->version, version) != 0) {
@@ -406,9 +406,9 @@ i32 nodes_meet(const char *claim, const u8 key[32], const u8 ip[4], u16 port,
         char fp[64];
         ssh_fingerprint_of(key, fp);
         if (ip)
-            kprintf("pipe: %u.%u.%u.%u is met for the first time; its key %s is remembered in nodes as '%s'\n",
+            kprintf("pipe: first handshake with %u.%u.%u.%u; key %s remembered in nodes as '%s'\n",
                     ip[0], ip[1], ip[2], ip[3], fp, r->name);
-        node_says(r->name, " met for the first time; its key is written in nodes");
+        node_says(r->name, ": first handshake; key written to nodes");
     }
     if (fresh || changed) nodes_write();
     return i;

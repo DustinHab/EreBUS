@@ -137,9 +137,9 @@ void user_pulse(u64 console, u64 inbox)
 
     /* say "a picture, then the page" */
     p_say(console,
-          P8('a',' ','p','i','c','t','u','r'),
-          P8('e',',',' ','t','h','e','n',' '),
-          P8('t','h','e',' ','p','a','g','e'));
+          P8('w','a','i','t','i','n','g',' '),
+          P8('f','o','r',' ','p','i','c','t'),
+          P8('u','r','e',',',' ','p','a','g'));
 
     while (!canvas || !page) {
         if (msg_receive(inbox, buf) != 0) { p_yield(); continue; }
@@ -156,9 +156,9 @@ void user_pulse(u64 console, u64 inbox)
 
     /* say "i draw the pulse now" */
     p_say(console,
-          P8('i',' ','d','r','a','w',' ','t'),
-          P8('h','e',' ','p','u','l','s','e'),
-          P8(' ','n','o','w',' ',' ',' ',' '));
+          P8('d','r','a','w','i','n','g',' '),
+          P8(' ',' ',' ',' ',' ',' ',' ',' '),
+          P8(' ',' ',' ',' ',' ',' ',' ',' '));
 
     /* The picture's shape, from its own header. */
     u64 w = 0, h = 0;
@@ -169,9 +169,9 @@ void user_pulse(u64 console, u64 inbox)
     if (w == 0 || h == 0 || w > 4096 || h > 4096) {
         /* say "that is no picture" */
         p_say(console,
-              P8('t','h','a','t',' ','i','s',' '),
-              P8('n','o',' ','p','i','c','t','u'),
-              P8('r','e',' ',' ',' ',' ',' ',' '));
+              P8('n','o','t',' ','a',' ','p','i'),
+              P8('c','t','u','r','e',' ',' ',' '),
+              P8(' ',' ',' ',' ',' ',' ',' ',' '));
         sys3(0, 0, 0, 0);
         for (;;) p_yield();
     }

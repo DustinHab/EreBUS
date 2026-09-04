@@ -181,14 +181,14 @@ static void say_disk_line(settle_say_fn say, void *ctx, u32 d)
      * somebody else's system at the first port, and saying otherwise
      * would be putting a guess where a fact belongs. */
     if (blk_boot_disk() == (i32)d) at = put_str(line, at, sizeof(line), "  (first on the bus)");
-    if (blk_store_disk() == (i32)d) at = put_str(line, at, sizeof(line), "  (holds the store the machine runs with)");
+    if (blk_store_disk() == (i32)d) at = put_str(line, at, sizeof(line), "  (holds the current store)");
     say(ctx, line);
 }
 
 void settle_disks(settle_say_fn say, void *ctx)
 {
     u32 n = blk_disk_count();
-    if (n == 0) { say(ctx, "no disk answers on the sata bus."); return; }
+    if (n == 0) { say(ctx, "no sata disk found."); return; }
 
     char line[160];
     for (u32 d = 0; d < n; d++) {
@@ -217,7 +217,7 @@ void settle_disks(settle_say_fn say, void *ctx)
                 a = put_str(line, a, sizeof(line), "  ");
                 a = put_str(line, a, sizeof(line), gpt_type_name(type));
                 if (blk_store_disk() == (i32)d && blk_store_base() == first)
-                    a = put_str(line, a, sizeof(line), "  (the store the machine runs with)");
+                    a = put_str(line, a, sizeof(line), "  (the current store)");
                 say(ctx, line);
                 if (last + 1 > cursor) cursor = last + 1;
             }
@@ -226,17 +226,17 @@ void settle_disks(settle_say_fn say, void *ctx)
                 a = put_size(line, a, sizeof(line), (table.last_usable + 1 - cursor) * 512);
                 say(ctx, line);
             }
-            if (k == 0) say(ctx, "  a partition table with nothing in it");
+            if (k == 0) say(ctx, "  an empty partition table");
         } else if (disk_has_mbr(d)) {
-            say(ctx, "  an old-style partition table; only 'settle on disk N' can take it, whole");
+            say(ctx, "  an mbr partition table; only 'settle on disk N' (whole disk) is possible");
         } else if (disk_is_blank(d)) {
             say(ctx, "  blank");
         } else {
-            say(ctx, "  no partition table; something else is written on it");
+            say(ctx, "  no partition table; foreign data");
         }
     }
     say(ctx, "'settle on disk N' takes a disk whole; 'settle in partition P of disk N' takes one partition;");
-    say(ctx, "'settle in the free space of disk N' leaves every partition as it is.  each asks before it acts.");
+    say(ctx, "'settle in the free space of disk N' keeps every partition.  each offers first and acts on 'yes'.");
 }
 
 /* ------------------------------------------------------------------ */
@@ -257,13 +257,13 @@ void settle_plan(const char *what, settle_say_fn say, void *ctx)
 
     if (has_words(what, "free space")) {
         if (!gpt_read(d, &table)) {
-            say(ctx, disk_is_blank(d) ? "that disk carries no partition table; 'settle on disk N' would take it whole."
-                                      : "that disk carries no table this system can add to; 'settle on disk N' would take it whole.");
+            say(ctx, disk_is_blank(d) ? "no partition table on that disk; use 'settle on disk N'."
+                                      : "the partition table cannot be extended; use 'settle on disk N'.");
             return;
         }
         u64 first = 0;
         u64 count = largest_gap(&table, &first);
-        if (!count) { say(ctx, "that disk has no free stretch of twenty megabytes or more."); return; }
+        if (!count) { say(ctx, "no free space of 20 MiB or more on that disk."); return; }
         u32 order[GPT_ENTRIES];
         u32 k = entries_in_order(&table, order, GPT_ENTRIES);
         plan.kind = KIND_FREE; plan.disk = d; plan.first = first; plan.count = count;
@@ -276,7 +276,7 @@ void settle_plan(const char *what, settle_say_fn say, void *ctx)
         at = put_str(line, at, sizeof(line), k == 1 ? " partition stays as it is." : " partitions stay as they are.");
         say(ctx, line);
     } else if (number_after(what, "partition", &pn)) {
-        if (!gpt_read(d, &table)) { say(ctx, "that disk carries no partition table this system reads."); return; }
+        if (!gpt_read(d, &table)) { say(ctx, "no readable partition table on that disk."); return; }
         u8 type[16];
         u64 first, last;
         if (pn == 0 || pn > GPT_ENTRIES || !gpt_entry(&table, pn - 1, type, &first, &last)) {
@@ -284,10 +284,10 @@ void settle_plan(const char *what, settle_say_fn say, void *ctx)
             return;
         }
         if (blk_store_disk() == (i32)d && blk_store_base() == first) {
-            say(ctx, "that partition is the store the machine runs with already.");
+            say(ctx, "that partition is the current store.");
             return;
         }
-        if (last - first + 1 < STORE_MIN_SECTORS) { say(ctx, "that partition is too small for a store; twenty megabytes is the least."); return; }
+        if (last - first + 1 < STORE_MIN_SECTORS) { say(ctx, "that partition is too small for a store; the minimum is 20 MiB."); return; }
         char name[40];
         gpt_entry_name(&table, pn - 1, name, sizeof(name));
         plan.kind = KIND_PART; plan.disk = d; plan.entry = pn - 1; plan.first = first; plan.count = last - first + 1;
@@ -301,7 +301,7 @@ void settle_plan(const char *what, settle_say_fn say, void *ctx)
         at = put_size(line, at, sizeof(line), plan.count * 512);
         at = put_str(line, at, sizeof(line), ", ");
         at = put_str(line, at, sizeof(line), gpt_type_name(type));
-        at = put_str(line, at, sizeof(line), ") would become the store.  what it holds is lost.");
+        at = put_str(line, at, sizeof(line), ") becomes the store; its contents are erased.");
         say(ctx, line);
     } else {
         /* The one disk that cannot be taken is the one the graph is
@@ -314,15 +314,15 @@ void settle_plan(const char *what, settle_say_fn say, void *ctx)
          * because of where it sits would be refusing on a fact that is
          * not true. What protects it is the same thing that protects
          * every other disk: being told what is on it, and being asked. */
-        if (blk_store_disk() == (i32)d) { say(ctx, "that disk holds the store the machine runs with."); return; }
+        if (blk_store_disk() == (i32)d) { say(ctx, "that disk holds the current store."); return; }
         const u8 *l, *k;
         u64 ls, ks;
         if (!system_boot_files(&l, &ls, &k, &ks)) {
-            say(ctx, "the loader did not hand its files over, so no boot volume can be made; a partition or the free space can still be the store.");
+            say(ctx, "the loader's files are not available; no boot volume can be made.  a partition or the free space can still hold the store.");
             return;
         }
         u64 sectors = blk_disk_sectors(d);
-        if (sectors < ALIGN_SECTORS + ESP_SECTORS + STORE_MIN_SECTORS + 34) { say(ctx, "that disk is too small: a boot volume and a store need ninety megabytes at least."); return; }
+        if (sectors < ALIGN_SECTORS + ESP_SECTORS + STORE_MIN_SECTORS + 34) { say(ctx, "that disk is too small: a boot volume and a store need 90 MiB at least."); return; }
         plan.kind = KIND_WHOLE; plan.disk = d;
         plan.first = ALIGN_SECTORS + ESP_SECTORS;
         plan.count = sectors - 34 - plan.first + 1;
@@ -332,11 +332,11 @@ void settle_plan(const char *what, settle_say_fn say, void *ctx)
             u32 order[GPT_ENTRIES];
             parts = entries_in_order(&table, order, GPT_ENTRIES);
             state = "a partition table";
-        } else if (disk_has_mbr(d)) state = "an old-style partition table";
-        else if (!disk_is_blank(d)) state = "something written on it";
+        } else if (disk_has_mbr(d)) state = "an mbr partition table";
+        else if (!disk_is_blank(d)) state = "foreign data";
         at = put_str(line, 0, sizeof(line), "disk ");
         at = put_num(line, at, sizeof(line), dn);
-        at = put_str(line, at, sizeof(line), " would be taken whole: ");
+        at = put_str(line, at, sizeof(line), " is erased: ");
         at = put_str(line, at, sizeof(line), blk_disk_model(d));
         at = put_str(line, at, sizeof(line), ", ");
         at = put_size(line, at, sizeof(line), sectors * 512);
@@ -347,7 +347,7 @@ void settle_plan(const char *what, settle_say_fn say, void *ctx)
             at = put_num(line, at, sizeof(line), parts);
             at = put_str(line, at, sizeof(line), parts == 1 ? " partition" : " partitions");
         }
-        at = put_str(line, at, sizeof(line), ".  everything on it is lost.");
+        at = put_str(line, at, sizeof(line), ".  all data on it is lost.");
         say(ctx, line);
         at = put_str(line, 0, sizeof(line), "it gets a boot volume with the loader and this kernel, and a store of ");
         at = put_size(line, at, sizeof(line), plan.count * 512);
@@ -356,7 +356,7 @@ void settle_plan(const char *what, settle_say_fn say, void *ctx)
     }
     plan.active = true;
     plan.made_ns = time_ns();
-    say(ctx, "if that is what you want, write: yes");
+    say(ctx, "confirm with: yes");
 }
 
 /* ------------------------------------------------------------------ */
@@ -375,26 +375,26 @@ static bool blank_head(u32 disk, u64 first)
 static void adopt(settle_say_fn say, void *ctx, u32 disk, u64 first, u64 count, bool bootable)
 {
     if (!blank_head(disk, first)) { say(ctx, "the store's first sectors could not be cleared; nothing was adopted."); return; }
-    if (!blk_adopt(disk, first, count)) { say(ctx, "the store would not be claimed; the disk is as the table now says, but the graph stays where it was."); return; }
+    if (!blk_adopt(disk, first, count)) { say(ctx, "the store could not be adopted; the table was written, the graph stays where it was."); return; }
     blob_reset();
     persist_start();
-    journal_says("system", bootable ? "settled on a disk: the graph is kept there, and the next start may come from it"
-                                    : "settled: the graph is kept on a disk now");
-    say(ctx, bootable ? "settled.  the graph is kept there from now on, and the next start may come from that disk."
-                      : "settled.  the graph is kept there from now on.");
+    journal_says("system", bootable ? "settled: store and boot volume on the disk"
+                                    : "settled: store on the disk");
+    say(ctx, bootable ? "settled; the store is on that disk and it boots."
+                      : "settled; the store is on that disk.");
 }
 
 void settle_yes(settle_say_fn say, void *ctx)
 {
-    if (!plan.active) { say(ctx, "yes to what?  'settle ...' makes an offer first."); return; }
-    if (time_ns() - plan.made_ns > OFFER_NS) { plan.active = false; say(ctx, "that offer has passed; say it again."); return; }
+    if (!plan.active) { say(ctx, "nothing to confirm; 'settle ...' first."); return; }
+    if (time_ns() - plan.made_ns > OFFER_NS) { plan.active = false; say(ctx, "the offer expired; repeat 'settle'."); return; }
     plan.active = false;
     char why[96];
 
     if (plan.kind == KIND_WHOLE) {
         const u8 *l, *k;
         u64 ls, ks;
-        if (!system_boot_files(&l, &ls, &k, &ks)) { say(ctx, "the loader's files are not at hand after all."); return; }
+        if (!system_boot_files(&l, &ls, &k, &ks)) { say(ctx, "the loader's files are not available."); return; }
         u64 sectors = blk_disk_sectors(plan.disk);
         gpt_make(&table, sectors);
         gpt_add(&table, GPT_TYPE_EFI, ALIGN_SECTORS, ALIGN_SECTORS + ESP_SECTORS - 1, "EREBUS BOOT");
@@ -406,7 +406,7 @@ void settle_yes(settle_say_fn say, void *ctx)
             say(ctx, why);
             return;
         }
-        say(ctx, "taking the store.");
+        say(ctx, "creating the store.");
         adopt(say, ctx, plan.disk, plan.first, table.last_usable - plan.first + 1, true);
         return;
     }
@@ -432,6 +432,6 @@ void settle_yes(settle_say_fn say, void *ctx)
     }
     say(ctx, "writing the partition table.");
     if (!gpt_write(plan.disk, &table)) { say(ctx, "the table could not be written; the disk is in an unknown state now."); return; }
-    say(ctx, "taking the store.");
+    say(ctx, "creating the store.");
     adopt(say, ctx, plan.disk, plan.first, plan.count, false);
 }

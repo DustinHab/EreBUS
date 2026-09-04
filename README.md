@@ -30,8 +30,8 @@ Targets:
     make debug    # halted, gdb on port 1234
     make clean
     sh tools/mkiso.sh          # build/erebus.iso
-    sh build/battery.sh        # all regression tests (QEMU, TCG)
-    sh build/kvm-battery.sh    # the same under KVM, plus the self-built kernel
+    sh build/battery.sh        # all regression tests; KVM when /dev/kvm is writable, 6 lanes, about 7 minutes
+    sh build/kvm-battery.sh    # the same, plus the self-built kernel
 
 From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 
@@ -142,14 +142,14 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Card choice: first a card with link, then any card; unknown cards named in the log
 - [x] TLS 1.3 client: X25519, AES-128-GCM, SHA-256; certificates not verified
 - [x] SSH door (server): curve25519-sha256, ssh-ed25519, aes128-gcm@openssh.com; keys from `door |` lines; exec and shell sessions
-- [x] Object pipe between machines: sealed (X25519 + AES-GCM), the knock signed with the door key
-- [x] Nodes: a node is its key; first meeting writes a row into `nodes`; a key met once must answer again from its address (an impostor at a known address is turned away); a node that moves is followed by its key
-- [x] Rights per node: `allow <node> work|update|all|nothing`; far work runs for a node when `work | welcomed` or its row says `work`; a kernel is installed only from a node whose row says `update`
-- [x] Transfers straight from and into objects, windowed (HAVE/TAKEN), up to 8 MiB; refusals answered with a reason
-- [x] `update <node>`: this machine's kernel to that node, which installs it and restarts; `update <node> with <kernel.elf>`; `update all`; the loader falls back after two failed starts
-- [x] Discovery: broadcast scan, heartbeat to every known node every 30 s, HERE carries key, version and up to four other machines heard (gossip across routers)
-- [x] Far work: `ask <task>`, `ask <task> with <object>` (the object goes ahead of each part as the script's third gift), split tasks summed or gathered, answers name the machines that gave them (`42 (4 parts by alpha, beta)`), foreman for standing tasks
-- [x] The line: one conversation with the peer, sealed
+- [x] Object pipe between machines: X25519 handshake signed with the door key, AES-128-GCM records
+- [x] Nodes: identity is the key; the first handshake writes a row into `nodes`; a different key from a known address is rejected until the row is removed; a known key from a new address updates the row
+- [x] Rights per node: `allow <node> work|update|all|nothing`; far work runs for a node when `work | welcomed` or its row contains `work`; a kernel is installed only from a node whose row contains `update`
+- [x] Transfers read from and write into objects directly, windowed (HAVE/TAKEN), up to 8 MiB; refusals carry a reason code
+- [x] `update <node>`: sends this machine's kernel; the receiver installs it and restarts; `update <node> with <kernel.elf>`; `update all`; the loader falls back to kernel.old after two failed starts
+- [x] Discovery: broadcast scan, heartbeat to every known node every 30 s, HERE carries key, version and up to four other addresses (propagation across routers)
+- [x] Far work: `ask <task>`, `ask <task> with <object>` (the object is transferred to each worker as the script's third gift), split tasks summed or concatenated, answers name the machines that produced them (`42 (4 parts by alpha, beta)`), foreman for recurring tasks
+- [x] The line: a shared text for `say` between nodes
 - [x] `pack`/`unpack`: a list as one bytes object for the pipe
 
 ### Wireless
@@ -173,7 +173,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/asmtest.sh, cctest.sh, cctest2.sh | assembler and compiler on the machine (24 checks) |
 | tools/sshtest.sh | door: exec, pipe, pty; foreign key refused |
 | tools/pipe-two.sh, pipe-identity.sh | object pipe, sealed, identity enforced |
-| tools/pipe-update.sh | a kernel through the pipe: declined without leave, installed and booted with it |
+| tools/pipe-update.sh | a kernel through the pipe: refused without the update right, installed and booted with it |
 | tools/pipe-input.sh | far work with an input object; the answer names the worker |
 | tools/pipe-work.sh, pipe-desk.sh, pipe-foreman.sh | far work, split tasks over three machines, standing tasks |
 | make relay, make agent, make persist | capability passing, delegation, snapshots |
@@ -188,7 +188,9 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/selfbuild.sh, cctrial.sh | kernel built by the machine's compiler on the host |
 | tools/fuzz/run.sh | fuzzing of the language tools |
 
-`build/battery.sh` runs the QEMU set; `build/kvm-battery.sh` the same under KVM plus selfkernel.
+`build/battery.sh` builds once, then runs 18 tests in parallel lanes (`LANES`, default 6), each in its own directory under `build/par/`, then relay, agent, persist and renew one at a time. Every test sources `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps, `BUILD` points at the test's directory. The summary prints seconds per test. `build/kvm-battery.sh` adds selfkernel.
+
+Measured on 32 cores under KVM: 393 s for all 22 tests (before: 38 minutes sequential under KVM, 22 minutes under TCG). Longest single tests: renew 83 s, pipe-input 81 s, pipe-update 79 s.
 
 ## Using the ISO
 
@@ -199,15 +201,15 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - Installed machine, newer stick: boot the stick, `install this kernel`, remove the stick, `restart`.
 - QEMU: `qemu-system-x86_64 -machine q35 -m 512M -bios /usr/share/OVMF/OVMF.fd -cdrom erebus.iso`
 - Remote: put a public key into the settings (`door | ssh-ed25519 ...`), read the address with `address`, connect with any ssh client.
-- Several machines: `scan`, `point at <name>`, `say hello` (the knock writes both nodes tables); `allow <node> update` on the one to be updated; `update <node>` on the other.
+- Several machines: `scan`, `point at <name>`, `say hello` (the handshake writes a row into both nodes tables); `allow <node> update` on the machine to be updated; `update <node>` on the other.
 
 ## Known limits
 
 - No USB mass storage: a stick boots the machine but cannot hold the store.
 - No wireless chip driver.
 - TLS: privacy only, no certificate verification.
-- Results from far work are claims of the machine named in the answer; nothing is cross-checked.
-- Node identity is trust on first meeting; no third party vouches for a key.
+- Results from far work are not verified; the answer names the machine that produced it.
+- Node identity is trust on first use; no third party verifies a key.
 - One ssh visitor at a time; no rekeying.
 - RTL8168/8169 driver written from documentation, untested on silicon.
 - Two HID inputs on one device: implemented, not tested on a real device.
@@ -216,7 +218,8 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 ## Releases
 
 - EreBUS 0.4.4: first published version.
-- EreBUS 0.5.0: nodes -- identity by key, rights per node, kernel updates through the pipe, network page, work with inputs and provenance.
+- EreBUS 0.5.0: nodes: identity by key, rights per node, kernel updates through the pipe, network page, work with inputs and provenance.
+- EreBUS 0.5.1: compiler fix (member lookup in structs with inner struct bodies); a self-built kernel can compile again; selfkernel test runs a second generation.
 
 ## License
 
