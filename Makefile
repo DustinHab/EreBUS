@@ -107,6 +107,12 @@ KERN_C   := kernel/main.c \
             kernel/net/x25519.c \
             kernel/net/aes_gcm.c \
             kernel/net/crypto_selftest.c \
+            kernel/net/asn1.c \
+            kernel/net/bn.c \
+            kernel/net/p256.c \
+            kernel/net/rsa.c \
+            kernel/net/x509.c \
+            kernel/net/pki_selftest.c \
             kernel/net/tls.c \
             kernel/obj/bundle.c \
             kernel/fs/fat.c \

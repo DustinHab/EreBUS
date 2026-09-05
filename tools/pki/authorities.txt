@@ -1,0 +1,4 @@
+sectigo-dv-e36.pem  | Sectigo DV E36
+letsencrypt-yr1.pem | Let's Encrypt YR1
+letsencrypt-yr2.pem | Let's Encrypt YR2
+letsencrypt-yr3.pem | Let's Encrypt YR3

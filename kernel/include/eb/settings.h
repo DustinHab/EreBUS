@@ -64,6 +64,15 @@ bool settings_update_from(char *out, u32 max);
 /* Whether the keyboard's keys mean their german letters. */
 bool settings_keys_german(void);
 
+/* Whether a sealed page whose server is not verified is refused
+ * ("tls | strict") rather than let through and marked. */
+bool settings_tls_strict(void);
+
+/* Certificate authorities of one's own, from "authority |" lines: the
+ * i-th one's public key (a SubjectPublicKeyInfo), or NULL past the end. */
+u32       settings_authority_count(void);
+const u8 *settings_authority(u32 i, u32 *len);
+
 /* Whose keys open the door: the ed25519 public keys written as
  * "door |" lines, up to four. None written, nobody comes in. */
 u32  settings_door_count(void);

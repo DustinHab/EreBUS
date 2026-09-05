@@ -102,6 +102,18 @@ u64 time_tsc_hz(void) { return tsc_hz; }
  * the two-port dance on every glance at the corner of the screen. */
 static u64 boot_wall;         /* seconds into the day when we started */
 static u64 boot_date;         /* y*10000 + m*100 + d, for the stamp */
+static u64 boot_unix;         /* seconds since 1970 when we started; 0 until a clock was read */
+
+/* Days since 1970-01-01 of a civil date. */
+static i64 days_from_civil(i64 y, u32 m, u32 d)
+{
+    y -= m <= 2;
+    i64 era = (y >= 0 ? y : y - 399) / 400;
+    u64 yoe = (u64)(y - era * 400);
+    u64 doy = (153 * (m + (m > 2 ? (u32)-3 : 9)) + 2) / 5 + d - 1;
+    u64 doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + (i64)doe - 719468;
+}
 
 static u8 cmos_read(u8 reg)
 {
@@ -138,6 +150,25 @@ void time_read_rtc(void)
     boot_date = (u64)from_bcd(yr, bcd) * 10000 +
                 (u64)from_bcd(mon, bcd) * 100 +
                 (u64)from_bcd(day, bcd);
+
+    /* The date as a count of seconds, for anything that compares
+     * dates; the two-digit year is taken to lie in this century. */
+    u32 y = 2000 + from_bcd(yr, bcd), mo = from_bcd(mon, bcd), d = from_bcd(day, bcd);
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31)
+        boot_unix = (u64)days_from_civil((i64)y, mo, d) * 86400 + boot_wall;
+}
+
+u64 time_unix(void)
+{
+    if (!boot_unix) return 0;
+    return boot_unix + time_ns() / 1000000000ULL;
+}
+
+void time_set_unix(u64 secs)
+{
+    u64 up = time_ns() / 1000000000ULL;
+    boot_unix = secs > up ? secs - up : secs;
+    time_set_wall((u32)((secs / 3600) % 24), (u32)((secs / 60) % 60), (u32)(secs % 60));
 }
 
 void time_wall(u32 *h, u32 *m, u32 *s)

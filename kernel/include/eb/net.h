@@ -118,17 +118,19 @@ bool net_own_address(u8 ip[4]);
 /* TLS 1.3 over that stream: connect to addr:443, run the handshake,
  * send the http request sealed, and hand back the decrypted response
  * exactly as http_fetch would hand back a plain one. The channel is
- * sealed against reading and tampering; the server's certificate is
- * NOT yet verified, so this proves privacy, not identity -- said in
- * the readme, and the next milestone. */
+ * sealed against reading and tampering, and the server's certificate
+ * chain is checked against the trusted authorities for the host; a
+ * server that is not verified is spoken to and marked, or refused when
+ * the settings say "tls | strict". */
 bool tls_get(const u8 addr[4], const char *host, u32 hlen,
              const char *path, u32 plen, u8 *out, u32 max, u32 *got);
-bool tls_last_verified(void);   /* whether the server Finished checked out */
+bool tls_last_verified(void);       /* the server's identity was proven */
+const char *tls_last_reason(void);  /* when it was not: why, in a sentence; empty otherwise */
+bool tls_pki_selftest(void);        /* the certificate arithmetic's known answers; run once at start */
 
 /* How the last page arrived, for the browser to mark: sealed means it
- * came over tls; verified means the handshake's own integrity check
- * passed. Neither means the server's identity was proven -- that waits
- * for certificate checking. */
+ * came over tls; verified means the server's identity was proven by
+ * its certificate chain and its signature over the handshake. */
 bool net_last_secure(void);
 bool net_last_verified(void);
 

@@ -141,14 +141,14 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] ARP, DHCP, DNS, ICMP echo, TCP client, HTTP/1.0 fetch with redirects, static address (`address | a.b.c.d`)
 - [x] Drivers: e1000 family (8254x, 8257x/82574L, 82577–I219), igb family (82575/82576/82580/I350/I210/I211), RTL8139, RTL8168/8169
 - [x] Card choice: first a card with link, then any card; unknown cards named in the log
-- [x] TLS 1.3 client: X25519, AES-128-GCM, SHA-256; certificates not verified
+- [x] TLS 1.3 client: X25519, AES-128-GCM, SHA-256; the server's certificate chain is walked to a trusted authority (ECDSA P-256, RSA PKCS#1 v1.5 and PSS, SHA-256; host names from the subject alternative names, dates against the clock) and its CertificateVerify checked; authorities built in: Sectigo DV E36 (github.com), Let's Encrypt YR1-YR3 (the release cdn); `authority | <base64 public key>` adds one of your own; `tls | strict` refuses an unverified server, otherwise the page is marked
 - [x] SSH door (server): curve25519-sha256, ssh-ed25519, aes128-gcm@openssh.com; keys from `door |` lines; exec and shell sessions
 - [x] Object pipe between machines: X25519 handshake signed with the door key, AES-128-GCM records
 - [x] Nodes: identity is the key; the first handshake writes a row into `nodes`; a different key from a known address is rejected until the row is removed; a known key from a new address updates the row
 - [x] Rights per node: `allow <node> work|update|vouch|all|nothing`; far work runs for a node when `work | welcomed` or its row contains `work`; a kernel is installed only from a node whose row contains `update`; a node's signed vouches pin keys only when its row contains `vouch`
 - [x] Transfers read from and write into objects directly, windowed (HAVE/TAKEN), up to 8 MiB; refusals carry a reason code
 - [x] `update <node>`: sends this machine's kernel; the receiver installs it and restarts; `update <node> with <kernel.elf>`; `update all`; the loader falls back to kernel.old after two failed starts
-- [x] Self-update: `update | auto` fetches a signed release package (`update.pkg`), verifies its ed25519 signature against a key built into the kernel, installs and restarts; `update check` on demand; the signature (not the transport) is the safeguard, so no certificate checking is needed
+- [x] Self-update: `update | auto` fetches a signed release package (`update.pkg`), verifies its ed25519 signature against a key built into the kernel, installs and restarts; `update check` on demand; the signature (not the transport) is the safeguard, the transport's own verification comes on top
 - [x] Discovery: broadcast scan, heartbeat to every known node every 30 s, HERE carries key, version and up to four other addresses (propagation across routers)
 - [x] Far work: `ask <task>`, `ask <task> with <object>` (the input rides to each worker -- a script's third gift, a compiled worker's letter box), `as code`, `across N` and any combination, split tasks summed or concatenated, answers name the machines that produced them (`42 (4 parts by alpha, beta)`), foreman for recurring tasks
 - [x] Vouching: `vouch <node>` sends a signed statement that a key is recognised; a node that `allow`s the voucher `vouch` pins the key before meeting it (identity beyond trust on first use, no rights implied)
@@ -186,6 +186,8 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/pipe-quorum.sh | the same task on two machines; the verified majority makes the result |
 | tools/pipe-vouch.sh | a node vouches for a key; a peer that allows it pins the key before meeting, and ignores a vouch it has not allowed |
 | tools/update-test.sh | self-update from a local release: a forged package is refused, a correctly signed newer one is installed and the machine reboots into it (needs release-key.pem and python3) |
+| tools/pkitest.sh | the certificate checker on the host, built from the kernel's own files: known answers (RFC 6979, fixed RSA vectors), openssl-made chains good and bad (expired, wrong host, wildcard rules, signed by a non-authority, tampered), the live github.com and release-cdn chains against the built-in authorities, CertificateVerify signatures |
+| tools/tlstest.sh | the tls client against a server of its own: verified under an authority written into the settings (an ecdsa chain, an rsa chain), refused without one when `tls | strict` |
 | tools/pipe-work.sh, pipe-desk.sh, pipe-foreman.sh | far work, split tasks over three machines, standing tasks |
 | tools/relaytest.sh, agenttest.sh, persisttest.sh | capability passing between programs, rights following the reference, snapshots (also `make relay`, `make agent`, `make persist`) |
 | tools/sticktest.sh | one disk carries loader, kernel and store |
@@ -199,7 +201,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/selfbuild.sh, cctrial.sh | kernel built by the machine's compiler on the host |
 | tools/fuzz/run.sh | fuzzing of the language tools |
 
-`build/battery.sh` builds once, then runs 26 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`; disk images on `/mnt/c` stall under parallel writes), then renew alone (it rebuilds the kernel twice). Logs, screenshots and QEMU stderr come back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (default 480); a failed or stopped test runs once more and is marked "2nd try". Every test sources `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps, `BUILD` points at the test's directory. The summary prints seconds per test. `build/kvm-battery.sh` adds selfkernel.
+`build/battery.sh` builds once, then runs 28 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`; disk images on `/mnt/c` stall under parallel writes), then renew, update-test and tlstest alone (renew rebuilds the kernel twice; the other two need qemu's one forwarded connection per boot). Logs, screenshots and QEMU stderr come back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (default 480); a failed or stopped test runs once more and is marked "2nd try". Every test sources `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps, `BUILD` points at the test's directory. The summary prints seconds per test. `build/kvm-battery.sh` adds selfkernel.
 
 Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes sequential under KVM, 22 minutes under TCG). The longest is pipe-code, which twice waits out a compiled task's deadline.
 
@@ -218,7 +220,7 @@ Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes
 
 - No USB mass storage: a stick boots the machine but cannot hold the store.
 - No wireless chip driver.
-- TLS: privacy only, no certificate verification. Self-update does not lean on it -- the release package is ed25519-signed and verified against a key built into the kernel -- but a general https fetch is still not proof of the server's identity.
+- TLS: the trusted authorities are the intermediates that sign github.com and its release cdn today (Sectigo DV E36, Let's Encrypt YR1-YR3), not the roots above them: only P-256, RSA up to 4096 bits and SHA-256 are implemented, and the roots sign with P-384 and SHA-384. When either host moves to another intermediate, its pages are marked unverified until a kernel with the new authority is installed -- the self-update itself does not depend on it (the package is ed25519-signed). Other https hosts are unverified unless their authority is written into the settings. No revocation checking.
 - Self-update checks by fetching the whole package (a cheap version pre-check is a later refinement), so it runs at most every six hours; the release private key, if lost, means deployed machines can no longer be sent a signed update.
 - Far-work answers are signed by the node that produced them and checked against its key, but the computation itself is not otherwise verified; running the same task on several nodes and comparing is left for later.
 - Node identity is trust on first use; `trust <name> <key>` pins one beforehand, `forget` re-pins a changed key, `renew key` rotates a key under the old key's signature, and `vouch` lets a node you have marked `vouch` pin a key for you -- but a vouch is only as good as your trust in the voucher, and no vouch is revoked once made.
@@ -245,6 +247,7 @@ Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes
 - EreBUS 0.8.4: self-update from a signed release -- `update | auto` checks now and then and installs a newer version on its own; the package's ed25519 signature is verified against a key built into the kernel (the signature, not the transport, is what makes it safe), and the loader's kernel.old rollback still applies. `update check` looks on demand. Larger tcp receive window for faster downloads; clean connection close.
 - EreBUS 0.8.5: self-update fixes so it works against a real release host -- the fetch carries the long signed redirect URLs a CDN returns (the request and Location buffers were too small and truncated the token), and no further check runs once an install is pending, so a machine updates and restarts exactly once. Verified end to end against the GitHub release.
 - EreBUS 0.8.6: `update check` answers in the terminal. The check runs in the background (the download can take a while), so its outcome -- already current, a newer version installing, or the source unreachable -- is now printed back into the terminal where it was typed, not only into the log.
+- EreBUS 0.8.7: the tls client verifies the server. The certificate chain is walked to a trusted authority (ECDSA P-256 and RSA signatures, host names, dates) and the server's signature over the handshake is checked against the leaf's key; github.com and the release cdn verify against authorities built into the kernel, `authority |` adds one of your own, `tls | strict` refuses what does not verify. The browser marks a page `verified` or `sealed, unverified`; the log and journal say why.
 
 ## License
 

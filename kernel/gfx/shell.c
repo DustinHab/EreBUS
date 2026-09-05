@@ -1408,13 +1408,17 @@ static void lens_html(object *o, i32 x, i32 y, i32 w, i32 h, bool live)
         hot_add(gx - 4, y - 3, 2 * GLYPH_W + 8, ROW, HOT_GO, 0);
     }
 
-    /* How the last page came: sealed says the channel was encrypted;
-     * the reminder that the seal is not yet an identity is the readme's
-     * to keep, and the word here is deliberately "sealed", not "safe". */
+    /* How the last page came: verified says the channel was encrypted
+     * and the server proved who it is; sealed alone says the channel
+     * was encrypted but the server's chain reached no trusted
+     * authority. Neither word is "safe". */
     if (net_last_secure()) {
-        const char *m = "sealed";
-        i32 mw = 6 * GLYPH_W;
-        text_at(x + w - 4 * GLYPH_W - mw - 8, y, x + w, m, C_WRITE);
+        const char *m = net_last_verified() ? "verified" : "sealed, unverified";
+        i32 ml = 0;
+        while (m[ml]) ml++;
+        i32 mw = ml * GLYPH_W;
+        text_at(x + w - 4 * GLYPH_W - mw - 8, y, x + w, m,
+                net_last_verified() ? C_WRITE : C_FAINT);
     }
     fb_rect(x, y + ROW - 4, w, 1, C_EDGE);
 

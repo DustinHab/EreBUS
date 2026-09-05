@@ -1,6 +1,6 @@
 # EreBUS Manual
 
-For EreBUS 0.8.6. This manual is updated with every release; the version it describes is the one on the releases page.
+For EreBUS 0.8.7. This manual is updated with every release; the version it describes is the one on the releases page.
 
 Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions
 
@@ -219,6 +219,8 @@ The settings are one text on the system shelf: `matter | value`, one per line. A
 | `door` | `ssh-ed25519 AAAA...` | a public key that may come in through the door; up to four lines |
 | `wlan` | `<ssid> = <passphrase>` | written by the station when a join worked; the network is rejoined at start |
 | `update` | `off`, `auto`, `auto http://host` | keep current from a signed release; a url overrides the default source (13.8) |
+| `tls` | `marked`, `strict` | what becomes of an https page whose server is not verified: let through and marked, or refused (12.5) |
+| `authority` | a public key in base64 | a certificate authority of your own; servers under it count as verified; up to four lines (12.5) |
 
 Older systems had `known |` lines (address and key of machines met); they are carried into the nodes table at start and no longer written.
 
@@ -261,7 +263,7 @@ Started from the add palette; the running program lands in the list you stand on
 | sums | says one checksum; the same before and after a journey means unchanged |
 | watch | says when the opening of the object changes, at most once a second |
 | wipe | zeroes the payload; needs only write |
-| fetch | given a text whose first line is `host/path`, fetches the page into it (http, or https sealed but unverified) |
+| fetch | given a text whose first line is `host/path`, fetches the page into it (http, or https with the server verified where its authority is known, 12.5) |
 | foreman | given a task text, hands it to the desk and watches for the answer; `again N` in the first line repeats it every N seconds |
 | reckon | given a text, writes the answer after every line that ends in `=` (whole numbers, `+ - * / %`, parentheses) |
 | pulse | given a picture and the activity page, paints memory and cpu share into the picture, one column a second |
@@ -384,7 +386,7 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 ### 12.1 Address and pages
 
 - The address comes by DHCP, or is claimed with `address | a.b.c.d`; `address` shows the card, its MAC and the address.
-- `fetch`: point a text at it whose first line is `host/path`; the page is written into the text and shown through the page lens. `https` pages arrive over TLS 1.3 without certificate verification; the shell marks them accordingly.
+- `fetch`: point a text at it whose first line is `host/path`; the page is written into the text and shown through the page lens. `https` pages arrive over TLS 1.3 with the server verified against the trusted authorities (12.5); the page lens marks the page `verified`, or `sealed, unverified` when the channel was encrypted but the server could not be verified.
 - The palette's `page` is a text template for this.
 
 ### 12.2 The door (ssh)
@@ -399,6 +401,15 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 ### 12.3 The web server
 
 - Make a list named `the served` (at home or on the system shelf). While it exists its texts are served on port 80 as pages and its pictures as BMP; let it go and nothing is served.
+
+### 12.5 Verified servers (https)
+
+- What is checked: the server's certificate chain is walked from its own certificate to a trusted authority -- every signature on the way (ECDSA P-256 or RSA, both with SHA-256), every certificate's dates against the clock, that a certificate in the middle is marked as an authority, and that the server's certificate names the host asked for (its subject alternative names; a wildcard stands for one label). Then the server's signature over the handshake is checked against the key in that certificate, which is what proves the server holds the key and not only a copy of the certificate.
+- The trusted authorities built in are the intermediates that sign github.com (Sectigo DV E36) and the release cdn (Let's Encrypt YR1, YR2, YR3) -- the two hosts the self-update speaks to. The kernel says at start how many it carries (`tls: certificate checks ready`).
+- An authority of your own: write `authority | <base64>` into the settings, the base64 being the authority certificate's public key as `openssl x509 -in ca.pem -pubkey -noout | openssl pkey -pubin -outform DER | base64 -w0` prints it. Up to four lines. A server whose chain reaches one of them counts as verified.
+- What becomes of an unverified server: by default the page still comes, marked `sealed, unverified`, and the log and journal say why (`no trusted authority signs the chain`, `the certificate names no host that matches`, `a certificate in the chain has expired`, ...). `tls | strict` refuses such a page instead.
+- The clock matters: dates are judged against the machine's clock, which comes from the real-time clock at start and from the net once a time server answered (`net: the clock was set from the net`).
+- Limits: only the intermediates above are built in, not the roots (the roots sign with P-384 and SHA-384, which are not implemented); when github or the cdn move to another intermediate their pages are marked unverified until a kernel with the new authority is installed. No revocation checking. The self-update does not depend on any of this: its package is ed25519-signed (13.8).
 
 ### 12.4 Wireless
 
@@ -468,7 +479,7 @@ A machine on the network can keep itself current from a published release, with 
 
 - Turn it on with a settings line: `update | auto`. Off by default. `update check` in the terminal looks once, on demand, whichever way the setting is; because the check runs in the background and can take a while, its outcome is printed back into the terminal when it is done -- already current, a newer version installing, or the source unreachable -- as well as into the log.
 - What happens: now and then (soon after start, then every six hours) the machine fetches an update package from the release source, reads the version inside it, and if it is newer than the running one, verifies the package's signature and -- only if it verifies -- installs the kernel and restarts. The loader's kernel.old rollback still applies, so a kernel that will not come up twice is backed out.
-- Why it is safe without certificate checking: the package is signed with the project's ed25519 key, and the matching public key is built into the kernel. The signature covers the version and the kernel together; a package that does not verify is refused. The network only decides *when* to update; the signature decides *what* may be installed. So a man in the middle, or a wrong file, cannot plant a kernel -- the transport (tls without certificate checking, or plain http) provides privacy, not the authenticity.
+- Why it is safe on its own: the package is signed with the project's ed25519 key, and the matching public key is built into the kernel. The signature covers the version and the kernel together; a package that does not verify is refused. The network only decides *when* to update; the signature decides *what* may be installed. So a man in the middle, or a wrong file, cannot plant a kernel. The transport's own verification of github.com and the cdn (12.5) comes on top and is said in the log, but the update does not depend on it -- with `tls | strict` an unverified hop refuses the fetch, and the check reports the source as unreachable.
 - The source: by default `https://github.com/DustinHab/EreBUS/releases/latest/download`, under which it fetches `update.pkg`. `update | auto http://host[:port]` in the value points it at another base -- a local server, for a test.
 - The package `update.pkg` is `magic | signature | version | kernel.elf`, published as a release asset and built with `tools/sign-release.sh` from the private key that never leaves the build machine.
 - A failed or refused update is said on the attention page (7); an installed one restarts the machine.
@@ -479,6 +490,7 @@ A machine on the network can keep itself current from a published release, with 
 - A far-work result is signed by the node that produced it, but not otherwise checked: the answer is that node's word, not a proof the computation is right. Running the same task on several nodes and comparing is left for a later version.
 - Broadcast discovery covers the local network only; across routers a node must be entered as peer once, after which gossip and heartbeat keep it known.
 - One transfer at a time per node; one job at a time per worker.
+- https verifies servers against a handful of built-in intermediates and the authorities written into the settings (12.5); there is no general root store and no revocation checking.
 
 ---
 
@@ -497,9 +509,10 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 
 - Requirements (Linux; WSL2 with Ubuntu works): `clang lld nasm make qemu-system-x86 ovmf mtools dosfstools xorriso gdb unifont python3-pil`.
 - `make` builds loader, kernel and `build/esp.img`; `make run` starts QEMU with the serial log on the terminal; `sh tools/mkiso.sh` builds `build/erebus.iso`; `sh tools/mkusb.sh` a stick image.
-- `sh build/battery.sh` runs the regression tests: one build, 26 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`), then renew alone because it rebuilds the kernel. Logs, screenshots and QEMU stderr are copied back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (480); a failed or stopped test runs once more, marked "2nd try" in the summary. KVM is used when `/dev/kvm` is writable (`NOKVM=1` forces TCG). The summary lists seconds per test; the full output is in `build/battery.log`. About 4 minutes on 32 cores. `sh build/kvm-battery.sh` adds the kernel built on the machine itself.
+- `sh build/battery.sh` runs the regression tests: one build, 28 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`), then renew, update-test and tlstest alone (renew rebuilds the kernel; the other two use qemu's one forwarded connection per boot). Logs, screenshots and QEMU stderr are copied back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (480); a failed or stopped test runs once more, marked "2nd try" in the summary. KVM is used when `/dev/kvm` is writable (`NOKVM=1` forces TCG). The summary lists seconds per test; the full output is in `build/battery.log`. About 4 minutes on 32 cores. `sh build/kvm-battery.sh` adds the kernel built on the machine itself.
 - `sh build/battery.sh --one <test>` runs a single test that way; `BUILD=<dir> sh tools/<test>.sh` does the same by hand.
-- The tests drive the real screen through QEMU's monitor and wait on serial log lines (`tools/testlib.sh`: `waitlog`, `waitcount`, `waitfile`, `bootwait`); see the table in README.md.
+- The tests drive the real screen through QEMU's monitor and wait on serial log lines (`tools/testlib.sh`: `waitlog`, `waitcount`, `waitfile`, `bootwait`); see the table in README.md. `tools/pkitest.sh` runs on the host: it builds the certificate checker from the kernel's own files and tries it against openssl-made chains and the live github chains kept in `tools/pki/fixtures`.
+- The built-in authorities come from `tools/pki/authorities.txt` (a certificate file and a name per line); `sh tools/mkauthorities.sh` regenerates `kernel/net/authorities.h` from them.
 - The kernel's version comes from `git describe`; a tag `X.Y.Z` on the commit makes the boot line `EreBUS X.Y.Z (x86_64)`.
 
 ---
@@ -521,3 +534,4 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 | 0.8.4 | 2026-09-05 | self-update from a signed release. `update \| auto` in settings has the machine check now and then for a newer version and, when one is out, fetch a package, verify its ed25519 signature against a key built into the kernel, install it and restart -- the loader's kernel.old rollback still the last net. The signature, not the transport, is what makes it safe, so it needs no certificate checking yet; the download follows redirects over http or tls. `update check` looks on demand. Also: the client tcp window is larger (faster large downloads), and a connection is closed cleanly (a FIN, not silence). |
 | 0.8.5 | 2026-09-05 | self-update works against a real release host: the fetch now carries the long signed redirect urls a release CDN hands back (the request and location buffers were too small and cut off the token), and once an install is pending no further check runs, so the machine updates and restarts once. Verified end to end against the GitHub release. |
 | 0.8.6 | 2026-09-05 | `update check` answers in the terminal where it was typed. The check runs in the network thread and can take a while, so it cannot reply on the same line; its outcome -- already current, a newer version installing, or the source unreachable -- is now printed back into the terminal when it is done, not only into the log. |
+| 0.8.7 | 2026-09-05 | the tls client verifies the server (12.5): the certificate chain is walked to a trusted authority -- ECDSA P-256 and RSA (PKCS#1 v1.5) signatures with SHA-256, dates, host names from the subject alternative names, authority marks in the middle -- and the server's signature over the handshake (ECDSA or RSA-PSS) is checked against the certificate's key. Built-in authorities: Sectigo DV E36 for github.com, Let's Encrypt YR1-YR3 for the release cdn; `authority \|` adds one of your own; `tls \| strict` refuses an unverified server, otherwise the page is marked `sealed, unverified` and the journal says why. New at start: `tls: certificate checks ready`. The machine now keeps a full date, from the real-time clock and the net. |

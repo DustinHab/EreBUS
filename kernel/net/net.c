@@ -12,6 +12,7 @@
 #include <eb/standard.h>
 #include <eb/fb.h>
 #include <eb/crypto.h>
+#include <eb/pki.h>
 #include <eb/msg.h>
 #include <eb/thread.h>
 #include <eb/settings.h>
@@ -783,8 +784,9 @@ static void sntp_input(const u8 *p, u32 len)
                ((u64)p[42] << 8) | p[43];
     if (secs == 0) return;
 
-    u32 day = (u32)(secs % 86400);
-    time_set_wall(day / 3600, (day / 60) % 60, day % 60);
+    /* From 1900 to 1970 are 2208988800 seconds; the date rides along. */
+    if (secs < 2208988800ULL) return;
+    time_set_unix(secs - 2208988800ULL);
     kprintf("net:  the clock was set from the net (utc)\n");
     journal_says("system", "the clock was set from the net");
 }
@@ -1510,6 +1512,7 @@ bool net_fetch(const char *url, u32 ulen, u8 *out, u32 max,
      * number and a Location line (this is how a stable "latest" url ends
      * up at the newest release's file). A secure ask goes through tls. */
     for (u32 hop = 0; hop < 6; hop++) {
+        if (secure_out) *secure_out = secure;    /* known before the hop, so a refusal can be explained */
         if (!dns_resolve(host, hlen, addr)) return false;
         bool ok = secure
                 ? tls_get(addr, host, hlen, path, plen, out, max, &got)
@@ -1594,7 +1597,8 @@ static void fetch_into(object *o)
         out = write_words(d, out, (u32)size, "the page was not fetched.\n");
         for (u64 i = out; i < size; i++) d[i] = 0;
         obj_touch(o);
-        journal_says("net", "the page was not fetched");
+        journal_says("net", secure && tls_last_reason()[0] ? tls_last_reason()
+                                                            : "the page was not fetched");
         return;
     }
 
@@ -1610,8 +1614,10 @@ static void fetch_into(object *o)
     last_verified = secure && tls_last_verified();
 
     obj_touch(o);
-    journal_says("net", secure ? "a page arrived (tls)"
-                               : "a page arrived");
+    journal_says("net", last_verified ? "a page arrived (tls, server verified)"
+                      : secure        ? "a page arrived (tls, server unverified)"
+                                      : "a page arrived");
+    if (secure && !last_verified) journal_says("net", tls_last_reason());
 }
 
 static void net_thread(void *arg)
@@ -1729,6 +1735,11 @@ bool net_start(void)
                 "and the 1.3 key schedule\n");
     else
         kprintf("tls:  self test FAILED -- https disabled\n");
+    if (crypto_good && tls_pki_selftest())
+        kprintf("tls:  certificate checks ready -- ecdsa p-256, rsa pkcs1 and pss, "
+                "%u authorities built in\n", pki_builtin_count());
+    else
+        kprintf("tls:  certificate self test FAILED -- every server stays unverified\n");
     if (crypto_good)
         kprintf("pipe: ready; the handshake is signed with the door key, "
                 "and a known address must answer with its known key\n");
@@ -1737,7 +1748,7 @@ bool net_start(void)
     thread_create("net", net_thread, NULL, kdom);
     running = true;
 
-    kprintf("net:  client only; http, and https without certificate "
-            "verification; one connection at a time\n");
+    kprintf("net:  client only; http, and https with the server verified "
+            "against the built-in authorities; one connection at a time\n");
     return true;
 }

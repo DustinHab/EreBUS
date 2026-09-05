@@ -1,11 +1,15 @@
 /*
  * tls.c -- TLS 1.3 client, one suite: X25519 + AES-128-GCM-SHA256.
  * - ClientHello, server flight, RFC 8446 schedule, Finished both ways; then a sealed pipe for http
- * - certificate and signature are read past and NOT verified (no RSA/ECDSA, no root store); the shell says so
+ * - the server's certificate chain is walked to a trusted authority (pki.h) and its CertificateVerify checked
+ *   against the leaf's key: ecdsa_secp256r1_sha256 or rsa_pss_rsae_sha256
+ * - a server that is not verified is still spoken to, marked unverified, unless the settings say "tls | strict"
  * - one connection at a time on net.c's tcp stream
  */
 #include <eb/net.h>
 #include <eb/crypto.h>
+#include <eb/pki.h>
+#include <eb/settings.h>
 #include <eb/string.h>
 #include <eb/time.h>
 #include <eb/fmt.h>
@@ -24,8 +28,110 @@
 #define HS_FINISHED     20
 #define HS_NEW_TICKET   4
 
-static bool verified;
+static bool verified;                 /* the server's identity was proven on the last connection */
+static char why[128];                 /* when it was not: the reason, for the log and the journal */
+static bool pki_ok;                   /* the certificate arithmetic passed its known answers */
+
 bool tls_last_verified(void) { return verified; }
+const char *tls_last_reason(void) { return why; }
+
+bool tls_pki_selftest(void)
+{
+    pki_ok = pki_selftest();
+    return pki_ok;
+}
+
+static void set_why(const char *a, const char *b)
+{
+    u32 at = 0;
+    while (*a && at + 1 < sizeof why) why[at++] = *a++;
+    while (*b && at + 1 < sizeof why) why[at++] = *b++;
+    why[at] = 0;
+}
+
+/* The server's identity: its chain must reach a trusted authority --
+ * built in, or from the settings -- for the host asked for, and its
+ * CertificateVerify must be a valid signature under the leaf's key over
+ * the transcript up to that message. by names the authority. */
+static bool check_identity(const u8 *cm, u32 cl, const u8 *vm, u32 vl,
+                           const u8 th[32], const char *host, u32 hlen,
+                           const char **by)
+{
+    if (!pki_ok) { set_why("the certificate self test failed at start", ""); return false; }
+    if (!cm || cl < 4) { set_why("the server sent no certificate", ""); return false; }
+
+    /* Certificate: context (1) | list length (3) | { der length (3) |
+     * der | extensions length (2) | extensions }* */
+    u32 at = 1 + cm[0];
+    if (at + 3 > cl) { set_why("the certificate message is malformed", ""); return false; }
+    u32 list = ((u32)cm[at] << 16) | ((u32)cm[at+1] << 8) | cm[at+2];
+    at += 3;
+    u32 end = at + list;
+    if (end > cl) end = cl;
+
+    const u8 *ders[X509_MAX_CHAIN];
+    u32 lens[X509_MAX_CHAIN];
+    u32 n = 0;
+    while (at + 3 <= end && n < X509_MAX_CHAIN) {
+        u32 dl = ((u32)cm[at] << 16) | ((u32)cm[at+1] << 8) | cm[at+2];
+        at += 3;
+        if (dl == 0 || at + dl > end) break;
+        ders[n] = cm + at;
+        lens[n] = dl;
+        n++;
+        at += dl;
+        if (at + 2 > end) break;
+        u32 el = ((u32)cm[at] << 8) | cm[at+1];
+        at += 2 + el;
+    }
+    if (n == 0) { set_why("the server sent an empty certificate list", ""); return false; }
+
+    pki_authority extra[4];
+    u32 ne = 0;
+    for (u32 i = 0; i < settings_authority_count() && ne < 4; i++) {
+        u32 len;
+        const u8 *spki = settings_authority(i, &len);
+        if (!spki) break;
+        extra[ne].name = "an authority from the settings";
+        extra[ne].spki = spki;
+        extra[ne].len = len;
+        ne++;
+    }
+
+    i64 now = (i64)time_unix();
+    if (now == 0) { set_why("the clock is not set, so no certificate's dates can be judged", ""); return false; }
+
+    x509_cert leaf;
+    x509_status st = x509_verify_chain(ders, lens, n, host, hlen, now, extra, ne, &leaf, by);
+    if (st != X509_VERIFIED) { set_why("the server is not verified: ", x509_status_text(st)); return false; }
+
+    /* CertificateVerify: scheme (2) | length (2) | signature. The signed
+     * content is 64 spaces, the context string, a zero, and the
+     * transcript hash before this message (RFC 8446, 4.4.3). */
+    if (!vm || vl < 4) { set_why("the server sent no certificate verify", ""); return false; }
+    u16 scheme = (u16)(((u16)vm[0] << 8) | vm[1]);
+    u32 sl = ((u32)vm[2] << 8) | vm[3];
+    if (4 + sl > vl) { set_why("the certificate verify message is malformed", ""); return false; }
+
+    u8 content[64 + 33 + 1 + 32];
+    u32 c = 0;
+    for (u32 i = 0; i < 64; i++) content[c++] = 0x20;
+    const char *label = "TLS 1.3, server CertificateVerify";
+    while (*label) content[c++] = (u8)*label++;
+    content[c++] = 0;
+    for (u32 i = 0; i < 32; i++) content[c++] = th[i];
+    u8 h[32];
+    sha256(content, c, h);
+
+    bool ok;
+    if (scheme == 0x0403 && leaf.key.kind == KEY_P256)
+        ok = p256_verify_der(leaf.key.point, h, vm + 4, sl);
+    else if (scheme == 0x0804 && leaf.key.kind == KEY_RSA)
+        ok = rsa_verify_pss_sha256(leaf.key.n, leaf.key.nlen, leaf.key.e, leaf.key.elen, h, vm + 4, sl);
+    else { set_why("the server signed the handshake with a scheme not supported here", ""); return false; }
+    if (!ok) { set_why("the server's signature over the handshake did not verify", ""); return false; }
+    return true;
+}
 
 static void expand_label(const u8 secret[32], const char *label,
                          const u8 *ctx, u32 ctxlen, u8 *out, u32 olen);
@@ -264,8 +370,8 @@ static u32 build_hello(u8 *out, const char *host, u32 hlen,
     body[b++]=0x00; body[b++]=0x0a; body[b++]=0x00; body[b++]=0x04;
     body[b++]=0x00; body[b++]=0x02; body[b++]=0x00; body[b++]=0x1d;
 
-    /* signature_algorithms: offered so the server will speak, though
-     * its signature is not checked here. */
+    /* signature_algorithms: the two the CertificateVerify may use, and
+     * rsa_pkcs1_sha256 for the signatures within a chain. */
     body[b++]=0x00; body[b++]=0x0d; body[b++]=0x00; body[b++]=0x08;
     body[b++]=0x00; body[b++]=0x06;
     body[b++]=0x04; body[b++]=0x03;                  /* ecdsa_secp256r1_sha256 */
@@ -345,6 +451,7 @@ bool tls_get(const u8 addr[4], const char *host, u32 hlen,
              const char *path, u32 plen, u8 *out, u32 max, u32 *got)
 {
     verified = false;
+    why[0] = 0;
     *got = 0;
 
     if (!tcp_open(addr, 443)) return false;
@@ -407,10 +514,13 @@ bool tls_get(const u8 addr[4], const char *host, u32 hlen,
 
     /* The server's encrypted flight: EncryptedExtensions, Certificate,
      * CertificateVerify, Finished. Each is hashed into the transcript;
-     * the certificate and its signature are read past, not checked. */
+     * the certificate and the signature are kept for the identity check
+     * once the Finished has proven the flight intact. */
     u8 server_fin[32];
     bool have_fin = false;
-    u8 th_before_fin[32];
+    u8 th_before_fin[32], th_before_cv[32];
+    const u8 *cert_msg = NULL, *cv_msg = NULL;
+    u32 cert_len = 0, cv_len = 0;
 
     /* A flight may pack several handshake messages into one record, so
      * messages are reassembled across records into a small buffer. */
@@ -434,6 +544,17 @@ bool tls_get(const u8 addr[4], const char *host, u32 hlen,
             if (hp + 4 + mlen > hb) break;      /* the rest is still coming */
             u8 mtype = hsbuf[hp];
 
+            if (mtype == HS_CERT) {
+                cert_msg = hsbuf + hp + 4;
+                cert_len = mlen;
+            } else if (mtype == HS_CERT_VERIFY) {
+                /* The signature covers the transcript before itself. */
+                sha256_ctx c = tr;
+                sha256_final(&c, th_before_cv);
+                cv_msg = hsbuf + hp + 4;
+                cv_len = mlen;
+            }
+
             if (mtype == HS_FINISHED) {
                 /* The transcript up to but not including this message
                  * is what the server's verify_data covers. */
@@ -452,13 +573,29 @@ bool tls_get(const u8 addr[4], const char *host, u32 hlen,
     if (!have_fin) { tcp_close(); return false; }
 
     /* Check the server's Finished: proof the handshake was not tampered
-     * with, though not proof of who the server is. */
+     * with. Identity is the next step. */
     u8 s_fk[32], expect[32];
     expand_label(s_hs, "finished", NULL, 0, s_fk, 32);
     hmac_sha256(s_fk, 32, th_before_fin, 32, expect);
-    verified = true;
-    for (u32 i = 0; i < 32; i++) if (expect[i] != server_fin[i]) verified = false;
-    if (!verified) { tcp_close(); return false; }
+    bool intact = true;
+    for (u32 i = 0; i < 32; i++) if (expect[i] != server_fin[i]) intact = false;
+    if (!intact) { tcp_close(); return false; }
+
+    /* Who the server is: the chain to an authority, and the signature
+     * that shows it holds the key. Said in the log either way; an
+     * unverified server is refused only when the settings say so. */
+    const char *by = "";
+    verified = check_identity(cert_msg, cert_len, cv_msg, cv_len, th_before_cv, host, hlen, &by);
+    if (verified) {
+        kprintf("tls:  the server is verified; its chain is signed by %s\n", by);
+    } else if (settings_tls_strict()) {
+        kprintf("tls:  %s; refused (tls | strict)\n", why);
+        set_why(why, "; refused, as the settings say tls | strict");
+        tcp_close();
+        return false;
+    } else {
+        kprintf("tls:  %s; the page is marked unverified\n", why);
+    }
 
     /* Application keys, from the master secret and the full transcript
      * through the server's Finished. */

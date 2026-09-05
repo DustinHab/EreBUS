@@ -56,12 +56,21 @@ typedef struct {
      * source (for a local test). From an "update |" line. */
     bool update_auto;
     char update_from[128];
+    /* Whether a sealed page whose server could not be verified is
+     * refused ("tls | strict") or let through and marked. */
+    bool tls_strict;
+    /* Certificate authorities of one's own, up to four: the public key
+     * (SubjectPublicKeyInfo) of each, from an "authority |" line. */
+    u8   authority[4][320];
+    u32  authority_len[4];
+    u32  authorities;
 } values;
 
 static values current = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                           false, { 0, 0, 0, 0 }, 0,
                           false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0,
-                          { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0, "", false, "" };
+                          { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0, "", false, "",
+                          false, { { 0 } }, { 0 }, 0 };
 
 object *settings_object(void) { return settings; }
 
@@ -210,6 +219,16 @@ void settings_name(char *out, u32 max)
 }
 
 bool settings_update_auto(void) { return current.update_auto; }
+bool settings_tls_strict(void)  { return current.tls_strict; }
+
+u32 settings_authority_count(void) { return current.authorities; }
+
+const u8 *settings_authority(u32 i, u32 *len)
+{
+    if (i >= current.authorities) return NULL;
+    *len = current.authority_len[i];
+    return current.authority[i];
+}
 
 bool settings_update_from(char *out, u32 max)
 {
@@ -243,7 +262,8 @@ static const char seed[] =
     "address  | by lease\n"
     "peer     | nobody\n"
     "work     | refused\n"
-    "keys     | english\n";
+    "keys     | english\n"
+    "tls      | marked\n";
 
 bool settings_create(void)
 {
@@ -452,6 +472,26 @@ static void read_line(values *v, const char *line, u64 len)
                 break;
             }
         }
+    } else if (matter_is(line, a, b, "tls")) {
+        /* What becomes of a sealed page whose server is not verified:
+         * "strict" refuses it; anything else lets it through, marked. */
+        v->tls_strict = line_has(val, vlen, "strict");
+    } else if (matter_is(line, a, b, "authority")) {
+        /* A certificate authority of one's own: its public key in
+         * base64, as `openssl pkey -pubout -outform DER | base64`
+         * writes it. Servers under it count as verified; up to four. */
+        u64 i = 0;
+        while (i < vlen && val[i] == ' ') i++;
+        u64 from = i;
+        while (i < vlen && val[i] != ' ' && val[i] != '\r') i++;
+        if (v->authorities < 4) {
+            u8 *slot = v->authority[v->authorities];
+            i32 got = base64_decode(val + from, (u32)(i - from), slot, sizeof(v->authority[0]));
+            if (got > 0 && slot[0] == 0x30) {
+                v->authority_len[v->authorities] = (u32)got;
+                v->authorities++;
+            }
+        }
     } else if (matter_is(line, a, b, "door")) {
         /* A key that may come in through the door: the line of an
          * id_ed25519.pub, pasted whole -- "ssh-ed25519" and then the
@@ -614,6 +654,16 @@ static void note_changes(const values *was, const values *now)
                      ? "keyboard layout: german"
                      : "keyboard layout: english");
 
+    if (was->tls_strict != now->tls_strict)
+        journal_says("settings", now->tls_strict
+                     ? "sealed pages from unverified servers are refused now"
+                     : "sealed pages from unverified servers are let through, marked");
+
+    if (was->authorities != now->authorities)
+        journal_says("settings", now->authorities
+                     ? "certificate authorities of your own are in force"
+                     : "no certificate authority of your own any more");
+
     if (was->addr_set != now->addr_set ||
         (now->addr_set && memcmp(was->addr_ip, now->addr_ip, 4) != 0))
         journal_says("settings", now->addr_set
@@ -731,7 +781,8 @@ void settings_apply(void)
     values next = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                     false, { 0, 0, 0, 0 }, 0,
                     false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0,
-                    { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0, "", false, "" };
+                    { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0, "", false, "",
+                    false, { { 0 } }, { 0 }, 0 };
 
     u64 start = 0;
     for (u64 i = 0; i <= size; i++) {

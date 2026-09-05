@@ -20,6 +20,12 @@ void time_wall(u32 *h, u32 *m, u32 *s);
 /* Sets the wall clock -- how a time server's answer lands. */
 void time_set_wall(u32 h, u32 m, u32 s);
 
+/* The date and time as seconds since 1970 (utc): from the rtc at
+ * start, from the net once a time server answered. 0 when no clock
+ * could be read at all. time_set_unix sets both this and the wall. */
+u64  time_unix(void);
+void time_set_unix(u64 secs);
+
 /* Tells this boot apart from any other, to the second. */
 u64  time_boot_stamp(void);  /* 0 if the measurement failed */
 
