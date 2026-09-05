@@ -428,6 +428,35 @@ bool nodes_allow(u32 i, u32 may)
     return true;
 }
 
+i32 nodes_trust(const char *name, const u8 key[32])
+{
+    i32 i = nodes_by_key(key);
+    if (i >= 0) {
+        node_says(rows[i].name, " is already in nodes with that key");
+        return i;
+    }
+    i = nodes_meet(name, key, NULL, 0, NULL, true);
+    if (i < 0) return -1;
+    char fp[64];
+    ssh_fingerprint_of(key, fp);
+    kprintf("pipe: node '%s' trusted before meeting; key %s\n", rows[i].name, fp);
+    node_says(rows[i].name, " is trusted before meeting; its first handshake will be recognised");
+    return i;
+}
+
+bool nodes_rekey(u32 i, const u8 newkey[32])
+{
+    if (i >= count) return false;
+    if (nodes_by_key(newkey) >= 0 && nodes_by_key(newkey) != (i32)i) return false;
+    memcpy(rows[i].key, newkey, 32);
+    nodes_write();
+    char fp[64];
+    ssh_fingerprint_of(newkey, fp);
+    kprintf("pipe: node '%s' renewed its key; now %s\n", rows[i].name, fp);
+    node_says(rows[i].name, " renewed its key; the row carries the new one");
+    return true;
+}
+
 /* Forgets a node: its row is dropped, so the next handshake from that
  * key -- or from its address with a new key -- is met fresh, trust on
  * first use again. This is how a changed key is deliberately accepted

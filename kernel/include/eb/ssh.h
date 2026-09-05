@@ -26,6 +26,12 @@ void ssh_fingerprint_of(const u8 pub[32], char out[64]);
 bool ssh_identity(u8 pub[32]);
 bool ssh_sign(const void *msg, u32 len, u8 sig[64]);
 
+/* The key as it is kept (seed and public half), and the public half in
+ * the line an id_ed25519.pub carries ("ssh-ed25519" and the letters) --
+ * what another machine's `trust` takes. Both false before the key stands. */
+bool ssh_key_bytes(u8 out[64]);
+bool ssh_public_line(char out[96]);
+
 /* The protocol, run from the net thread's loop. */
 void ssh_service(void);
 

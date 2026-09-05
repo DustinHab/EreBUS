@@ -1964,6 +1964,9 @@ void kmain(eb_boot_info *bi)
                     note[at++] = fp[i];
                 note[at] = 0;
                 journal_says("ssh", note);
+                /* The pipe keeps the object so 'renew key' can write a
+                 * fresh pair into it and have it saved. */
+                pipe_door_key_set(dk);
             }
         }
 

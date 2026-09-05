@@ -42,6 +42,7 @@
 #define K_ANSWER  10                 /* what became of a job */
 #define K_SAY     11                 /* a word for the person there */
 #define K_HAVE    12                 /* how far a transfer has come */
+#define K_ROTATE  13                 /* my door key is renewed: old, new, each signed by the other */
 
 /* One chunk fills one datagram: 20 bytes of envelope, 24 of chunk head,
  * 16 of tag, under the 1400 the wire takes. */
@@ -111,6 +112,7 @@ static u32 rd32(const u8 *p);
 static u64 rd64(const u8 *p);
 static void wr32(u8 *p, u32 v);
 static void wr64(u8 *p, u64 v);
+static void rotate_message(u8 m[80], const u8 oldp[32], const u8 newp[32]);
 
 /* ------------------------------------------------------------------ */
 /* Small tools                                                         */
@@ -342,6 +344,8 @@ typedef struct {
     u8   key[32];
     char version[24];
     u64  seen_ns;
+    u16  up_min;                     /* the node's uptime in minutes, as it said */
+    bool quiet_said;                 /* the journal has said it went quiet */
 } heardrec;
 
 static heardrec heard[HEARD_MAX];
@@ -434,6 +438,21 @@ static heardrec *heard_note(const u8 *ip, u16 port, const u8 *name, u32 nmax,
     h->works = works;
     h->free_mib = free_mib;
     h->seen_ns = time_ns();
+    if (h->quiet_said) {
+        /* Heard again after the journal had said it went quiet. */
+        i32 row = nodes_by_address(h->ip);
+        if (row >= 0) {
+            char nm[24], line[64];
+            nodes_name_at((u32)row, nm);
+            u32 at = put(line, 0, "node ");
+            at = put(line, at, nm);
+            at = put(line, at, " is back");
+            line[at] = 0;
+            journal_says("pipe", line);
+            kprintf("pipe: %s\n", line);
+        }
+        h->quiet_said = false;
+    }
     return h;
 }
 
@@ -457,6 +476,10 @@ static void say_who(u8 kind, const u8 dst[4], u16 dport)
         if (row >= 0 && (nodes_may_at((u32)row) & NODE_MAY_WORK)) works = true;
     }
     pkt[32] = works ? 1 : 0;
+    /* uptime in minutes at 34..35; older readers stop at byte 32 */
+    u64 upm = time_ns() / (60ULL * SECOND);
+    if (upm > 65535) upm = 65535;
+    pkt[34] = (u8)upm; pkt[35] = (u8)(upm >> 8);
     wr32(pkt + 36, (u32)(pmm_free_frames() / 256));
     ssh_identity(pkt + 40);
     for (u32 i = 0; i < 23 && erebus_version[i]; i++) pkt[72 + i] = (u8)erebus_version[i];
@@ -2260,6 +2283,7 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         bool works = (len >= 40) && (p[32] & 1);
         u32 mib = (len >= 40) ? rd32(p + 36) : 0;
         heardrec *h = heard_note(src, sport, p + 8, 24, works, mib);
+        if (len >= 40) h->up_min = (u16)(p[34] | (p[35] << 8));
 
         if (len >= 96) {
             bool any = false;
@@ -2299,6 +2323,22 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
                     knock_begin(src, h->port, i);
             }
         }
+        return;
+    }
+
+    if (kind == K_ROTATE && len >= 200) {
+        /* A node renewing its key: the packet carries the old public key
+         * and the new, each signed over both. We honour it only for a
+         * node we already hold under the old key -- a stranger cannot
+         * rotate anyone -- and both signatures must check. */
+        const u8 *oldp = p + 8, *newp = p + 40, *so = p + 72, *sn = p + 136;
+        u8 msg[80];
+        rotate_message(msg, oldp, newp);
+        if (!ed25519_verify(oldp, msg, sizeof(msg), so)) return;
+        if (!ed25519_verify(newp, msg, sizeof(msg), sn)) return;
+        nodes_apply();
+        i32 i = nodes_by_key(oldp);
+        if (i >= 0) nodes_rekey((u32)i, newp);
         return;
     }
 
@@ -2463,6 +2503,87 @@ void pipe_page_set(object *t)
     if (page) obj_retain(page);
 }
 
+/* The door-key object, held so a renewal can write a fresh pair into it
+ * and have it saved with the graph. */
+static object *door_key_obj;
+
+void pipe_door_key_set(object *t)
+{
+    if (door_key_obj) obj_release(door_key_obj);
+    door_key_obj = t;
+    if (door_key_obj) obj_retain(door_key_obj);
+}
+
+/* The message both keys sign in a rotation: a fixed label so the
+ * signature cannot be mistaken for any other, then the old and new
+ * public keys. */
+static void rotate_message(u8 m[80], const u8 oldp[32], const u8 newp[32])
+{
+    static const char label[] = "erebus rotate v1";   /* 16 letters */
+    memcpy(m, label, 16);
+    memcpy(m + 16, oldp, 32);
+    memcpy(m + 48, newp, 32);
+}
+
+static void rotate_send(const u8 dst[4], u16 dport, const u8 oldp[32],
+                        const u8 newp[32], const u8 so[64], const u8 sn[64])
+{
+    u8 pkt[200];
+    memset(pkt, 0, sizeof(pkt));
+    wr32(pkt, MAGIC);
+    pkt[4] = K_ROTATE;
+    memcpy(pkt + 8, oldp, 32);
+    memcpy(pkt + 40, newp, 32);
+    memcpy(pkt + 72, so, 64);
+    memcpy(pkt + 136, sn, 64);
+    net_udp_send(dst, PIPE_PORT, dport, pkt, 200);
+}
+
+bool pipe_renew_key(void)
+{
+    if (!door_key_obj || obj_size(door_key_obj) < 64) {
+        journal_says("pipe", "there is no door key to renew");
+        return false;
+    }
+    u8 oldk[64], newk[64];
+    if (!ssh_key_bytes(oldk)) return false;
+    ssh_make_key(newk);
+
+    u8 msg[80];
+    rotate_message(msg, oldk + 32, newk + 32);
+    u8 so[64], sn[64];
+    ed25519_sign(so, oldk, oldk + 32, msg, sizeof(msg));
+    ed25519_sign(sn, newk, newk + 32, msg, sizeof(msg));
+
+    /* Install the new pair: written into the graph's door-key object and
+     * given to ssh, so the door and the pipe both speak with it now. */
+    memcpy(obj_data(door_key_obj), newk, 64);
+    obj_touch(door_key_obj);
+    ssh_init(newk);
+
+    /* Tell every node we know: each announcement carries the old key and
+     * the new, one vouching for the other, so the far side can move its
+     * row without meeting us afresh. A node that does not hold the old
+     * key ignores it and will meet the new key on its own later. */
+    nodes_apply();
+    u32 sent = 0;
+    for (u32 i = 0; i < nodes_count(); i++) {
+        u8 ip[4]; u16 port;
+        if (nodes_address_at(i, ip, &port)) {
+            rotate_send(ip, port, oldk + 32, newk + 32, so, sn);
+            sent++;
+        }
+    }
+    char fp[64];
+    ssh_fingerprint(fp);
+    kprintf("pipe: the door key is renewed; now %s; told %u node(s)\n", fp, sent);
+    journal_says("pipe", "the door key was renewed; known nodes are told, "
+                         "each announcement signed with the old key and the new");
+    memset(oldk, 0, 64);
+    memset(newk, 0, 64);
+    return true;
+}
+
 static void page_write(void)
 {
     if (!page) return;
@@ -2472,7 +2593,7 @@ static void page_write(void)
 
     static char buf[4096];
     u64 now = time_ns();
-    u32 at = put(buf, 0, "node          address            version         seen     free    work  seal\n");
+    u32 at = put(buf, 0, "node          address            version         seen     free    up      work  seal\n");
 
     nodes_apply();
     u32 n = nodes_count();
@@ -2496,6 +2617,12 @@ static void page_write(void)
         while (at < col + 9) buf[at++] = ' ';
         col = at;
         if (h) { at = put_dec(buf, at, h->free_mib); buf[at++] = 'M'; } else buf[at++] = '-';
+        while (at < col + 8) buf[at++] = ' ';
+        col = at;
+        if (h && h->up_min) {
+            if (h->up_min >= 60) { at = put_dec(buf, at, h->up_min / 60); buf[at++] = 'h'; }
+            at = put_dec(buf, at, h->up_min % 60); buf[at++] = 'm';
+        } else buf[at++] = '-';
         while (at < col + 8) buf[at++] = ' ';
         at = put_pad(buf, at, h ? (h->works ? "yes" : "no") : "-", 6);
         sealrec *s = has ? seal_by_ip(ip) : NULL;
@@ -2686,6 +2813,26 @@ void pipe_service(void)
         u8 peer[4];
         u16 pp;
         if (settings_peer(peer, &pp) && nodes_by_address(peer) < 0) say_who(K_SEEK, peer, pp);
+
+        /* A known node heard once and then not for a while has gone
+         * quiet: say so once, so a fleet's silence is noticed rather
+         * than merely shown. Coming back is said in heard_note. */
+        for (u32 i = 0; i < HEARD_MAX; i++) {
+            heardrec *h = &heard[i];
+            if (!h->used || h->quiet_said) continue;
+            if (now - h->seen_ns <= QUIET_S * SECOND) continue;
+            i32 row = nodes_by_address(h->ip);
+            if (row < 0) continue;
+            char nm[24], line[64];
+            nodes_name_at((u32)row, nm);
+            u32 at = put(line, 0, "node ");
+            at = put(line, at, nm);
+            at = put(line, at, " went quiet");
+            line[at] = 0;
+            journal_says("pipe", line);
+            kprintf("pipe: %s\n", line);
+            h->quiet_said = true;
+        }
     }
 
     for (u32 i = 0; i < SEAL_MAX; i++)

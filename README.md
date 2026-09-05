@@ -176,6 +176,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/sshrekey.sh | the door survives a client-driven mid-session rekey |
 | tools/pipe-two.sh | object pipe: discovered by scan, sealed, crosses; nothing in the clear on the wire |
 | tools/pipe-identity.sh | the pipe refuses a changed key at a known address |
+| tools/pipe-rotate.sh | a key trusted before meeting; a renewed key propagated to a peer, signed old and new |
 | tools/pipe-update.sh | a kernel through the pipe: refused without the update right, installed and booted with it |
 | tools/pipe-input.sh | far work with an input object; the answer names the worker |
 | tools/pipe-code.sh | compiled far work: a c task built and run on the worker, signed answer, and a runaway task ended by the deadline |
@@ -193,9 +194,9 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/selfbuild.sh, cctrial.sh | kernel built by the machine's compiler on the host |
 | tools/fuzz/run.sh | fuzzing of the language tools |
 
-`build/battery.sh` builds once, then runs 25 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`; disk images on `/mnt/c` stall under parallel writes), then renew alone (it rebuilds the kernel twice). Logs, screenshots and QEMU stderr come back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (default 480); a failed or stopped test runs once more and is marked "2nd try". Every test sources `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps, `BUILD` points at the test's directory. The summary prints seconds per test. `build/kvm-battery.sh` adds selfkernel.
+`build/battery.sh` builds once, then runs 26 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`; disk images on `/mnt/c` stall under parallel writes), then renew alone (it rebuilds the kernel twice). Logs, screenshots and QEMU stderr come back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (default 480); a failed or stopped test runs once more and is marked "2nd try". Every test sources `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps, `BUILD` points at the test's directory. The summary prints seconds per test. `build/kvm-battery.sh` adds selfkernel.
 
-Measured on 32 cores under KVM: about 270 s for all 26 tests (before: 38 minutes sequential under KVM, 22 minutes under TCG). The longest is pipe-code, which twice waits out a compiled task's deadline.
+Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes sequential under KVM, 22 minutes under TCG). The longest is pipe-code, which twice waits out a compiled task's deadline.
 
 ## Using the ISO
 
@@ -214,7 +215,7 @@ Measured on 32 cores under KVM: about 270 s for all 26 tests (before: 38 minutes
 - No wireless chip driver.
 - TLS: privacy only, no certificate verification.
 - Far-work answers are signed by the node that produced them and checked against its key, but the computation itself is not otherwise verified; running the same task on several nodes and comparing is left for later.
-- Node identity is trust on first use; no third party verifies a key. `forget <node>` re-pins a changed key deliberately.
+- Node identity is trust on first use; `trust <name> <key>` pins one beforehand, `forget` re-pins a changed key, and `renew key` rotates a key under the old key's signature -- but no third party vouches for a key.
 - A quorum takes the answer a verified majority agree on, but does not otherwise check the computation; a compiled or quorum task takes no input object yet.
 - A compiled task must fit one datagram (1024 bytes) and answers through the raw system-call ABI; one compile runs at a time per machine.
 - The ssh door serves up to four visitors at once (a fifth displaces the longest-idle); it honours a client-driven rekey but does not force one.
@@ -232,6 +233,7 @@ Measured on 32 cores under KVM: about 270 s for all 26 tests (before: 38 minutes
 - EreBUS 0.6.0: visual overhaul of the shell -- one warm ground, a single accent for agency and position, regions parted by rules, the focused name at double height. Structure, layout and behaviour unchanged.
 - EreBUS 0.7.0: serious far work -- answers signed with the node's door key and verified against its key; a kernel-enforced deadline that ends a runaway job with no system calls; compiled tasks (`ask <task> as code`) built and run on the worker under that deadline; a job ledger on the system shelf.
 - EreBUS 0.8.0: quorum far work (`ask <task> across N`), the result a verified majority agree on; `forget <node>` to re-pin a changed key; the ssh door serves several visitors at once and survives a mid-session rekey.
+- EreBUS 0.8.1: identity beyond trust-on-first-use -- `trust <name> <key>` pins a node before it is met, `renew key` rotates the door key and tells known nodes (signed old and new); the network page shows uptime and the journal notes a node going quiet or coming back.
 
 ## License
 

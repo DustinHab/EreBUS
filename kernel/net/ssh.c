@@ -335,6 +335,27 @@ bool ssh_sign(const void *msg, u32 len, u8 sig[64])
     return true;
 }
 
+bool ssh_key_bytes(u8 out[64])
+{
+    if (!host_ready) return false;
+    memcpy(out, host_seed, 32);
+    memcpy(out + 32, host_pub, 32);
+    return true;
+}
+
+bool ssh_public_line(char out[96])
+{
+    if (!host_ready) return false;
+    u8 blob[64];
+    u32 n = host_blob(blob);
+    const char *pre = "ssh-ed25519 ";
+    u32 at = 0;
+    while (pre[at]) { out[at] = pre[at]; at++; }
+    at += base64_encode(blob, n, out + at, true);
+    out[at] = 0;
+    return true;
+}
+
 /* ------------------------------------------------------------------ */
 /* The visit                                                           */
 /* ------------------------------------------------------------------ */

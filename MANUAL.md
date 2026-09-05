@@ -1,6 +1,6 @@
 # EreBUS Manual
 
-For EreBUS 0.8.0. This manual is updated with every release; the version it describes is the one on the releases page.
+For EreBUS 0.8.1. This manual is updated with every release; the version it describes is the one on the releases page.
 
 Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions
 
@@ -183,7 +183,7 @@ The terminal walks like the shell does: it stands on an object and can go only w
 
 ### 5.6 Nodes and the other machines (chapter 13)
 
-`scan`, `found`, `point at <name or address>`, `send <name>`, `ask <name> [with <object>] [as code] [across N]`, `say <words>`, `nodes`, `allow <node> work|update|all|nothing`, `forget <node>`, `update <node> [with <kernel.elf>]`, `update all`.
+`scan`, `found`, `point at <name or address>`, `send <name>`, `ask <name> [with <object>] [as code] [across N]`, `say <words>`, `nodes`, `allow <node> work|update|all|nothing`, `forget <node>`, `trust <name> ssh-ed25519 ...`, `renew key`, `update <node> [with <kernel.elf>]`, `update all`.
 
 ### 5.7 The machine
 
@@ -421,13 +421,14 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 - The kernel writes key, address and version; it rewrites the table when a node appears, moves or changes version.
 - The person edits `name` (a petname) and `may`: `work`, `update`, `all`, or nothing. `allow <node> work update`, `allow <node> all`, `allow <node> nothing` write the column from the terminal.
 - `forget <node>` drops the row: the node is met fresh next time, trust on first use again. This is how a changed key is accepted on purpose (forget the node, then let it knock) and how a wrong trust is undone.
-- Removing a row forgets the node. Adding a row by hand (name, key) trusts a node before it is met.
+- `trust <name> ssh-ed25519 AAAA...` writes a row before the node is met, so its first handshake is recognised rather than trusted on sight -- the key checked out of band beforehand. (Editing the text by hand does the same.)
+- `renew key` rotates this machine's own door key: a fresh pair is made and announced to every known node, each announcement signed with the old key and the new so the far side moves its row for you without meeting you afresh; a node that does not already hold the old key ignores it and meets the new key later. Losing `the door key` object still makes a fresh key at the next start -- but then the peers do not know it, and each must `forget` and meet you again.
 - `nodes` in the terminal lists the rows with when each was last heard.
 
 ### 13.3 Discovery
 
 - `scan` sends a SEEK datagram by broadcast and to the peer; `found` lists the answers: address, name, work flag, free memory.
-- Every node with an address receives a SEEK every 30 s (heartbeat); the `network` page is updated from the answers.
+- Every node with an address receives a SEEK every 30 s (heartbeat); the `network` page is updated from the answers -- name, address, version, when last heard, free memory, uptime, whether it takes work, and whether a sealed or proven session stands. A known node not heard for 90 s is said to have gone quiet in the journal, and its return is said too.
 - A HERE answer carries the node's key, version and up to four other addresses heard within the last 90 s; an address not known locally is sent one SEEK per minute at most. This propagates discovery across routers, where broadcast does not reach.
 - `point at <name or address>` writes the `peer` line in the settings; the send chooser does the same with one click.
 
@@ -457,7 +458,7 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 
 ### 13.8 Limits
 
-- Identity is trust on first use; no third party verifies a key. Signing proves the answer came from the key in your nodes table, not that the key is really the machine you mean.
+- Identity is trust on first use by default; `trust` pins a key beforehand and `renew key` rotates it under the old key's signature, but no third party vouches for a key. Signing proves the answer came from the key in your nodes table, not that the key is really the machine you mean.
 - A far-work result is signed by the node that produced it, but not otherwise checked: the answer is that node's word, not a proof the computation is right. Running the same task on several nodes and comparing is left for a later version.
 - Broadcast discovery covers the local network only; across routers a node must be entered as peer once, after which gossip and heartbeat keep it known.
 - One transfer at a time per node; one job at a time per worker.
@@ -479,7 +480,7 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 
 - Requirements (Linux; WSL2 with Ubuntu works): `clang lld nasm make qemu-system-x86 ovmf mtools dosfstools xorriso gdb unifont python3-pil`.
 - `make` builds loader, kernel and `build/esp.img`; `make run` starts QEMU with the serial log on the terminal; `sh tools/mkiso.sh` builds `build/erebus.iso`; `sh tools/mkusb.sh` a stick image.
-- `sh build/battery.sh` runs the regression tests: one build, 25 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`), then renew alone because it rebuilds the kernel. Logs, screenshots and QEMU stderr are copied back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (480); a failed or stopped test runs once more, marked "2nd try" in the summary. KVM is used when `/dev/kvm` is writable (`NOKVM=1` forces TCG). The summary lists seconds per test; the full output is in `build/battery.log`. About 4 minutes on 32 cores. `sh build/kvm-battery.sh` adds the kernel built on the machine itself.
+- `sh build/battery.sh` runs the regression tests: one build, 26 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`), then renew alone because it rebuilds the kernel. Logs, screenshots and QEMU stderr are copied back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (480); a failed or stopped test runs once more, marked "2nd try" in the summary. KVM is used when `/dev/kvm` is writable (`NOKVM=1` forces TCG). The summary lists seconds per test; the full output is in `build/battery.log`. About 4 minutes on 32 cores. `sh build/kvm-battery.sh` adds the kernel built on the machine itself.
 - `sh build/battery.sh --one <test>` runs a single test that way; `BUILD=<dir> sh tools/<test>.sh` does the same by hand.
 - The tests drive the real screen through QEMU's monitor and wait on serial log lines (`tools/testlib.sh`: `waitlog`, `waitcount`, `waitfile`, `bootwait`); see the table in README.md.
 - The kernel's version comes from `git describe`; a tag `X.Y.Z` on the commit makes the boot line `EreBUS X.Y.Z (x86_64)`.
@@ -497,3 +498,4 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 | 0.6.0 | 2026-09-05 | visual overhaul of the shell: one warm ground with a single accent used only for agency and position (the caret, the write right, the picked row, the mode in use), regions parted by rules rather than filled boxes, the focused object's name at double height, region labels as spaced capitals, marked text in inverse video. The structure, the layout and what the machine does are unchanged. |
 | 0.7.0 | 2026-09-05 | serious far work: answers signed with the node's door key and checked against its key (a verified answer names the node, an unverified one says so); a kernel-enforced deadline that ends a runaway job even with no system calls; compiled tasks (`ask <task> as code`) the worker compiles and runs under that deadline; a ledger of asked jobs on the system shelf. Also: an old store's settings table gains matters added since it was seeded. |
 | 0.8.0 | 2026-09-05 | quorum far work (`ask <task> across N`): the whole task on N distinct machines, the result a verified majority agree on, disagreement named. `forget <node>` drops a node's row so a changed key can be re-pinned. The ssh door serves several visitors at once and survives a mid-session rekey. |
+| 0.8.1 | 2026-09-05 | identity beyond trust-on-first-use: `trust <name> ssh-ed25519 ...` writes a node's key before it is met; `renew key` rotates this machine's door key and announces it to known nodes, each announcement signed with the old key and the new, so their rows move without meeting afresh. The network page shows each node's uptime, and a known node going quiet or coming back is said in the journal. |

@@ -48,4 +48,13 @@ bool nodes_allow(u32 i, u32 may);
  * again). Used to accept a changed key deliberately, or undo a trust. */
 bool nodes_forget(u32 i);
 
+/* A row written before the node is met: its key, carried here by hand,
+ * so the first handshake is recognised rather than trusted on sight.
+ * Returns the row, or -1 when the table is full. */
+i32  nodes_trust(const char *name, const u8 key[32]);
+
+/* A node announced a new key, signed with the old: the row keeps its
+ * name, address and rights and carries the new key from here on. */
+bool nodes_rekey(u32 i, const u8 newkey[32]);
+
 #endif /* EB_NODES_H */

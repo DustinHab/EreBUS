@@ -21,6 +21,8 @@
 #include <eb/settle.h>
 #include <eb/version.h>
 #include <eb/nodes.h>
+#include <eb/base64.h>
+#include <eb/ssh.h>
 #include <eb/wifi.h>
 #include <eb/net.h>
 #include <eb/fmt.h>
@@ -1633,6 +1635,63 @@ static void cmd_forget(term_session *s, const char *rest)
     t_say(s, " is forgotten; its next handshake is met fresh.");
 }
 
+/* "trust <name> ssh-ed25519 AAAA...": a node written into the table
+ * before it is met, so its first handshake is recognised. */
+static void cmd_trust(term_session *s, const char *rest)
+{
+    if (!rest[0]) { t_say(s, "trust whom?  'trust <name> ssh-ed25519 AAAA...' (the line of an id_ed25519.pub)."); return; }
+
+    /* The name is everything up to "ssh-ed25519"; the key is the token
+     * after it, in ssh's letters. */
+    u32 kat = 0;
+    while (rest[kat] && !(rest[kat]=='s'&&rest[kat+1]=='s'&&rest[kat+2]=='h'&&
+                          rest[kat+3]=='-'&&rest[kat+4]=='e'&&rest[kat+5]=='d'))
+        kat++;
+    if (!rest[kat]) { t_say(s, "no ssh-ed25519 key in that line."); return; }
+
+    char name[24];
+    u32 nl = 0;
+    while (nl < kat && rest[nl] && nl < sizeof(name) - 1) { name[nl] = rest[nl]; nl++; }
+    while (nl > 0 && name[nl - 1] == ' ') nl--;
+    name[nl] = 0;
+    if (!nl) { t_say(s, "give the node a name: 'trust <name> ssh-ed25519 ...'."); return; }
+
+    const char *v = rest + kat;
+    u32 vl = 0;
+    while (v[vl]) vl++;
+    u32 i = 11;                                   /* past "ssh-ed25519" */
+    while (i < vl && v[i] == ' ') i++;
+    u32 from = i;
+    while (i < vl && v[i] != ' ' && v[i] != '\r') i++;
+    u8 blob[128];
+    i32 got = base64_decode(v + from, i - from, blob, sizeof(blob));
+    if (got < 51 || blob[3] != 11 || memcmp(blob + 4, "ssh-ed25519", 11) != 0 ||
+        blob[18] != 32) {
+        t_say(s, "that is not an ssh-ed25519 public key.");
+        return;
+    }
+    nodes_apply();
+    if (nodes_trust(name, blob + 19) < 0) { t_say(s, "the nodes table is full."); return; }
+    t_puts(s, name);
+    t_say(s, " is trusted; its first handshake will be recognised.");
+}
+
+/* "renew key": a fresh door key, announced to known nodes signed with
+ * the old and the new, then in force. */
+static void cmd_renew(term_session *s, const char *rest)
+{
+    u32 i = 0;
+    while (rest[i] == ' ') i++;
+    if (!(rest[i]=='k'&&rest[i+1]=='e'&&rest[i+2]=='y')) {
+        t_say(s, "renew what?  'renew key' makes a fresh door key and tells known nodes.");
+        return;
+    }
+    if (pipe_renew_key())
+        t_say(s, "the door key is renewed; known nodes are told, and 'the door key' is saved.");
+    else
+        t_say(s, "the door key could not be renewed.");
+}
+
 /* "update <node>", "update <node> with <kernel.elf>", "update all". */
 static void cmd_update(term_session *s, const char *rest)
 {
@@ -1941,6 +2000,8 @@ static void cmd_help(term_session *s)
     t_say(s, "  nodes            the nodes table: machines met through the pipe and their rights here");
     t_say(s, "  allow <node> work|update|all|nothing   rights of that node on this machine");
     t_say(s, "  forget <node>    drop its row; the next handshake meets it fresh");
+    t_say(s, "  trust <name> ssh-ed25519 ...   write a node's key before meeting it");
+    t_say(s, "  renew key        make a fresh door key and tell known nodes");
     t_say(s, "  update <node>    send this kernel to that node; it installs and restarts.  'update all'; '... with <kernel.elf>'");
     t_say(s, "  receive <n> bytes as <name>   a new text filled with the next n raw bytes");
     t_say(s, "                   of this session (file transfer through the door)");
@@ -2171,6 +2232,8 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "nodes", NULL))    cmd_nodes(s);
     else if (word_starts(line, "allow", &rest))   cmd_allow(s, rest);
     else if (word_starts(line, "forget", &rest))  cmd_forget(s, rest);
+    else if (word_starts(line, "trust", &rest))   cmd_trust(s, rest);
+    else if (word_starts(line, "renew", &rest))   cmd_renew(s, rest);
     else if (word_starts(line, "update", &rest))  cmd_update(s, rest);
     else {
         t_puts(s, "unknown word '");

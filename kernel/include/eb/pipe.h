@@ -45,6 +45,16 @@ bool pipe_ask_ex(object *o, bool writable, bool compiled, u32 quorum);
  * A text, bytes or a picture, up to 8 MiB. */
 bool pipe_ask_with(object *o, bool writable, object *input);
 
+/* The door-key object (BYTES, 64: seed and public half), held so a
+ * renewal can write a fresh pair into it and have it saved. */
+void pipe_door_key_set(object *t);
+
+/* Renews this machine's door key: a fresh pair is made, announced to
+ * every known node signed with the old key and the new (each vouching
+ * for the other), then installed. Nodes that hold the old key in their
+ * table move to the new one; an unknown node meets the new key fresh. */
+bool pipe_renew_key(void);
+
 /* The ledger, a read-only text on the system shelf: the kernel appends
  * one line per far-work job, asked or done. Adopted or created by main. */
 void pipe_ledger_set(object *t);
