@@ -119,6 +119,7 @@ KERN_C   := kernel/main.c \
             kernel/net/sha512.c \
             kernel/net/ed25519.c \
             kernel/net/ssh.c \
+            kernel/net/update.c \
             kernel/lib/base64.c \
             kernel/lang/asm.c \
             kernel/lang/big.c \

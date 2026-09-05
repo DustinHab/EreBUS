@@ -1,6 +1,6 @@
 # EreBUS Manual
 
-For EreBUS 0.8.3. This manual is updated with every release; the version it describes is the one on the releases page.
+For EreBUS 0.8.4. This manual is updated with every release; the version it describes is the one on the releases page.
 
 Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions
 
@@ -55,6 +55,7 @@ Vocabulary used below:
 - From a newer stick: boot the stick, type `install this kernel` in the terminal, remove the stick, `restart`. The store is untouched.
 - From a built kernel: `install kernel.elf`, `restart`. The previous kernel stays as kernel.old; the loader returns to it if the new kernel does not come up twice.
 - From another node: on this machine `allow <that node> update`; on the other `update <this node>`. See 13.7.
+- By itself, from a release: `update | auto` in settings has the machine keep itself current -- it checks now and then, and installs a newer signed release on its own. `update check` looks on demand. See 13.8.
 
 ---
 
@@ -184,7 +185,7 @@ The terminal walks like the shell does: it stands on an object and can go only w
 
 ### 5.6 Nodes and the other machines (chapter 13)
 
-`scan`, `found`, `point at <name or address>`, `send <name>`, `ask <name> [with <object>] [as code] [across N]`, `say <words>`, `nodes`, `allow <node> work|update|vouch|all|nothing`, `forget <node>`, `trust <name> ssh-ed25519 ...`, `vouch <node>`, `renew key`, `update <node> [with <kernel.elf>]`, `update all`.
+`scan`, `found`, `point at <name or address>`, `send <name>`, `ask <name> [with <object>] [as code] [across N]`, `say <words>`, `nodes`, `allow <node> work|update|vouch|all|nothing`, `forget <node>`, `trust <name> ssh-ed25519 ...`, `vouch <node>`, `renew key`, `update <node> [with <kernel.elf>]`, `update all`, `update check`.
 
 ### 5.7 The machine
 
@@ -217,6 +218,7 @@ The settings are one text on the system shelf: `matter | value`, one per line. A
 | `keys` | `english`, `german` | keyboard layout |
 | `door` | `ssh-ed25519 AAAA...` | a public key that may come in through the door; up to four lines |
 | `wlan` | `<ssid> = <passphrase>` | written by the station when a join worked; the network is rejoined at start |
+| `update` | `off`, `auto`, `auto http://host` | keep current from a signed release; a url overrides the default source (13.8) |
 
 Older systems had `known |` lines (address and key of machines met); they are carried into the nodes table at start and no longer written.
 
@@ -460,7 +462,18 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 - The receiver checks the sender's key against its nodes row, installs the kernel as kernel.elf (the previous one as kernel.old) and restarts after 3 s. If the new kernel fails to start twice, the loader boots kernel.old.
 - Both journals record the outcome; the `network` page shows the new version after the node's next heartbeat.
 
-### 13.8 Limits
+### 13.8 Self-update from a release
+
+A machine on the network can keep itself current from a published release, with no other node involved.
+
+- Turn it on with a settings line: `update | auto`. Off by default. `update check` in the terminal looks once, on demand, whichever way the setting is.
+- What happens: now and then (soon after start, then every six hours) the machine fetches an update package from the release source, reads the version inside it, and if it is newer than the running one, verifies the package's signature and -- only if it verifies -- installs the kernel and restarts. The loader's kernel.old rollback still applies, so a kernel that will not come up twice is backed out.
+- Why it is safe without certificate checking: the package is signed with the project's ed25519 key, and the matching public key is built into the kernel. The signature covers the version and the kernel together; a package that does not verify is refused. The network only decides *when* to update; the signature decides *what* may be installed. So a man in the middle, or a wrong file, cannot plant a kernel -- the transport (tls without certificate checking, or plain http) provides privacy, not the authenticity.
+- The source: by default `https://github.com/DustinHab/EreBUS/releases/latest/download`, under which it fetches `update.pkg`. `update | auto http://host[:port]` in the value points it at another base -- a local server, for a test.
+- The package `update.pkg` is `magic | signature | version | kernel.elf`, published as a release asset and built with `tools/sign-release.sh` from the private key that never leaves the build machine.
+- A failed or refused update is said on the attention page (7); an installed one restarts the machine.
+
+### 13.9 Limits
 
 - Identity is trust on first use by default; `trust` pins a key beforehand, `renew key` rotates it under the old key's signature, and `vouch` lets a node you have marked `vouch` pin a key for you. Signing proves the answer came from the key in your nodes table, not that the key is really the machine you mean; a vouch is only as good as your trust in the voucher, and no vouch is revoked once made.
 - A far-work result is signed by the node that produced it, but not otherwise checked: the answer is that node's word, not a proof the computation is right. Running the same task on several nodes and comparing is left for a later version.
@@ -505,3 +518,4 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 | 0.8.1 | 2026-09-05 | identity beyond trust-on-first-use: `trust <name> ssh-ed25519 ...` writes a node's key before it is met; `renew key` rotates this machine's door key and announces it to known nodes, each announcement signed with the old key and the new, so their rows move without meeting afresh. The network page shows each node's uptime, and a known node going quiet or coming back is said in the journal. |
 | 0.8.2 | 2026-09-05 | the shell fills its own space: home opens on an overview of the machine -- load over the last minute, the running programs, the recent journal -- instead of its bare structure; a status line under the middle carries uptime, load, memory, threads, objects, nodes and address; the picked reference shows a preview of its target below the contents list, through the target's own lens. Structure and behaviour unchanged. |
 | 0.8.3 | 2026-09-05 | far work takes an input in every form: `ask <task> with <object>` now rides alongside `as code` and `across N`, and a compiled worker receives the input on its letter box. Vouching: `allow <node> vouch` honours that node's signed vouches, and `vouch <node>` tells known nodes a key is one you recognise, so they pin it before meeting -- a third party's word, checked by signature, beyond trust on first use. An attention page on the system shelf gathers notable events (a failed job, a node gone quiet), with an unseen count in the status line that clears when the page is the focus. |
+| 0.8.4 | 2026-09-05 | self-update from a signed release. `update \| auto` in settings has the machine check now and then for a newer version and, when one is out, fetch a package, verify its ed25519 signature against a key built into the kernel, install it and restart -- the loader's kernel.old rollback still the last net. The signature, not the transport, is what makes it safe, so it needs no certificate checking yet; the download follows redirects over http or tls. `update check` looks on demand. Also: the client tcp window is larger (faster large downloads), and a connection is closed cleanly (a FIN, not silence). |

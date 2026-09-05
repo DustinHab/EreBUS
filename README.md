@@ -92,7 +92,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Snapshots: two alternating slots, generation + checksum, 16 generations kept, time travel in the shell
 - [x] Blob log for objects from 4 KiB up, content-addressed (SHA-256), compaction
 - [x] Journal as a read-only text object
-- [x] Settings as a text object, applied as typed (`theme`, `save`, `clock`, `pointer`, `hints`, `slice`, `start`, `name`, `address`, `peer` by address or node name, `work`, `keys`, `door |`, `wlan |`)
+- [x] Settings as a text object, applied as typed (`theme`, `save`, `clock`, `pointer`, `hints`, `slice`, `start`, `name`, `address`, `peer` by address or node name, `work`, `keys`, `door |`, `wlan |`, `update |`)
 - [x] Activity table rewritten once a second
 - [x] Nodes table `nodes` (`name | key | address | version | may`): one row per machine met through the pipe; the kernel writes key, address, version; the person writes name and `may` (`work`, `update`, `vouch`, `all`)
 - [x] `network` page: every node with address, version, last heard, free memory, work flag, seal state; machines heard but not met; desk and transfer state
@@ -148,6 +148,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Rights per node: `allow <node> work|update|vouch|all|nothing`; far work runs for a node when `work | welcomed` or its row contains `work`; a kernel is installed only from a node whose row contains `update`; a node's signed vouches pin keys only when its row contains `vouch`
 - [x] Transfers read from and write into objects directly, windowed (HAVE/TAKEN), up to 8 MiB; refusals carry a reason code
 - [x] `update <node>`: sends this machine's kernel; the receiver installs it and restarts; `update <node> with <kernel.elf>`; `update all`; the loader falls back to kernel.old after two failed starts
+- [x] Self-update: `update | auto` fetches a signed release package (`update.pkg`), verifies its ed25519 signature against a key built into the kernel, installs and restarts; `update check` on demand; the signature (not the transport) is the safeguard, so no certificate checking is needed
 - [x] Discovery: broadcast scan, heartbeat to every known node every 30 s, HERE carries key, version and up to four other addresses (propagation across routers)
 - [x] Far work: `ask <task>`, `ask <task> with <object>` (the input rides to each worker -- a script's third gift, a compiled worker's letter box), `as code`, `across N` and any combination, split tasks summed or concatenated, answers name the machines that produced them (`42 (4 parts by alpha, beta)`), foreman for recurring tasks
 - [x] Vouching: `vouch <node>` sends a signed statement that a key is recognised; a node that `allow`s the voucher `vouch` pins the key before meeting it (identity beyond trust on first use, no rights implied)
@@ -184,6 +185,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/pipe-code.sh | compiled far work: a c task built and run on the worker, signed answer, a runaway task ended by the deadline, its failure raised on the attention page |
 | tools/pipe-quorum.sh | the same task on two machines; the verified majority makes the result |
 | tools/pipe-vouch.sh | a node vouches for a key; a peer that allows it pins the key before meeting, and ignores a vouch it has not allowed |
+| tools/update-test.sh | self-update from a local release: a forged package is refused, a correctly signed newer one is installed and the machine reboots into it (needs release-key.pem and python3) |
 | tools/pipe-work.sh, pipe-desk.sh, pipe-foreman.sh | far work, split tasks over three machines, standing tasks |
 | tools/relaytest.sh, agenttest.sh, persisttest.sh | capability passing between programs, rights following the reference, snapshots (also `make relay`, `make agent`, `make persist`) |
 | tools/sticktest.sh | one disk carries loader, kernel and store |
@@ -216,7 +218,8 @@ Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes
 
 - No USB mass storage: a stick boots the machine but cannot hold the store.
 - No wireless chip driver.
-- TLS: privacy only, no certificate verification.
+- TLS: privacy only, no certificate verification. Self-update does not lean on it -- the release package is ed25519-signed and verified against a key built into the kernel -- but a general https fetch is still not proof of the server's identity.
+- Self-update checks by fetching the whole package (a cheap version pre-check is a later refinement), so it runs at most every six hours; the release private key, if lost, means deployed machines can no longer be sent a signed update.
 - Far-work answers are signed by the node that produced them and checked against its key, but the computation itself is not otherwise verified; running the same task on several nodes and comparing is left for later.
 - Node identity is trust on first use; `trust <name> <key>` pins one beforehand, `forget` re-pins a changed key, `renew key` rotates a key under the old key's signature, and `vouch` lets a node you have marked `vouch` pin a key for you -- but a vouch is only as good as your trust in the voucher, and no vouch is revoked once made.
 - A quorum takes the answer a verified majority agree on, but does not otherwise check the computation; a compiled or quorum task takes no split range yet.
@@ -239,6 +242,7 @@ Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes
 - EreBUS 0.8.1: identity beyond trust-on-first-use -- `trust <name> <key>` pins a node before it is met, `renew key` rotates the door key and tells known nodes (signed old and new); the network page shows uptime and the journal notes a node going quiet or coming back.
 - EreBUS 0.8.2: the shell fills its own space -- home opens on a machine overview (load over the last minute, running programs, recent journal); a status line carries uptime, load, memory, threads, objects, nodes and address; the picked reference shows a preview of its target through the target's own lens. Structure and behaviour unchanged.
 - EreBUS 0.8.3: far work takes an input in every form (`ask <task> with <object>` alongside `as code` and `across N`; a compiled worker reads it from its letter box); vouching -- `allow <node> vouch` honours a node's signed vouches and `vouch <node>` tells known nodes a key is one you recognise, so they pin it before meeting; an `attention` page gathers notable events (a failed job, a node gone quiet) with an unseen count in the status line.
+- EreBUS 0.8.4: self-update from a signed release -- `update | auto` checks now and then and installs a newer version on its own; the package's ed25519 signature is verified against a key built into the kernel (the signature, not the transport, is what makes it safe), and the loader's kernel.old rollback still applies. `update check` looks on demand. Larger tcp receive window for faster downloads; clean connection close.
 
 ## License
 

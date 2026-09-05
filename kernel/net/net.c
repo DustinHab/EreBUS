@@ -8,6 +8,7 @@
 #include <eb/wifi.h>
 #include <eb/pipe.h>
 #include <eb/ssh.h>
+#include <eb/update.h>
 #include <eb/standard.h>
 #include <eb/fb.h>
 #include <eb/crypto.h>
@@ -545,7 +546,10 @@ static void tcp_emit(u8 flags, const void *payload, u32 len)
     t[10] = (u8)(ack >> 8); t[11] = (u8)ack;
     t[12] = (u8)((hlen / 4) << 4);
     t[13] = flags;
-    t[14] = 0x20; t[15] = 0x00;     /* an 8 KiB window, plenty here */
+    t[14] = 0x80; t[15] = 0x00;     /* a 32 KiB window: enough in flight to
+                                     * pull a multi-megabyte kernel without a
+                                     * round trip every few packets, and well
+                                     * under the 48 KiB receive ring */
     t[16] = 0; t[17] = 0;
     t[18] = 0; t[19] = 0;
     if (syn) {                       /* say our segment size once */
@@ -1401,8 +1405,14 @@ bool tcp_eof(void)  { return tcb.peer_done || tcb.reset; }
 
 void tcp_close(void)
 {
-    if (tcb.active && !tcb.peer_done && !tcb.reset)
-        tcp_emit(0x14, NULL, 0);         /* rst+ack: we are done here */
+    /* Close cleanly so the far side -- and a NAT between us -- lets the
+     * connection go at once rather than holding it until a timeout: a
+     * FIN when the peer has already finished (we are in close-wait), an
+     * RST to cut short one still in flight. */
+    if (tcb.active && !tcb.reset) {
+        if (tcb.peer_done) tcp_emit(0x11, NULL, 0);   /* fin+ack */
+        else               tcp_emit(0x14, NULL, 0);   /* rst+ack */
+    }
     tcb.active = false;
 }
 
@@ -1481,6 +1491,86 @@ static void split_ask(const char *ask, u32 alen,
         path[(*plen)++] = ask[at++];
 }
 
+bool net_fetch(const char *url, u32 ulen, u8 *out, u32 max,
+               u32 *body_off, u32 *body_len, bool *secure_out)
+{
+    char host[128];
+    char path[256];
+    u32 hlen = 0, plen = 0;
+    bool secure = false;
+    split_ask(url, ulen, host, sizeof(host), &hlen,
+              path, sizeof(path), &plen, &secure);
+    if (hlen == 0) return false;
+    if (!nic_up() || !gateway_find()) return false;
+
+    u8 addr[4];
+    u32 got = 0, body = 0;
+
+    /* Fetch, and follow where it points: a moved page answers with a
+     * number and a Location line (this is how a stable "latest" url ends
+     * up at the newest release's file). A secure ask goes through tls. */
+    for (u32 hop = 0; hop < 6; hop++) {
+        if (!dns_resolve(host, hlen, addr)) return false;
+        bool ok = secure
+                ? tls_get(addr, host, hlen, path, plen, out, max, &got)
+                : http_fetch(addr, host, hlen, path, plen, out, max, &got);
+        if (!ok) return false;
+
+        /* The status line: HTTP/1.x NNN */
+        u32 code = 0;
+        if (got > 12 && out[0] == 'H')
+            code = (u32)(out[9] - '0') * 100 +
+                   (u32)(out[10] - '0') * 10 + (u32)(out[11] - '0');
+
+        body = 0;
+        for (u32 i = 0; i + 3 < got; i++) {
+            if (out[i]=='\r' && out[i+1]=='\n' &&
+                out[i+2]=='\r' && out[i+3]=='\n') { body = i + 4; break; }
+        }
+
+        bool moved = (code == 301 || code == 302 || code == 303 ||
+                      code == 307 || code == 308);
+        if (!moved) {
+            if (code != 200 || body == 0) return false;
+            if (body_off)  *body_off = body;
+            if (body_len)  *body_len = got - body;
+            if (secure_out) *secure_out = secure;
+            return true;
+        }
+
+        /* Location: ... somewhere in the headers. */
+        char where[256];
+        u32 wlen = 0;
+        for (u32 i = 0; i + 9 < body; i++) {
+            if ((out[i]=='l' || out[i]=='L') &&
+                (out[i+1]=='o' || out[i+1]=='O') &&
+                out[i+2]=='c' && out[i+3]=='a' && out[i+4]=='t' &&
+                out[i+5]=='i' && out[i+6]=='o' && out[i+7]=='n' &&
+                out[i+8]==':') {
+                u32 j = i + 9;
+                while (j < body && out[j] == ' ') j++;
+                while (j < body && out[j] != '\r' && out[j] != '\n' &&
+                       wlen < sizeof(where) - 1)
+                    where[wlen++] = (char)out[j++];
+                break;
+            }
+        }
+        if (wlen == 0) return false;             /* moved, but mute */
+
+        if (where[0] == '/') {                    /* same house, new room */
+            plen = 0;
+            for (u32 i = 0; i < wlen && plen < sizeof(path) - 1; i++)
+                path[plen++] = where[i];
+        } else {
+            split_ask(where, wlen, host, sizeof(host), &hlen,
+                      path, sizeof(path), &plen, &secure);
+            if (hlen == 0) return false;
+        }
+        got = 0;
+    }
+    return false;
+}
+
 static void fetch_into(object *o)
 {
     u8 *d = (u8 *)obj_data(o);
@@ -1491,107 +1581,24 @@ static void fetch_into(object *o)
     u32 ask_end = 0;
     while (ask_end < size && d[ask_end] && d[ask_end] != '\n') ask_end++;
 
-    char host[128];
-    char path[256];
-    u32 hlen = 0, plen = 0;
-    bool secure = false;
-    split_ask((const char *)d, ask_end, host, sizeof(host), &hlen,
-              path, sizeof(path), &plen, &secure);
-
     u32 out = ask_end;
     if (out < size) d[out] = '\n';
     out++;
 
-    if (hlen == 0) return;
+    bool secure = false;
+    u32 boff = 0, blen = 0;
+    bool ok = net_fetch((const char *)d, ask_end, page, sizeof(page),
+                        &boff, &blen, &secure);
 
-    const char *said = NULL;
-    u8 addr[4];
-    u32 got = 0;
-    u32 body = 0;
-
-    if (!nic_up() || !gateway_find()) {
-        said = "no network card.\n";
-        goto answer;
-    }
-
-    /* Fetch, and follow where it points: a page that moved says so
-     * with a number and a Location line, and stopping there would
-     * show the reader furniture tags instead of the room. A secure ask
-     * goes through tls; the others go plainly. */
-    for (u32 hop = 0; hop < 5; hop++) {
-        if (!dns_resolve(host, hlen, addr)) {
-            said = "dns: no such name.\n";
-            break;
-        }
-        bool ok = secure
-                ? tls_get(addr, host, hlen, path, plen, page, sizeof(page), &got)
-                : http_fetch(addr, host, hlen, path, plen, page, sizeof(page), &got);
-        if (!ok) {
-            said = secure ? "tls: the connection did not open.\n"
-                          : "no answer.\n";
-            break;
-        }
-
-        /* The status line: HTTP/1.x NNN */
-        u32 code = 0;
-        if (got > 12 && page[0] == 'H')
-            code = (u32)(page[9] - '0') * 100 +
-                   (u32)(page[10] - '0') * 10 + (u32)(page[11] - '0');
-
-        body = 0;
-        for (u32 i = 0; i + 3 < got; i++) {
-            if (page[i] == '\r' && page[i+1] == '\n' &&
-                page[i+2] == '\r' && page[i+3] == '\n') {
-                body = i + 4;
-                break;
-            }
-        }
-
-        bool moved = (code == 301 || code == 302 || code == 303 ||
-                      code == 307 || code == 308);
-        if (!moved) break;
-
-        /* Location: ... somewhere in the headers. */
-        char where[256];
-        u32 wlen = 0;
-        for (u32 i = 0; i + 9 < body; i++) {
-            if ((page[i]=='l' || page[i]=='L') &&
-                (page[i+1]=='o' || page[i+1]=='O') &&
-                page[i+2]=='c' && page[i+3]=='a' && page[i+4]=='t' &&
-                page[i+5]=='i' && page[i+6]=='o' && page[i+7]=='n' &&
-                page[i+8]==':') {
-                u32 j = i + 9;
-                while (j < body && page[j] == ' ') j++;
-                while (j < body && page[j] != '\r' && page[j] != '\n' &&
-                       wlen < sizeof(where) - 1)
-                    where[wlen++] = (char)page[j++];
-                break;
-            }
-        }
-        if (wlen == 0) break;                    /* moved, but mute */
-
-        if (where[0] == '/') {                   /* same house, new room */
-            plen = 0;
-            for (u32 i = 0; i < wlen && plen < sizeof(path) - 1; i++)
-                path[plen++] = where[i];
-        } else {
-            split_ask(where, wlen, host, sizeof(host), &hlen,
-                      path, sizeof(path), &plen, &secure);
-            if (hlen == 0) break;
-        }
-        got = 0;
-    }
-
-answer:
-    if (said) {
-        out = write_words(d, out, (u32)size, said);
+    if (!ok) {
+        out = write_words(d, out, (u32)size, "the page was not fetched.\n");
         for (u64 i = out; i < size; i++) d[i] = 0;
         obj_touch(o);
         journal_says("net", "the page was not fetched");
         return;
     }
 
-    for (u32 i = body; i < got && out < size - 1; i++) {
+    for (u32 i = boff; i < boff + blen && out < size - 1; i++) {
         u8 c = page[i];
         if (c == '\r') continue;
         d[out++] = (c == '\n' || c == '\t' || (c >= 0x20 && c < 0x7F))
@@ -1684,6 +1691,7 @@ static void net_thread(void *arg)
         pipe_service();
         door_service();
         ssh_service();
+        update_tick();
         net_breathe();
     }
 }

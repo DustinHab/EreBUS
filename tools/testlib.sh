@@ -76,6 +76,7 @@ key_name() {
         ')')      echo shift-0 ;;
         '{')      echo shift-bracket_left ;;
         '}')      echo shift-bracket_right ;;
+        ':')      echo shift-semicolon ;;
         '[')      echo bracket_left ;;
         ']')      echo bracket_right ;;
         '*')      echo shift-8 ;;

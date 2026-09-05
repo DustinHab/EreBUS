@@ -51,12 +51,17 @@ typedef struct {
     /* The peer as a node's name, when the peer line holds a word
      * instead of numbers. */
     char peer_name[24];
+    /* Self-update: whether to check for a newer release and install it,
+     * and an optional base url that overrides the built-in release
+     * source (for a local test). From an "update |" line. */
+    bool update_auto;
+    char update_from[128];
 } values;
 
 static values current = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                           false, { 0, 0, 0, 0 }, 0,
                           false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0,
-                          { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0, "" };
+                          { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0, "", false, "" };
 
 object *settings_object(void) { return settings; }
 
@@ -202,6 +207,17 @@ void settings_name(char *out, u32 max)
     u32 i = 0;
     while (current.name[i] && i < max - 1) { out[i] = current.name[i]; i++; }
     out[i] = 0;
+}
+
+bool settings_update_auto(void) { return current.update_auto; }
+
+bool settings_update_from(char *out, u32 max)
+{
+    if (!current.update_from[0]) return false;
+    u32 i = 0;
+    while (current.update_from[i] && i + 1 < max) { out[i] = current.update_from[i]; i++; }
+    out[i] = 0;
+    return true;
 }
 
 void settings_pointer_scale(i32 *num, i32 *den)
@@ -418,6 +434,24 @@ static void read_line(values *v, const char *line, u64 len)
          * one's processor is a standing decision, not a default. */
         if (line_has(val, vlen, "welcomed")) v->work = true;
         if (line_has(val, vlen, "refused"))  v->work = false;
+    } else if (matter_is(line, a, b, "update")) {
+        /* Whether the machine keeps itself current from a release, and
+         * from where. "auto" (or "on") turns the checking on; "off" or
+         * anything else leaves it off. A url in the value overrides the
+         * built-in release source -- for a local test. */
+        v->update_auto = line_has(val, vlen, "auto") ||
+                         line_has(val, vlen, "on");
+        v->update_from[0] = 0;
+        for (u64 i = 0; i + 4 <= vlen; i++) {
+            if (val[i]=='h' && val[i+1]=='t' && val[i+2]=='t' && val[i+3]=='p') {
+                u32 k = 0;
+                while (i < vlen && val[i] != ' ' && val[i] != '\r' &&
+                       k < sizeof(v->update_from) - 1)
+                    v->update_from[k++] = val[i++];
+                v->update_from[k] = 0;
+                break;
+            }
+        }
     } else if (matter_is(line, a, b, "door")) {
         /* A key that may come in through the door: the line of an
          * id_ed25519.pub, pasted whole -- "ssh-ed25519" and then the
@@ -697,7 +731,7 @@ void settings_apply(void)
     values next = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                     false, { 0, 0, 0, 0 }, 0,
                     false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0,
-                    { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0, "" };
+                    { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0, "", false, "" };
 
     u64 start = 0;
     for (u64 i = 0; i <= size; i++) {

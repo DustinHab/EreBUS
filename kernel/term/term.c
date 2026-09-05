@@ -25,6 +25,7 @@
 #include <eb/ssh.h>
 #include <eb/wifi.h>
 #include <eb/net.h>
+#include <eb/update.h>
 #include <eb/fmt.h>
 #include <eb/time.h>
 #include <eb/thread.h>
@@ -1749,8 +1750,24 @@ static void cmd_update(term_session *s, const char *rest)
     if (!rest[0]) {
         t_say(s, "update which node?  'update <node>' sends the kernel this machine runs;");
         t_say(s, "'update <node> with <kernel.elf>' a built one; 'update all' every node with an address.");
+        t_say(s, "'update check' asks the release source whether a newer version is out (see 'update | auto' in settings).");
         return;
     }
+
+    /* 'update check' / 'update now': look at the release source over the
+     * network. The check runs in the network thread; what it finds is
+     * said in the log and on the attention page. */
+    {
+        u32 i = 0; while (rest[i] == ' ') i++;
+        const char *w = rest + i;
+        if ((w[0]=='c'&&w[1]=='h'&&w[2]=='e'&&w[3]=='c'&&w[4]=='k') ||
+            (w[0]=='n'&&w[1]=='o'&&w[2]=='w')) {
+            update_request();
+            t_say(s, "checking the release source; the log and attention will say what turns up.");
+            return;
+        }
+    }
+
     char who[64];
     const char *with = NULL;
     u32 wl = 0;
@@ -2055,6 +2072,7 @@ static void cmd_help(term_session *s)
     t_say(s, "  vouch <node>     tell known nodes its key is one you recognise");
     t_say(s, "  renew key        make a fresh door key and tell known nodes");
     t_say(s, "  update <node>    send this kernel to that node; it installs and restarts.  'update all'; '... with <kernel.elf>'");
+    t_say(s, "  update check     ask the release source whether a newer version is out; 'update | auto' keeps it current on its own");
     t_say(s, "  receive <n> bytes as <name>   a new text filled with the next n raw bytes");
     t_say(s, "                   of this session (file transfer through the door)");
     t_say(s, "  give <name> to <program>   pass a reference to a program");

@@ -132,4 +132,14 @@ bool tls_last_verified(void);   /* whether the server Finished checked out */
 bool net_last_secure(void);
 bool net_last_verified(void);
 
+/* Fetches a url into `out` (raw bytes, up to max), following redirects,
+ * over tls for https and plainly for http. On a final 200 it returns
+ * true and sets body_off and body_len to where the body sits within
+ * `out` (the status line and headers precede it); secure, when given,
+ * says whether the last hop was sealed. Runs the tcp/tls stream inline, so it
+ * must be called from the network thread. The whole errand fetch and the
+ * self-update both go through here. */
+bool net_fetch(const char *url, u32 ulen, u8 *out, u32 max,
+               u32 *body_off, u32 *body_len, bool *secure);
+
 #endif /* EB_NET_H */

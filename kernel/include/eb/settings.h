@@ -56,6 +56,11 @@ void settings_name(char *out, u32 max);
  * unless the settings say "work | welcomed". */
 bool settings_work(void);
 
+/* Self-update: whether "update | auto" is set, and an optional base url
+ * from the same line that overrides the built-in release source. */
+bool settings_update_auto(void);
+bool settings_update_from(char *out, u32 max);
+
 /* Whether the keyboard's keys mean their german letters. */
 bool settings_keys_german(void);
 
