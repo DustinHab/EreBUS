@@ -21,6 +21,7 @@
 #include <eb/bundle.h>
 #include <eb/fat.h>
 #include <eb/term.h>
+#include <eb/update.h>
 #include <eb/asm.h>
 #include <eb/cc.h>
 #include <eb/ld.h>
@@ -5685,6 +5686,14 @@ void shell_run(void *arg)
             last_tick = now;
             shell_sample();
             nav.redraw = true;
+        }
+
+        /* An update check asked from the terminal answers here, once its
+         * work in the network thread is done: the line is printed where
+         * the question was typed. */
+        {
+            char rep[112];
+            if (update_report(rep, sizeof rep)) { term_note(rep); nav.redraw = true; }
         }
 
         if (nav.redraw) {

@@ -33,6 +33,11 @@ u64         term_total(term_session *s);
 /* Bumps whenever the transcript changes, so a view knows to look. */
 u64 term_sequence(term_session *s);
 
+/* Writes one line to the screen terminal from outside a command -- for a
+ * later answer, like an update check's outcome. Call it from the shell's
+ * own turn, which owns the screen session. */
+void term_note(const char *str);
+
 /* The line being gathered, for a view that shows typing as it
  * happens. A feeder that has whole lines uses term_line directly. */
 const char *term_gather(term_session *s, u32 *len);

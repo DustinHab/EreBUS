@@ -125,6 +125,17 @@ static void t_say(term_session *s, const char *str)
     t_end(s);
 }
 
+/* A line written to the screen terminal from outside a command -- an
+ * answer to something asked earlier that could only come back later, like
+ * the outcome of an update check. Called from the shell's own turn, so it
+ * touches the screen session on the thread that owns it. */
+void term_note(const char *str)
+{
+    term_session *s = &sessions[0];
+    if (!s->used) return;
+    t_say(s, str);
+}
+
 /* ------------------------------------------------------------------ */
 /* Sessions and standpoints                                            */
 /* ------------------------------------------------------------------ */

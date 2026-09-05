@@ -28,4 +28,9 @@ void update_request(void);
  * periodic automatic check, and the pending restart. */
 void update_tick(void);
 
+/* The outcome of a hand-asked check, waiting for the shell to print it
+ * in the terminal (the check runs elsewhere and cannot answer on the
+ * same line). True and filled once when there is one, then cleared. */
+bool update_report(char *out, u32 max);
+
 #endif /* EB_UPDATE_H */

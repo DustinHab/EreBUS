@@ -37,7 +37,33 @@ static u64  next_check_ns;
 static u64  restart_at_ns;
 static bool want_now;
 
+/* The outcome of a hand-asked check, for the terminal that asked. The
+ * check runs in the network thread and can take a while, so the answer
+ * cannot come back on the same line; the shell picks this up on its next
+ * turn and prints it where the question was typed. */
+static char up_report[112];
+static bool up_report_ready;
+
 void update_request(void) { want_now = true; }
+
+/* Left for the shell to collect; true and filled once, then cleared. */
+bool update_report(char *out, u32 max)
+{
+    if (!up_report_ready) return false;
+    u32 i = 0;
+    while (up_report[i] && i + 1 < max) { out[i] = up_report[i]; i++; }
+    out[i] = 0;
+    up_report_ready = false;
+    return true;
+}
+
+static void report(const char *s)
+{
+    u32 i = 0;
+    while (s[i] && i + 1 < sizeof(up_report)) { up_report[i] = s[i]; i++; }
+    up_report[i] = 0;
+    up_report_ready = true;      /* set last: the shell reads the string only when this is true */
+}
 
 /* Compares two dotted-decimal versions ("0.8.4"), reading only the
  * leading numeric parts; a trailing "-dirty" or " self-built" is
@@ -112,14 +138,16 @@ static void do_check(bool manual)
     u32 off = 0, len = 0;
     if (!net_fetch(url, ul, d, KERNEL_MAX, &off, &len, NULL) || len < PKG_MIN) {
         kprintf("update: no update package from %s\n", url);
-        if (manual) journal_says("update", "no update package was fetched");
+        if (manual) { journal_says("update", "no update package was fetched");
+                      report("the release source could not be reached."); }
         obj_release(k);
         return;
     }
     u8 *pkg = d + off;
     if (memcmp(pkg, PKG_MAGIC, PKG_MAGIC_N) != 0) {
         kprintf("update: the reply was not an update package\n");
-        if (manual) journal_says("update", "the reply was not an update package");
+        if (manual) { journal_says("update", "the reply was not an update package");
+                      report("the release source did not answer with an update."); }
         obj_release(k);
         return;
     }
@@ -135,7 +163,15 @@ static void do_check(bool manual)
     kprintf("update: package version '%s', running %s\n", latest, erebus_version);
 
     if (li == 0 || ver_cmp(latest, erebus_version) <= 0) {
-        if (manual) journal_says("update", "already current");
+        if (manual) {
+            journal_says("update", "already current");
+            char m[80];
+            u32 a = 0; const char *s = "already current, at ";
+            while (*s) m[a++] = *s++;
+            for (u32 i = 0; erebus_version[i] && a < sizeof(m) - 1; i++) m[a++] = erebus_version[i];
+            m[a] = 0;
+            report(m);
+        }
         obj_release(k);
         return;
     }
@@ -147,6 +183,7 @@ static void do_check(bool manual)
     if (!ed25519_verify(release_pub, pkg + PKG_SIGNED, len - PKG_SIGNED,
                         pkg + PKG_SIG_AT)) {
         attention_note("update", "a downloaded update's signature did not verify; refused");
+        if (manual) report("a newer version is offered, but its signature did not verify; refused.");
         obj_release(k);
         return;
     }
@@ -178,6 +215,16 @@ static void do_check(bool manual)
         while (*t) line[at++] = *t++;
         line[at] = 0;
         attention_note("update", line);
+    }
+    if (manual) {
+        char m[80];
+        u32 a = 0; const char *s = "a newer version ";
+        while (*s) m[a++] = *s++;
+        for (u32 i = 0; latest[i] && a < sizeof(m) - 40; i++) m[a++] = latest[i];
+        const char *t = " is verified; installing, the machine restarts.";
+        while (*t) m[a++] = *t++;
+        m[a] = 0;
+        report(m);
     }
     kprintf("update: a signed kernel is installed; restarting in 3 s\n");
     restart_at_ns = time_ns() + 3 * SECOND;
