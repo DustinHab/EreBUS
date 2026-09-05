@@ -45,6 +45,18 @@ bool pipe_ask_ex(object *o, bool writable, bool compiled, u32 quorum);
  * A text, bytes or a picture, up to 8 MiB. */
 bool pipe_ask_with(object *o, bool writable, object *input);
 
+/* Every combination at once: an input (or NULL), the task as c source
+ * (compiled), and a quorum of N (0 = off). A compiled worker receives
+ * the input on its letter box; a quorum sends the same input to each
+ * machine. The three narrower forms above call this. */
+bool pipe_ask_full(object *o, bool writable, object *input,
+                   bool compiled, u32 quorum);
+
+/* Vouch for a known node: sign a statement that its key is one we
+ * recognise and send it to every other known node. A node that has
+ * marked this machine 'vouch' pins the key before it meets it. */
+bool pipe_vouch(u32 node);
+
 /* The door-key object (BYTES, 64: seed and public half), held so a
  * renewal can write a fresh pair into it and have it saved. */
 void pipe_door_key_set(object *t);

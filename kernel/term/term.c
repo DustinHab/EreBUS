@@ -1392,58 +1392,78 @@ static void cmd_send(term_session *s, const char *what)
  * of the work to every machine that gets a part. */
 static void cmd_ask(term_session *s, const char *what)
 {
-    if (!what[0]) { t_say(s, "ask with which task?  'ask <task>', 'ask <task> with <object>' to send an input, or 'ask <task> as code' to compile and run c there."); return; }
+    if (!what[0]) { t_say(s, "ask with which task?  'ask <task>', add 'with <object>' to send an input, 'as code' to compile and run c there, 'across N' for a quorum -- and these combine."); return; }
 
-    /* Trailing " as code" says the task is c source, compiled and run on
-     * the far machine; trailing " across N" runs it on N machines and
-     * takes the answer a verified majority agree on. Either order. */
+    /* The task is the first words; after it come three modifiers, in any
+     * order: 'as code' (the task is c, compiled and run on the far
+     * machine), 'across N' (run the whole task on N machines and take
+     * the answer a verified majority agree on), and 'with <object>' (an
+     * input, a single named object, sent ahead to every worker). */
     char buf[128];
     u32 bl = 0;
     while (what[bl] && bl < sizeof(buf) - 1) { buf[bl] = what[bl]; bl++; }
     buf[bl] = 0;
-    bool compiled = false;
-    u32 quorum = 0;
-    for (;;) {
-        while (bl > 0 && buf[bl - 1] == ' ') { bl--; buf[bl] = 0; }
-        if (bl >= 8) {
-            const char *t = buf + bl - 8;
-            if (t[0]==' '&&t[1]=='a'&&t[2]=='s'&&t[3]==' '&&
-                t[4]=='c'&&t[5]=='o'&&t[6]=='d'&&t[7]=='e') {
-                compiled = true; bl -= 8; buf[bl] = 0; continue;
-            }
+
+    /* Where the modifiers begin: the first ' as ', ' across ' or
+     * ' with '. Everything before it is the task, spaces and all. */
+    u32 mstart = bl;
+    for (u32 i = 0; i + 1 < bl; i++) {
+        if (buf[i] != ' ') continue;
+        const char *p = buf + i + 1;
+        u32 room = bl - (i + 1);
+        if ((room >= 3 && p[0]=='a'&&p[1]=='s'&&p[2]==' ') ||
+            (room >= 7 && p[0]=='a'&&p[1]=='c'&&p[2]=='r'&&p[3]=='o'&&
+                         p[4]=='s'&&p[5]=='s'&&p[6]==' ') ||
+            (room >= 5 && p[0]=='w'&&p[1]=='i'&&p[2]=='t'&&p[3]=='h'&&
+                         p[4]==' ')) {
+            mstart = i;
+            break;
         }
-        /* " across N": find the last " across " and read the number after. */
-        u32 sp = bl;
-        while (sp > 0 && buf[sp - 1] >= '0' && buf[sp - 1] <= '9') sp--;
-        if (sp < bl && sp >= 8) {
-            const char *a = buf + sp - 8;
-            if (a[0]==' '&&a[1]=='a'&&a[2]=='c'&&a[3]=='r'&&
-                a[4]=='o'&&a[5]=='s'&&a[6]=='s'&&a[7]==' ') {
-                u32 n = 0;
-                for (u32 i = sp; i < bl; i++) n = n * 10 + (u32)(buf[i] - '0');
-                if (n >= 1) { quorum = n; bl = sp - 8; buf[bl] = 0; continue; }
-            }
-        }
-        break;
     }
 
     char task[64];
-    const char *with = NULL;
     u32 tl = 0;
-    for (u32 i = 0; buf[i] && tl < sizeof(task) - 1; i++) {
-        if (buf[i] == ' ' && buf[i+1] == 'w' && buf[i+2] == 'i' && buf[i+3] == 't' &&
-            buf[i+4] == 'h' && buf[i+5] == ' ') {
-            with = buf + i + 6;
-            break;
-        }
-        task[tl++] = buf[i];
-    }
+    for (u32 i = 0; i < mstart && tl < sizeof(task) - 1; i++) task[tl++] = buf[i];
     while (tl > 0 && task[tl - 1] == ' ') tl--;
     task[tl] = 0;
-    while (with && *with == ' ') with++;
 
-    if ((compiled || quorum) && with && *with) {
-        t_say(s, "a compiled or quorum task takes no input yet; ask it without 'with'.");
+    bool compiled = false;
+    u32 quorum = 0;
+    char with[64];
+    bool have_with = false;
+
+    u32 i = mstart;
+    while (i < bl) {
+        while (i < bl && buf[i] == ' ') i++;
+        if (i >= bl) break;
+
+        if (bl - i >= 2 && buf[i]=='a' && buf[i+1]=='s' &&
+            (i + 2 >= bl || buf[i+2]==' ')) {
+            i += 2; while (i < bl && buf[i]==' ') i++;
+            if (bl - i >= 4 && buf[i]=='c'&&buf[i+1]=='o'&&buf[i+2]=='d'&&buf[i+3]=='e') {
+                compiled = true; i += 4; continue;
+            }
+            t_say(s, "did you mean 'as code'?"); return;
+        }
+        if (bl - i >= 6 && buf[i]=='a'&&buf[i+1]=='c'&&buf[i+2]=='r'&&
+            buf[i+3]=='o'&&buf[i+4]=='s'&&buf[i+5]=='s') {
+            i += 6; while (i < bl && buf[i]==' ') i++;
+            u32 n = 0; bool any = false;
+            while (i < bl && buf[i] >= '0' && buf[i] <= '9') {
+                n = n * 10 + (u32)(buf[i] - '0'); i++; any = true;
+            }
+            if (!any || n < 1) { t_say(s, "across how many?  'across N'."); return; }
+            quorum = n; continue;
+        }
+        if (bl - i >= 4 && buf[i]=='w'&&buf[i+1]=='i'&&buf[i+2]=='t'&&buf[i+3]=='h') {
+            i += 4; while (i < bl && buf[i]==' ') i++;
+            u32 wl = 0;
+            while (i < bl && buf[i] != ' ' && wl < sizeof(with) - 1) with[wl++] = buf[i++];
+            with[wl] = 0;
+            if (wl == 0) { t_say(s, "with which object?"); return; }
+            have_with = true; continue;
+        }
+        t_say(s, "ask: after the task, add 'with <obj>', 'as code' or 'across N'.");
         return;
     }
 
@@ -1451,17 +1471,19 @@ static void cmd_ask(term_session *s, const char *what)
     if (!resolve(s, task, &sp)) return;
     if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "a task is a text."); return; }
 
-    bool ok;
-    if (compiled || quorum) {
-        ok = pipe_ask_ex(sp.o, (sp.r & CAP_WRITE) != 0, compiled, quorum);
-    } else if (with && *with) {
+    /* An input may ride with any task now -- plain, compiled or a
+     * quorum: a compiled worker takes it out of its letter box, a
+     * quorum sends the same input to every machine. */
+    object *in_obj = NULL;
+    if (have_with) {
         spot in;
         if (!resolve(s, with, &in)) return;
         if (!(in.r & CAP_READ)) { t_say(s, "no read right on the input."); return; }
-        ok = pipe_ask_with(sp.o, (sp.r & CAP_WRITE) != 0, in.o);
-    } else {
-        ok = pipe_ask(sp.o, (sp.r & CAP_WRITE) != 0);
+        in_obj = in.o;
     }
+
+    bool ok = pipe_ask_full(sp.o, (sp.r & CAP_WRITE) != 0, in_obj,
+                            compiled, quorum);
     if (ok)
         t_say(s, "queued at the desk; the answer is written into the task or into arrivals.");
     else
@@ -1560,7 +1582,7 @@ static void cmd_nodes(term_session *s)
 static void cmd_allow(term_session *s, const char *rest)
 {
     if (!rest[0]) {
-        t_say(s, "allow whom what?  'allow <node> work', 'allow <node> update', 'allow <node> all', 'allow <node> nothing'.");
+        t_say(s, "allow whom what?  'allow <node> work', 'update', 'vouch' (its vouches pin keys here), 'all' or 'nothing'.");
         return;
     }
     char name[64];
@@ -1581,7 +1603,8 @@ static void cmd_allow(term_session *s, const char *rest)
         bool nothing = false;
         if (wl == 4 && memcmp(w, "work", 4) == 0) bit = NODE_MAY_WORK;
         else if (wl == 6 && memcmp(w, "update", 6) == 0) bit = NODE_MAY_UPDATE;
-        else if (wl == 3 && memcmp(w, "all", 3) == 0) bit = NODE_MAY_WORK | NODE_MAY_UPDATE;
+        else if (wl == 5 && memcmp(w, "vouch", 5) == 0) bit = NODE_MAY_VOUCH;
+        else if (wl == 3 && memcmp(w, "all", 3) == 0) bit = NODE_MAY_WORK | NODE_MAY_UPDATE | NODE_MAY_VOUCH;
         else if (wl == 7 && memcmp(w, "nothing", 7) == 0) nothing = true;
         else if (wl == 3 && memcmp(w, "and", 3) == 0) { nl = start; continue; }
         else break;
@@ -1690,6 +1713,34 @@ static void cmd_renew(term_session *s, const char *rest)
         t_say(s, "the door key is renewed; known nodes are told, and 'the door key' is saved.");
     else
         t_say(s, "the door key could not be renewed.");
+}
+
+/* "vouch <node>": tell known nodes, over a signature, that this node's
+ * key is one we recognise. A node that has marked this machine 'vouch'
+ * pins the key before ever meeting it. */
+static void cmd_vouch(term_session *s, const char *rest)
+{
+    if (!rest[0]) { t_say(s, "vouch for which node?  'vouch <node>' tells known nodes its key is one you recognise."); return; }
+    char name[64];
+    u32 nl = 0;
+    while (rest[nl] && nl < sizeof(name) - 1) { name[nl] = rest[nl]; nl++; }
+    while (nl > 0 && name[nl - 1] == ' ') nl--;
+    name[nl] = 0;
+
+    nodes_apply();
+    i32 i = nodes_by_name(name);
+    if (i < 0) {
+        t_puts(s, "no node called '");
+        t_puts(s, name);
+        t_say(s, "' in nodes.  'nodes' lists them.");
+        return;
+    }
+    if (pipe_vouch((u32)i)) {
+        t_puts(s, name);
+        t_say(s, " is vouched for; known nodes that allow your vouches pin its key.");
+    } else {
+        t_say(s, "the vouch could not be sent.  the journal says why.");
+    }
 }
 
 /* "update <node>", "update <node> with <kernel.elf>", "update all". */
@@ -1998,9 +2049,10 @@ static void cmd_help(term_session *s)
     t_say(s, "  address          the active network card and its address");
     t_say(s, "  version          the version of the running kernel");
     t_say(s, "  nodes            the nodes table: machines met through the pipe and their rights here");
-    t_say(s, "  allow <node> work|update|all|nothing   rights of that node on this machine");
+    t_say(s, "  allow <node> work|update|vouch|all|nothing   rights of that node on this machine");
     t_say(s, "  forget <node>    drop its row; the next handshake meets it fresh");
     t_say(s, "  trust <name> ssh-ed25519 ...   write a node's key before meeting it");
+    t_say(s, "  vouch <node>     tell known nodes its key is one you recognise");
     t_say(s, "  renew key        make a fresh door key and tell known nodes");
     t_say(s, "  update <node>    send this kernel to that node; it installs and restarts.  'update all'; '... with <kernel.elf>'");
     t_say(s, "  receive <n> bytes as <name>   a new text filled with the next n raw bytes");
@@ -2013,7 +2065,7 @@ static void cmd_help(term_session *s)
     t_say(s, "  found            who answered");
     t_say(s, "  point at <name or address>   choose the peer");
     t_say(s, "  send <name>      transfer an object to the peer");
-    t_say(s, "  ask <name>       run a task text on other machines; '... as code' compiles c there, '... across N' takes a majority of N");
+    t_say(s, "  ask <name>       run a task text on other machines; '... with <obj>' sends an input, '... as code' compiles c there, '... across N' takes a majority of N (combine freely)");
     t_say(s, "  say <words>      append a line to the shared line");
     t_end(s);
     t_say(s, "the machine");
@@ -2233,6 +2285,7 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "allow", &rest))   cmd_allow(s, rest);
     else if (word_starts(line, "forget", &rest))  cmd_forget(s, rest);
     else if (word_starts(line, "trust", &rest))   cmd_trust(s, rest);
+    else if (word_starts(line, "vouch", &rest))   cmd_vouch(s, rest);
     else if (word_starts(line, "renew", &rest))   cmd_renew(s, rest);
     else if (word_starts(line, "update", &rest))  cmd_update(s, rest);
     else {

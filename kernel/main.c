@@ -320,7 +320,7 @@ object *work_launch(object *script, object *reply, u64 budget_seconds,
  * message carries its answer home. No budget rides with it -- a compiled
  * program does not police itself; the deadline is the kernel's, enforced
  * by ending the process when it overruns. */
-object *work_code_launch(object *image, object *reply)
+object *work_code_launch(object *image, object *reply, object *input)
 {
     if (!image || obj_type(image) != TYPE_BYTES || !reply) return NULL;
     const u8 *d = (const u8 *)obj_data(image);
@@ -331,11 +331,27 @@ object *work_code_launch(object *image, object *reply)
     object *prog = held(p);
     if (!proc_start(p)) { obj_release(prog); return NULL; }
 
+    /* The image shows in the graph as the program's code, but it is not
+     * put in the letter box: a compiled program runs its own image and
+     * never needs a capability to read it. That keeps the box empty but
+     * for what actually arrives -- the input, if there is one -- so a
+     * program that receives finds its input first, not its own code. */
     obj_set_slot(prog, 0, image, CAP_READ);
     obj_set_slot_name(prog, 0, "its code");
-    proc_grant(prog, image, CAP_READ);
 
-    kprintf("proc: %llu (work) running a compiled image\n", proc_id(p));
+    /* An input sent ahead of the job arrives in the program's letter
+     * box as a read-only capability: the compiled program receives the
+     * message on its inbox handle and reads the bytes with the read
+     * call. A script is handed the same thing as its third gift; a
+     * compiled program takes it out of the box itself. */
+    if (input) {
+        obj_set_slot(prog, 1, input, CAP_READ);
+        obj_set_slot_name(prog, 1, "its input");
+        proc_grant(prog, input, CAP_READ);
+    }
+
+    kprintf("proc: %llu (work) running a compiled image%s\n",
+            proc_id(p), input ? " with an input" : "");
     return prog;
 }
 
@@ -1814,6 +1830,18 @@ void kmain(eb_boot_info *bi)
         if (!journal_object() && journal_create())
             list_append(sys_shelf ? sys_shelf : root, journal_object(),
                         CAP_READ, "log");
+
+        /* Attention: the notable subset of the log, on its own shelf so
+         * open matters -- a failed job, a node gone quiet -- are found
+         * without reading everything. Read-only, like the log. */
+        {
+            object *a = find_petnamed(root, "attention", TYPE_TEXT,
+                                      NULL, NULL);
+            if (a) attention_adopt(a);
+        }
+        if (!attention_object() && attention_create())
+            list_append(sys_shelf ? sys_shelf : root, attention_object(),
+                        CAP_READ, "attention");
 
         /* The settings, found the same way as the journal or made
          * fresh. The reference the person holds is read AND write: how

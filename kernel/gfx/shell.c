@@ -3135,7 +3135,19 @@ static void draw_vitals(i32 sw, i32 sh, i32 vy)
 
     /* The sparkline sits at the right end of the strip. */
     i32 spw = 90;
-    draw_spark(sw - PAD * 2 - spw, vy + 4, spw, GLYPH_H - 2);
+    i32 spx = sw - PAD * 2 - spw;
+    draw_spark(spx, vy + 4, spw, GLYPH_H - 2);
+
+    /* Unseen attention, if any, in the accent just left of the spark: a
+     * count of notable events waiting on the attention page. It clears
+     * when that page is the focus. */
+    u32 unseen = attention_unseen();
+    if (unseen) {
+        at = put(line, 0, "attention "); at = put_dec(line, at, unseen);
+        line[at] = 0;
+        i32 aw = (i32)at * GLYPH_W;
+        text_at(spx - aw - GLYPH_W * 2, ty, spx, line, C_ACCENT);
+    }
 }
 
 /* Home's overview: the load over the last minute, what is running, what
@@ -3655,6 +3667,11 @@ static void draw_all(void)
         text_at(x, sy + 2, sw - PAD, line,
                 nav.at_generation ? C_READONLY : C_DIM);
     }
+
+    /* Looking at the attention page is how it is marked seen: the count
+     * in the status strip clears while it is the focus. */
+    if (focus() == attention_object() && attention_unseen())
+        attention_seen();
 
     /* The status strip, and the newest line just above it. */
     draw_vitals(sw, sh, vitals_y);

@@ -7,14 +7,26 @@
 #include <eb/string.h>
 #include <eb/time.h>
 #include <eb/io.h>
+#include <eb/fmt.h>
 
 #define JOURNAL_BYTES 8192
+#define ATTENTION_BYTES 4096
 
 static object *journal;
 static u64 sequence;
 
+/* Attention: the subset of the log worth noticing -- a job that failed,
+ * a node gone quiet, a handshake refused. Its own text object, and a
+ * count of lines added since the person last looked, shown in the status
+ * line and cleared when the attention object is the focus. */
+static object *attention;
+static u32     attn_unseen;
+
 object *journal_object(void)  { return journal; }
 u64     journal_sequence(void){ return sequence; }
+object *attention_object(void){ return attention; }
+u32     attention_unseen(void){ return attn_unseen; }
+void    attention_seen(void)  { attn_unseen = 0; }
 
 bool journal_create(void)
 {
@@ -38,6 +50,25 @@ void journal_adopt(object *o)
     sequence++;                 /* whoever displays it should look again */
 }
 
+bool attention_create(void)
+{
+    if (attention) return true;
+    attention = obj_create(TYPE_TEXT, ATTENTION_BYTES, 0);
+    if (!attention) return false;
+    obj_set_fleeting(attention, true);
+    obj_set_name(attention, "attention");
+    return true;
+}
+
+void attention_adopt(object *o)
+{
+    if (!o || obj_type(o) != TYPE_TEXT) return;
+    if (attention) obj_release(attention);
+    obj_retain(o);
+    obj_set_fleeting(o, true);
+    attention = o;
+}
+
 static u64 line_len(const u8 *d, u64 size)
 {
     u64 n = 0;
@@ -45,9 +76,11 @@ static u64 line_len(const u8 *d, u64 size)
     return n;
 }
 
-void journal_says(const char *who, const char *what)
+/* Composes "  <secs>s  who: what\n" and appends it to one text object,
+ * making room by dropping the oldest half when it is full. */
+static void append_line(object *o, const char *who, const char *what)
 {
-    if (!journal || !who || !what) return;
+    if (!o || !who || !what) return;
 
     /* The line is composed first, appended second, so the time under
      * interrupts-off covers only the copy. */
@@ -78,8 +111,8 @@ void journal_says(const char *who, const char *what)
 
     u64 flags = irq_save();
 
-    u8 *d = (u8 *)obj_data(journal);
-    u64 size = obj_size(journal);
+    u8 *d = (u8 *)obj_data(o);
+    u64 size = obj_size(o);
     if (!d || size < sizeof(line) + 2) { irq_restore(flags); return; }
 
     u64 len = line_len(d, size);
@@ -97,9 +130,27 @@ void journal_says(const char *who, const char *what)
 
     memcpy(d + len, line, at);
     d[len + at] = 0;
-    sequence++;
 
     irq_restore(flags);
+}
+
+void journal_says(const char *who, const char *what)
+{
+    if (!journal) return;
+    append_line(journal, who, what);
+    sequence++;
+}
+
+/* A notable event: it goes to the full log like any other line, and also
+ * to the attention text, where it waits until the person looks. */
+void attention_note(const char *who, const char *what)
+{
+    journal_says(who, what);
+    if (attention) {
+        append_line(attention, who, what);
+        attn_unseen++;
+    }
+    kprintf("attention: %s: %s\n", who ? who : "?", what ? what : "");
 }
 
 bool journal_latest(char *out, u64 max)

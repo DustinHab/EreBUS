@@ -1,6 +1,6 @@
 # EreBUS Manual
 
-For EreBUS 0.8.2. This manual is updated with every release; the version it describes is the one on the releases page.
+For EreBUS 0.8.3. This manual is updated with every release; the version it describes is the one on the releases page.
 
 Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions
 
@@ -67,7 +67,7 @@ There are no windows, no task bar and no menus. Every visible control is clickab
 - **Top:** the trail (the references followed so far, each clickable to go back there), then the name of the focus (click to rename), then a row of chips that fit the focus (see 3.4).
 - **Middle:** the focus through the current lens. Lens tabs stand above it; click one, or hold control and press its digit. On home the middle instead shows an overview of the machine -- load over the last minute, the running programs, the recent journal; the lens tabs still switch to the raw views.
 - **Right of the middle:** the focus's outgoing references, under "contents". The picked reference shows a preview of its target below the list, through the target's own lens (the first lines of a text, the picture, a program's slots).
-- **Below the middle:** the machine's vitals on one line -- uptime, load, memory, threads, objects, nodes, address -- then the newest journal line (click it to open the journal).
+- **Below the middle:** the machine's vitals on one line -- uptime, load, memory, threads, objects, nodes, address, and, when notable events are waiting, an `attention N` count in the accent -- then the newest journal line (click it to open the journal).
 - **Bottom:** the views as words (click one, or press tab to cycle), a hint about what typing does here, and far right `turn off`.
 - Generation ticks stand in the header: click one to read that generation; page up / page down step through them; escape returns to now.
 
@@ -184,7 +184,7 @@ The terminal walks like the shell does: it stands on an object and can go only w
 
 ### 5.6 Nodes and the other machines (chapter 13)
 
-`scan`, `found`, `point at <name or address>`, `send <name>`, `ask <name> [with <object>] [as code] [across N]`, `say <words>`, `nodes`, `allow <node> work|update|all|nothing`, `forget <node>`, `trust <name> ssh-ed25519 ...`, `renew key`, `update <node> [with <kernel.elf>]`, `update all`.
+`scan`, `found`, `point at <name or address>`, `send <name>`, `ask <name> [with <object>] [as code] [across N]`, `say <words>`, `nodes`, `allow <node> work|update|vouch|all|nothing`, `forget <node>`, `trust <name> ssh-ed25519 ...`, `vouch <node>`, `renew key`, `update <node> [with <kernel.elf>]`, `update all`.
 
 ### 5.7 The machine
 
@@ -229,6 +229,7 @@ All on the `system` shelf; all ordinary objects, saved with the graph.
 | Page | Rights | Content |
 |---|---|---|
 | `log` | read | the journal: uptime, who, what; a ring of 8 KiB |
+| `attention` | read | the notable subset of the log -- a failed far job, a node gone quiet; an unseen count shows in the status line and clears when this page is the focus |
 | `settings` | read, write | chapter 6 |
 | `activity` | read | uptime, cpu, memory, heap, objects, threads, and one row per process with cpu share, holds, memory; rewritten every second |
 | `network` | read | every node with address, version, seconds since last heard, free memory, work flag, session state; machines heard but not authenticated; desk and transfer state; rewritten every 2 s |
@@ -314,13 +315,14 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 
 - `ask <task> as code` sends the task as C source. The far machine compiles it with its own compiler, loads the image, and runs it under a deadline the kernel enforces -- a compiled program that never returns is ended when the budget runs out, even a bare `for(;;){}` with no system calls.
 - The program is entered with its console capability in the first argument and its letter box in the second (`long main(long console, long inbox)`). It answers by sending one message: `syscall(2, console, 0x54584554, w0, w1, w2)` -- tag `"TEXT"`, up to 24 bytes across the three words. A run of ASCII digits is read as a number, anything else as text.
-- The source must fit one datagram (1024 bytes); a compiled task takes no input object or range yet; one compile runs at a time on a machine (the compiler's tables are shared), so a busy machine answers "busy" and the asker retries.
+- An input sent with the task (`... with <object>`) arrives as a read-only capability in the letter box: `syscall(3, inbox, buffer, 0)` receives the message, its `caps[0]` (at byte 48 of the message) is the input's handle, and `syscall(4, handle, offset)` reads eight bytes at a time.
+- The source must fit one datagram (1024 bytes); a compiled task takes no range yet; one compile runs at a time on a machine (the compiler's tables are shared), so a busy machine answers "busy" and the asker retries.
 
 ### 9.5 Quorum
 
 - `ask <task> across N` runs the whole task on N distinct machines and takes the answer a verified majority agree on: `42  (agreed by 2 of 2)`. Only signed, verified answers count toward the majority.
 - When no majority agrees, the disagreement is named rather than hidden: `no agreement -- alpha said 42, gamma said 41`. When fewer than N machines answer the scan willing, the job says so.
-- Combine with code: `ask <task> as code across N`. A quorum takes no input object yet.
+- Combine freely: `ask <task> as code across N with <object>` -- code, quorum and input in any order. Each of the N machines gets its own copy of the input.
 
 ### 9.4 Signed answers and the ledger
 
@@ -420,9 +422,10 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
     bochum       | AAAAC3Nz...                                 | 10.9.9.21 7800    | 0.5.0         | work update
 
 - The kernel writes key, address and version; it rewrites the table when a node appears, moves or changes version.
-- The person edits `name` (a petname) and `may`: `work`, `update`, `all`, or nothing. `allow <node> work update`, `allow <node> all`, `allow <node> nothing` write the column from the terminal.
+- The person edits `name` (a petname) and `may`: `work`, `update`, `vouch`, `all`, or nothing. `allow <node> work update`, `allow <node> all`, `allow <node> nothing` write the column from the terminal.
 - `forget <node>` drops the row: the node is met fresh next time, trust on first use again. This is how a changed key is accepted on purpose (forget the node, then let it knock) and how a wrong trust is undone.
 - `trust <name> ssh-ed25519 AAAA...` writes a row before the node is met, so its first handshake is recognised rather than trusted on sight -- the key checked out of band beforehand. (Editing the text by hand does the same.)
+- `vouch <node>` tells every other known node, over a signature, that this node's key is one you recognise. A node that has marked this machine `allow ... vouch` pins the vouched key before it ever meets it -- a third party's word, checked by signature, standing in for trust on first use. Only recognition travels: no rights ride along, and a vouch from a node you have not marked `vouch` is ignored.
 - `renew key` rotates this machine's own door key: a fresh pair is made and announced to every known node, each announcement signed with the old key and the new so the far side moves its row for you without meeting you afresh; a node that does not already hold the old key ignores it and meets the new key later. Losing `the door key` object still makes a fresh key at the next start -- but then the peers do not know it, and each must `forget` and meet you again.
 - `nodes` in the terminal lists the rows with when each was last heard.
 
@@ -459,7 +462,7 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 
 ### 13.8 Limits
 
-- Identity is trust on first use by default; `trust` pins a key beforehand and `renew key` rotates it under the old key's signature, but no third party vouches for a key. Signing proves the answer came from the key in your nodes table, not that the key is really the machine you mean.
+- Identity is trust on first use by default; `trust` pins a key beforehand, `renew key` rotates it under the old key's signature, and `vouch` lets a node you have marked `vouch` pin a key for you. Signing proves the answer came from the key in your nodes table, not that the key is really the machine you mean; a vouch is only as good as your trust in the voucher, and no vouch is revoked once made.
 - A far-work result is signed by the node that produced it, but not otherwise checked: the answer is that node's word, not a proof the computation is right. Running the same task on several nodes and comparing is left for a later version.
 - Broadcast discovery covers the local network only; across routers a node must be entered as peer once, after which gossip and heartbeat keep it known.
 - One transfer at a time per node; one job at a time per worker.
@@ -501,3 +504,4 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 | 0.8.0 | 2026-09-05 | quorum far work (`ask <task> across N`): the whole task on N distinct machines, the result a verified majority agree on, disagreement named. `forget <node>` drops a node's row so a changed key can be re-pinned. The ssh door serves several visitors at once and survives a mid-session rekey. |
 | 0.8.1 | 2026-09-05 | identity beyond trust-on-first-use: `trust <name> ssh-ed25519 ...` writes a node's key before it is met; `renew key` rotates this machine's door key and announces it to known nodes, each announcement signed with the old key and the new, so their rows move without meeting afresh. The network page shows each node's uptime, and a known node going quiet or coming back is said in the journal. |
 | 0.8.2 | 2026-09-05 | the shell fills its own space: home opens on an overview of the machine -- load over the last minute, the running programs, the recent journal -- instead of its bare structure; a status line under the middle carries uptime, load, memory, threads, objects, nodes and address; the picked reference shows a preview of its target below the contents list, through the target's own lens. Structure and behaviour unchanged. |
+| 0.8.3 | 2026-09-05 | far work takes an input in every form: `ask <task> with <object>` now rides alongside `as code` and `across N`, and a compiled worker receives the input on its letter box. Vouching: `allow <node> vouch` honours that node's signed vouches, and `vouch <node>` tells known nodes a key is one you recognise, so they pin it before meeting -- a third party's word, checked by signature, beyond trust on first use. An attention page on the system shelf gathers notable events (a failed job, a node gone quiet), with an unseen count in the status line that clears when the page is the focus. |

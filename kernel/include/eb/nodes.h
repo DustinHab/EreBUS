@@ -15,6 +15,8 @@
 #define NODES_MAX 16
 #define NODE_MAY_WORK   1u
 #define NODE_MAY_UPDATE 2u
+#define NODE_MAY_VOUCH  4u   /* this node's signed vouches are honoured: a
+                              * key it vouches for is pinned before meeting */
 
 bool    nodes_create(void);
 void    nodes_adopt(object *o);

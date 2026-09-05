@@ -34,4 +34,16 @@ bool journal_latest(char *out, u64 max);
  * this instead of the text. */
 u64 journal_sequence(void);
 
+/* Attention: the subset of the log worth noticing, kept in its own text
+ * object so the person can find open matters without reading everything.
+ * attention_note writes both the full log and the attention text, and
+ * raises the unseen count; attention_seen clears it (the shell calls it
+ * when the attention object is the focus). */
+bool    attention_create(void);
+void    attention_adopt(object *o);
+object *attention_object(void);
+void    attention_note(const char *who, const char *what);
+u32     attention_unseen(void);
+void    attention_seen(void);
+
 #endif /* EB_JOURNAL_H */

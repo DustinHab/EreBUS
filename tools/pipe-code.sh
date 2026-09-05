@@ -96,6 +96,12 @@ sleep 1
     sleep 1
     echo "screendump $BUILD/code-ledger.ppm"
     sleep 1
+    # the failed job is a notable event: it waits on the attention page
+    say "back"
+    say "go attention"
+    sleep 1
+    echo "screendump $BUILD/code-attn.ppm"
+    sleep 1
     touch $BUILD/code-done
     echo quit
 } | qemu-system-x86_64 $QEMU_BASE \
@@ -111,6 +117,7 @@ wait $A_JOB 2>/dev/null
 grep -v '^$' $BUILD/code-a.err $BUILD/code-b.err 2>/dev/null | grep -v 'monitor -\|(qemu)' | head -5
 python3 tools/ppm2png.py $BUILD/code-b.ppm $BUILD/code-b.png 2>/dev/null
 python3 tools/ppm2png.py $BUILD/code-ledger.ppm $BUILD/code-ledger.png 2>/dev/null
+python3 tools/ppm2png.py $BUILD/code-attn.ppm $BUILD/code-attn.png 2>/dev/null
 
 echo "--- B, the asker ---"
 grep -a 'pipe:' $BLOG | cut -c1-120
@@ -123,4 +130,5 @@ grep -aq 'running a compiled image' $ALOG && echo "A compiled the c source and r
 grep -aq 'pipe: job 1 answers: 7 (by alpha)' $BLOG && echo "the compiled task answered 7, signed by alpha" || { echo "FAILED: the compiled answer is wrong or unverified"; ok=0; }
 grep -aq 'being ended' $ALOG && echo "the runaway task was ended by the deadline" || { echo "FAILED: the runaway task was not ended"; ok=0; }
 grep -aq 'pipe: job 2.*ran out of time\|job 2 failed' $BLOG && echo "and B heard it ran out of time" || { echo "FAILED: B did not hear the deadline"; ok=0; }
-[ $ok = 1 ] && echo "compiled far work runs under a kernel-enforced deadline" || echo "compiled far work FAILED"
+grep -aq 'attention: pipe: job 2 failed' $BLOG && echo "the failed job was raised on the attention page" || { echo "FAILED: the failure did not reach attention"; ok=0; }
+[ $ok = 1 ] && echo "compiled far work runs under a kernel-enforced deadline, and its failure is noticed" || echo "compiled far work FAILED"

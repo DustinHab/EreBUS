@@ -43,6 +43,7 @@
 #define K_SAY     11                 /* a word for the person there */
 #define K_HAVE    12                 /* how far a transfer has come */
 #define K_ROTATE  13                 /* my door key is renewed: old, new, each signed by the other */
+#define K_VOUCH   14                 /* i recognise this node's key: voucher, vouchee, address, name, signed by the voucher */
 
 /* One chunk fills one datagram: 20 bytes of envelope, 24 of chunk head,
  * 16 of tag, under the 1400 the wire takes. */
@@ -113,6 +114,8 @@ static u64 rd64(const u8 *p);
 static void wr32(u8 *p, u32 v);
 static void wr64(u8 *p, u64 v);
 static void rotate_message(u8 m[80], const u8 oldp[32], const u8 newp[32]);
+static void vouch_message(u8 m[110], const u8 vk[32], const u8 ek[32],
+                          const u8 ip[4], u16 port, const char name[24]);
 
 /* ------------------------------------------------------------------ */
 /* Small tools                                                         */
@@ -1090,6 +1093,14 @@ static void job_end(desk_job *j, bool ok, const char *text,
         led[la] = 0;
         ledger_append(led);
 
+        char an[96];
+        u32 aat = put(an, 0, "job ");
+        aat = put_dec(an, aat, j->no);
+        aat = put(an, aat, " failed: ");
+        aat = put(an, aat, why);
+        an[aat] = 0;
+        attention_note("pipe", an);
+
         char fb[64];
         u32 fat = put(fb, 0, "nothing (");
         fat = put(fb, fat, why);
@@ -1159,22 +1170,30 @@ bool pipe_ask_code(object *o, bool writable)
     return ask_take(o, writable, NULL, true, 0);
 }
 
+bool pipe_ask_full(object *o, bool writable, object *input,
+                   bool compiled, u32 quorum)
+{
+    if (input) {
+        if (wire_kind_of(obj_type(input)) == 0) {
+            journal_says("pipe", "a work input must be a text, bytes or a picture");
+            return false;
+        }
+        if (obj_size(input) == 0 || obj_size(input) > CARRY_MAX_BYTES) {
+            journal_says("pipe", "the input exceeds 8 MiB");
+            return false;
+        }
+    }
+    return ask_take(o, writable, input, compiled, quorum);
+}
+
 bool pipe_ask_ex(object *o, bool writable, bool compiled, u32 quorum)
 {
-    return ask_take(o, writable, NULL, compiled, quorum);
+    return pipe_ask_full(o, writable, NULL, compiled, quorum);
 }
 
 bool pipe_ask_with(object *o, bool writable, object *input)
 {
-    if (!input || wire_kind_of(obj_type(input)) == 0) {
-        journal_says("pipe", "a work input must be a text, bytes or a picture");
-        return false;
-    }
-    if (obj_size(input) == 0 || obj_size(input) > CARRY_MAX_BYTES) {
-        journal_says("pipe", "the input exceeds 8 MiB");
-        return false;
-    }
-    return ask_take(o, writable, input, false, 0);
+    return pipe_ask_full(o, writable, input, false, 0);
 }
 
 static bool ask_take(object *o, bool writable, object *input,
@@ -2050,11 +2069,12 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
             if (!image) {
                 cap_revoke(pipe_kdom, h); obj_release(reply);
                 answer_send(s, id, A_SILENT, none);
-                kprintf("pipe: a compiled job would not build\n");
+                kprintf("pipe: a compiled job would not build: %s\n",
+                        cerr[0] ? cerr : "no image");
                 return;
             }
             obj_set_name(image, "task code");
-            prog = work_code_launch(image, reply);
+            prog = work_code_launch(image, reply, input);
             obj_release(image);
         } else {
             object *script = obj_create(TYPE_TEXT, rlen + 512, 0);
@@ -2342,6 +2362,49 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         return;
     }
 
+    if (kind == K_VOUCH && len >= 166) {
+        /* A node vouching for another's key. Honoured only from a node
+         * we already hold and have marked 'may vouch' -- a stranger's
+         * word pins nothing -- and the signature must check against the
+         * voucher's key carried in the packet. The vouchee's key is
+         * then pinned before we meet it, exactly as 'trust' does by
+         * hand; no rights ride along, only recognition. */
+        const u8 *vk = p + 8, *ek = p + 40, *ip = p + 72;
+        u16 eport = (u16)p[76] | ((u16)p[77] << 8);
+        char name[24];
+        for (u32 k = 0; k < 24; k++) name[k] = (char)p[78 + k];
+        name[23] = 0;
+        const u8 *sig = p + 102;
+
+        u8 msg[110];
+        vouch_message(msg, vk, ek, ip, eport, name);
+        if (!ed25519_verify(vk, msg, sizeof(msg), sig)) return;
+
+        nodes_apply();
+        i32 vi = nodes_by_key(vk);
+        if (vi < 0 || !(nodes_may_at((u32)vi) & NODE_MAY_VOUCH)) return;
+        if (nodes_by_key(ek) >= 0) return;         /* already known */
+
+        bool has = (ip[0] | ip[1] | ip[2] | ip[3]) != 0;
+        if (nodes_meet(name, ek, has ? ip : NULL, eport, NULL, true) < 0) return;
+
+        char vname[24];
+        nodes_name_at((u32)vi, vname);
+        char fp[64];
+        ssh_fingerprint_of(ek, fp);
+        kprintf("pipe: '%s' vouches for '%s'; key %s pinned before meeting\n",
+                vname, name, fp);
+        char line[80];
+        u32 at = 0;
+        for (u32 k = 0; vname[k] && at < 24; k++) line[at++] = vname[k];
+        at = put(line, at, " vouches for ");
+        for (u32 k = 0; name[k] && at < sizeof(line) - 16; k++) line[at++] = name[k];
+        at = put(line, at, "; its key is pinned");
+        line[at] = 0;
+        journal_says("pipe", line);
+        return;
+    }
+
     if (kind == K_HELLO && len >= 44) {
         if (!net_crypto_ok()) return;
         u32 sid = rd32(p + 8);
@@ -2581,6 +2644,87 @@ bool pipe_renew_key(void)
                          "each announcement signed with the old key and the new");
     memset(oldk, 0, 64);
     memset(newk, 0, 64);
+    return true;
+}
+
+/* The message a vouch signs: a fixed label, then the voucher's public
+ * key, the vouchee's key, its address and name. A signature over this
+ * cannot be lifted onto any other statement. */
+static void vouch_message(u8 m[110], const u8 vk[32], const u8 ek[32],
+                          const u8 ip[4], u16 port, const char name[24])
+{
+    static const char label[] = "erebus vouch v1";   /* 15 + NUL = 16 */
+    memset(m, 0, 110);
+    memcpy(m, label, 16);
+    memcpy(m + 16, vk, 32);
+    memcpy(m + 48, ek, 32);
+    memcpy(m + 80, ip, 4);
+    m[84] = (u8)(port & 0xFF);
+    m[85] = (u8)(port >> 8);
+    for (u32 i = 0; i < 24; i++) m[86 + i] = (u8)name[i];
+}
+
+static void vouch_send(const u8 dst[4], u16 dport, const u8 vk[32],
+                       const u8 ek[32], const u8 ip[4], u16 eport,
+                       const char name[24], const u8 sig[64])
+{
+    u8 pkt[176];
+    memset(pkt, 0, sizeof(pkt));
+    wr32(pkt, MAGIC);
+    pkt[4] = K_VOUCH;
+    memcpy(pkt + 8, vk, 32);
+    memcpy(pkt + 40, ek, 32);
+    memcpy(pkt + 72, ip, 4);
+    pkt[76] = (u8)(eport & 0xFF);
+    pkt[77] = (u8)(eport >> 8);
+    for (u32 i = 0; i < 24; i++) pkt[78 + i] = (u8)name[i];
+    memcpy(pkt + 102, sig, 64);
+    net_udp_send(dst, PIPE_PORT, dport, pkt, 166);
+}
+
+/* Vouch for a node: sign a statement that its key is one we recognise
+ * and send it to every other known node. A node that has marked this
+ * machine 'vouch' pins the key before it ever meets it. */
+bool pipe_vouch(u32 node)
+{
+    nodes_apply();
+    if (node >= nodes_count()) return false;
+
+    u8 ek[32], vk64[64];
+    char name[24];
+    if (!nodes_key_at(node, ek)) return false;
+    nodes_name_at(node, name);
+    u8 eip[4]; u16 eport;
+    if (!nodes_address_at(node, eip, &eport)) { memset(eip, 0, 4); eport = 0; }
+
+    if (!ssh_key_bytes(vk64)) {
+        journal_says("pipe", "there is no door key to vouch with");
+        return false;
+    }
+
+    u8 msg[110];
+    vouch_message(msg, vk64 + 32, ek, eip, eport, name);
+    u8 sig[64];
+    ed25519_sign(sig, vk64, vk64 + 32, msg, sizeof(msg));
+
+    u32 sent = 0;
+    for (u32 i = 0; i < nodes_count(); i++) {
+        if (i == node) continue;               /* the vouchee holds its own key */
+        u8 ip[4]; u16 port;
+        if (nodes_address_at(i, ip, &port)) {
+            vouch_send(ip, port, vk64 + 32, ek, eip, eport, name, sig);
+            sent++;
+        }
+    }
+    char line[64];
+    u32 at = put(line, 0, "vouched for ");
+    for (u32 i = 0; name[i] && at < 40; i++) line[at++] = name[i];
+    at = put(line, at, " to ");
+    at = put_dec(line, at, sent);
+    at = put(line, at, " node(s)");
+    line[at] = 0;
+    journal_says("pipe", line);
+    memset(vk64, 0, 64);
     return true;
 }
 
@@ -2829,7 +2973,7 @@ void pipe_service(void)
             at = put(line, at, nm);
             at = put(line, at, " went quiet");
             line[at] = 0;
-            journal_says("pipe", line);
+            attention_note("pipe", line);
             kprintf("pipe: %s\n", line);
             h->quiet_said = true;
         }

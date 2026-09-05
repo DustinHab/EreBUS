@@ -174,7 +174,8 @@ static void read_row(const char *line, u64 len)
     if (nc > 4) {
         if (has_word(c[4], cl[4], "work"))   r->may |= NODE_MAY_WORK;
         if (has_word(c[4], cl[4], "update")) r->may |= NODE_MAY_UPDATE;
-        if (has_word(c[4], cl[4], "all"))    r->may |= NODE_MAY_WORK | NODE_MAY_UPDATE;
+        if (has_word(c[4], cl[4], "vouch"))  r->may |= NODE_MAY_VOUCH;
+        if (has_word(c[4], cl[4], "all"))    r->may |= NODE_MAY_WORK | NODE_MAY_UPDATE | NODE_MAY_VOUCH;
     }
     if (slot == count) count++;
 }
@@ -204,11 +205,10 @@ void nodes_apply(void)
 void nodes_may_words(u32 may, char out[24])
 {
     u32 at = 0;
-    if ((may & (NODE_MAY_WORK | NODE_MAY_UPDATE)) == (NODE_MAY_WORK | NODE_MAY_UPDATE))
-        at = put(out, at, "work update");
-    else if (may & NODE_MAY_WORK)   at = put(out, at, "work");
-    else if (may & NODE_MAY_UPDATE) at = put(out, at, "update");
-    else                            at = put(out, at, "-");
+    if (may & NODE_MAY_WORK)   { if (at) out[at++] = ' '; at = put(out, at, "work"); }
+    if (may & NODE_MAY_UPDATE) { if (at) out[at++] = ' '; at = put(out, at, "update"); }
+    if (may & NODE_MAY_VOUCH)  { if (at) out[at++] = ' '; at = put(out, at, "vouch"); }
+    if (!at) at = put(out, at, "-");
     out[at] = 0;
 }
 
@@ -417,7 +417,7 @@ i32 nodes_meet(const char *claim, const u8 key[32], const u8 ip[4], u16 port,
 bool nodes_allow(u32 i, u32 may)
 {
     if (i >= count) return false;
-    rows[i].may = may & (NODE_MAY_WORK | NODE_MAY_UPDATE);
+    rows[i].may = may & (NODE_MAY_WORK | NODE_MAY_UPDATE | NODE_MAY_VOUCH);
     nodes_write();
     char words[24], tail[40];
     nodes_may_words(rows[i].may, words);

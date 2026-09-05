@@ -44,8 +44,10 @@ object *work_launch(object *script, object *reply, u64 budget_seconds,
 
 /* Starts a compiled image on a visiting job, for the pipe: the reply
  * port is its console, so a "TEXT" message it sends is its answer. No
- * self-policed budget -- the deadline is enforced by ending it. */
-object *work_code_launch(object *image, object *reply);
+ * self-policed budget -- the deadline is enforced by ending it. An input
+ * sent ahead of the job, if any, arrives as a read-only capability in
+ * the program's letter box. */
+object *work_code_launch(object *image, object *reply, object *input);
 
 /* Saves the graph and asks the machine to sleep. Comes back only on
  * hardware that ignored the asking. */

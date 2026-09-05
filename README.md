@@ -94,8 +94,9 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Journal as a read-only text object
 - [x] Settings as a text object, applied as typed (`theme`, `save`, `clock`, `pointer`, `hints`, `slice`, `start`, `name`, `address`, `peer` by address or node name, `work`, `keys`, `door |`, `wlan |`)
 - [x] Activity table rewritten once a second
-- [x] Nodes table `nodes` (`name | key | address | version | may`): one row per machine met through the pipe; the kernel writes key, address, version; the person writes name and `may` (`work`, `update`, `all`)
+- [x] Nodes table `nodes` (`name | key | address | version | may`): one row per machine met through the pipe; the kernel writes key, address, version; the person writes name and `may` (`work`, `update`, `vouch`, `all`)
 - [x] `network` page: every node with address, version, last heard, free memory, work flag, seal state; machines heard but not met; desk and transfer state
+- [x] `attention` page: the notable subset of the log (a failed far job, a node gone quiet), with an unseen count in the status line
 - [x] Program records survive reboots; delegations replayed by name
 
 ### Desktop and terminal
@@ -105,7 +106,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Add palette: text, bytes, list, picture, task, standard programs
 - [x] Bin for let-go references; `turn off`; `restart`
 - [x] German keyboard layout (`keys | german`)
-- [x] Terminal grammar: verb, name, `to`/`at`/`with`; words: `help look where go back home find read write make copy rename let go run give end scan found point at send ask say build link compile assemble install take in write out disks settle yes networks join leave wifi address receive restart version nodes allow update`
+- [x] Terminal grammar: verb, name, `to`/`at`/`with`; words: `help look where go back home find read write make copy rename let go run give end scan found point at send ask say build link compile assemble install take in write out disks settle yes networks join leave wifi address receive restart version nodes allow forget trust vouch renew update`
 - [x] Boot-time offer: with no store and a keyboard present, the start-up lists the disks and takes a number, then `yes`; escape or 2 minutes of silence continues without a store
 
 ### Programs and languages
@@ -144,11 +145,12 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] SSH door (server): curve25519-sha256, ssh-ed25519, aes128-gcm@openssh.com; keys from `door |` lines; exec and shell sessions
 - [x] Object pipe between machines: X25519 handshake signed with the door key, AES-128-GCM records
 - [x] Nodes: identity is the key; the first handshake writes a row into `nodes`; a different key from a known address is rejected until the row is removed; a known key from a new address updates the row
-- [x] Rights per node: `allow <node> work|update|all|nothing`; far work runs for a node when `work | welcomed` or its row contains `work`; a kernel is installed only from a node whose row contains `update`
+- [x] Rights per node: `allow <node> work|update|vouch|all|nothing`; far work runs for a node when `work | welcomed` or its row contains `work`; a kernel is installed only from a node whose row contains `update`; a node's signed vouches pin keys only when its row contains `vouch`
 - [x] Transfers read from and write into objects directly, windowed (HAVE/TAKEN), up to 8 MiB; refusals carry a reason code
 - [x] `update <node>`: sends this machine's kernel; the receiver installs it and restarts; `update <node> with <kernel.elf>`; `update all`; the loader falls back to kernel.old after two failed starts
 - [x] Discovery: broadcast scan, heartbeat to every known node every 30 s, HERE carries key, version and up to four other addresses (propagation across routers)
-- [x] Far work: `ask <task>`, `ask <task> with <object>` (the object is transferred to each worker as the script's third gift), split tasks summed or concatenated, answers name the machines that produced them (`42 (4 parts by alpha, beta)`), foreman for recurring tasks
+- [x] Far work: `ask <task>`, `ask <task> with <object>` (the input rides to each worker -- a script's third gift, a compiled worker's letter box), `as code`, `across N` and any combination, split tasks summed or concatenated, answers name the machines that produced them (`42 (4 parts by alpha, beta)`), foreman for recurring tasks
+- [x] Vouching: `vouch <node>` sends a signed statement that a key is recognised; a node that `allow`s the voucher `vouch` pins the key before meeting it (identity beyond trust on first use, no rights implied)
 - [x] The line: a shared text for `say` between nodes
 - [x] `pack`/`unpack`: a list as one bytes object for the pipe
 
@@ -178,9 +180,10 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/pipe-identity.sh | the pipe refuses a changed key at a known address |
 | tools/pipe-rotate.sh | a key trusted before meeting; a renewed key propagated to a peer, signed old and new |
 | tools/pipe-update.sh | a kernel through the pipe: refused without the update right, installed and booted with it |
-| tools/pipe-input.sh | far work with an input object; the answer names the worker |
-| tools/pipe-code.sh | compiled far work: a c task built and run on the worker, signed answer, and a runaway task ended by the deadline |
+| tools/pipe-input.sh | far work with an input object -- to a recipe and to a compiled image that reads it from its letter box |
+| tools/pipe-code.sh | compiled far work: a c task built and run on the worker, signed answer, a runaway task ended by the deadline, its failure raised on the attention page |
 | tools/pipe-quorum.sh | the same task on two machines; the verified majority makes the result |
+| tools/pipe-vouch.sh | a node vouches for a key; a peer that allows it pins the key before meeting, and ignores a vouch it has not allowed |
 | tools/pipe-work.sh, pipe-desk.sh, pipe-foreman.sh | far work, split tasks over three machines, standing tasks |
 | tools/relaytest.sh, agenttest.sh, persisttest.sh | capability passing between programs, rights following the reference, snapshots (also `make relay`, `make agent`, `make persist`) |
 | tools/sticktest.sh | one disk carries loader, kernel and store |
@@ -215,8 +218,8 @@ Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes
 - No wireless chip driver.
 - TLS: privacy only, no certificate verification.
 - Far-work answers are signed by the node that produced them and checked against its key, but the computation itself is not otherwise verified; running the same task on several nodes and comparing is left for later.
-- Node identity is trust on first use; `trust <name> <key>` pins one beforehand, `forget` re-pins a changed key, and `renew key` rotates a key under the old key's signature -- but no third party vouches for a key.
-- A quorum takes the answer a verified majority agree on, but does not otherwise check the computation; a compiled or quorum task takes no input object yet.
+- Node identity is trust on first use; `trust <name> <key>` pins one beforehand, `forget` re-pins a changed key, `renew key` rotates a key under the old key's signature, and `vouch` lets a node you have marked `vouch` pin a key for you -- but a vouch is only as good as your trust in the voucher, and no vouch is revoked once made.
+- A quorum takes the answer a verified majority agree on, but does not otherwise check the computation; a compiled or quorum task takes no split range yet.
 - A compiled task must fit one datagram (1024 bytes) and answers through the raw system-call ABI; one compile runs at a time per machine.
 - The ssh door serves up to four visitors at once (a fifth displaces the longest-idle); it honours a client-driven rekey but does not force one.
 - One ssh visitor at a time; no rekeying.
@@ -235,6 +238,7 @@ Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes
 - EreBUS 0.8.0: quorum far work (`ask <task> across N`), the result a verified majority agree on; `forget <node>` to re-pin a changed key; the ssh door serves several visitors at once and survives a mid-session rekey.
 - EreBUS 0.8.1: identity beyond trust-on-first-use -- `trust <name> <key>` pins a node before it is met, `renew key` rotates the door key and tells known nodes (signed old and new); the network page shows uptime and the journal notes a node going quiet or coming back.
 - EreBUS 0.8.2: the shell fills its own space -- home opens on a machine overview (load over the last minute, running programs, recent journal); a status line carries uptime, load, memory, threads, objects, nodes and address; the picked reference shows a preview of its target through the target's own lens. Structure and behaviour unchanged.
+- EreBUS 0.8.3: far work takes an input in every form (`ask <task> with <object>` alongside `as code` and `across N`; a compiled worker reads it from its letter box); vouching -- `allow <node> vouch` honours a node's signed vouches and `vouch <node>` tells known nodes a key is one you recognise, so they pin it before meeting; an `attention` page gathers notable events (a failed job, a node gone quiet) with an unseen count in the status line.
 
 ## License
 
