@@ -124,6 +124,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 
 ### Storage
 - [x] PCI enumeration; AHCI, up to 8 disks; roles: boot disk (port 0), store, exchange disk
+- [x] USB disks through xhci (bulk-only transport, scsi, 64 KiB per transfer) in the same block layer; a stick made with `tools/mkusb.sh` boots the machine and carries its store; otherwise a usb disk is the exchange disk; `settle on disk N` works on one
 - [x] GPT read/write; store partition type `E2EB0500-5354-4F52-4552-454255530001`
 - [x] FAT32: read, write, directories, rename, format; boot volume found via GPT EFI partition, MBR, or LBA 0
 - [x] Exchange disk: `take in`, `write out` (root directory, 8.3 names, 64 KiB per file)
@@ -141,17 +142,18 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] ARP, DHCP, DNS, ICMP echo, TCP client, HTTP/1.0 fetch with redirects, static address (`address | a.b.c.d`)
 - [x] Drivers: e1000 family (8254x, 8257x/82574L, 82577–I219), igb family (82575/82576/82580/I350/I210/I211), RTL8139, RTL8168/8169
 - [x] Card choice: first a card with link, then any card; unknown cards named in the log
-- [x] TLS 1.3 client: X25519, AES-128-GCM, SHA-256; the server's certificate chain is walked to a trusted authority (ECDSA P-256, RSA PKCS#1 v1.5 and PSS, SHA-256; host names from the subject alternative names, dates against the clock) and its CertificateVerify checked; authorities built in: Sectigo DV E36 (github.com), Let's Encrypt YR1-YR3 (the release cdn); `authority | <base64 public key>` adds one of your own; `tls | strict` refuses an unverified server, otherwise the page is marked
+- [x] TLS 1.3 client: X25519, AES-128-GCM, SHA-256; the server's certificate chain is walked to a trusted authority (ECDSA over P-256 and P-384, RSA up to 4096 bits in PKCS#1 v1.5 and PSS, SHA-256/384/512; host names from the subject alternative names, dates against the clock) and its CertificateVerify checked; built in: thirty-four roots from the Mozilla bundle plus the intermediates of github.com and the release cdn; `authority | <base64 public key>` adds one of your own; `tls | strict` refuses an unverified server, otherwise the page is marked
 - [x] SSH door (server): curve25519-sha256, ssh-ed25519, aes128-gcm@openssh.com; keys from `door |` lines; exec and shell sessions
 - [x] Object pipe between machines: X25519 handshake signed with the door key, AES-128-GCM records
 - [x] Nodes: identity is the key; the first handshake writes a row into `nodes`; a different key from a known address is rejected until the row is removed; a known key from a new address updates the row
 - [x] Rights per node: `allow <node> work|update|vouch|all|nothing`; far work runs for a node when `work | welcomed` or its row contains `work`; a kernel is installed only from a node whose row contains `update`; a node's signed vouches pin keys only when its row contains `vouch`
 - [x] Transfers read from and write into objects directly, windowed (HAVE/TAKEN), up to 8 MiB; refusals carry a reason code
 - [x] `update <node>`: sends this machine's kernel; the receiver installs it and restarts; `update <node> with <kernel.elf>`; `update all`; the loader falls back to kernel.old after two failed starts
-- [x] Self-update: `update | auto` fetches a signed release package (`update.pkg`), verifies its ed25519 signature against a key built into the kernel, installs and restarts; `update check` on demand; the signature (not the transport) is the safeguard, the transport's own verification comes on top
+- [x] Self-update: `update | auto` fetches a signed release package (`update.pkg`), verifies its ed25519 signature against a key built into the kernel, installs and restarts; a one-line `version` asset is read first and the package fetched only when it names something newer; `update check` on demand; the signature (not the transport) is the safeguard, the transport's own verification comes on top
 - [x] Discovery: broadcast scan, heartbeat to every known node every 30 s, HERE carries key, version and up to four other addresses (propagation across routers)
 - [x] Far work: `ask <task>`, `ask <task> with <object>` (the input rides to each worker -- a script's third gift, a compiled worker's letter box), `as code`, `across N` and any combination, split tasks summed or concatenated, answers name the machines that produced them (`42 (4 parts by alpha, beta)`), foreman for recurring tasks
-- [x] Vouching: `vouch <node>` sends a signed statement that a key is recognised; a node that `allow`s the voucher `vouch` pins the key before meeting it (identity beyond trust on first use, no rights implied)
+- [x] Vouching: `vouch <node>` sends a signed statement that a key is recognised; a node that `allow`s the voucher `vouch` pins the key before meeting it (identity beyond trust on first use, no rights implied); `unvouch <node>` withdraws it and a row that rested on it is dropped; the nodes table's `via` column says how each key came to be there
+- [x] Split ranges everywhere: `split P from LO to HI` divides a compiled task too (each piece gets its range as a `RANG` message) and combines with `across N` (every piece on N machines, a majority per piece)
 - [x] The line: a shared text for `say` between nodes
 - [x] `pack`/`unpack`: a list as one bytes object for the pipe
 
@@ -191,6 +193,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/pipe-work.sh, pipe-desk.sh, pipe-foreman.sh | far work, split tasks over three machines, standing tasks |
 | tools/relaytest.sh, agenttest.sh, persisttest.sh | capability passing between programs, rights following the reference, snapshots (also `make relay`, `make agent`, `make persist`) |
 | tools/sticktest.sh | one disk carries loader, kernel and store |
+| tools/usbstick.sh | the same stick as a usb disk, the only disk: booted from and its store found through xhci |
 | tools/foreigndisk.sh | a foreign disk stays byte-identical |
 | tools/settletest.sh, settlefree.sh | settling whole / in free space |
 | tools/installtest.sh | boot-time offer on a non-empty disk |
@@ -218,13 +221,13 @@ Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes
 
 ## Known limits
 
-- No USB mass storage: a stick boots the machine but cannot hold the store.
+- USB disks are read and written 64 KiB at a time through the xhci driver, polled; a disk with sectors other than 512 bytes is not driven.
 - No wireless chip driver.
-- TLS: the trusted authorities are the intermediates that sign github.com and its release cdn today (Sectigo DV E36, Let's Encrypt YR1-YR3), not the roots above them: only P-256, RSA up to 4096 bits and SHA-256 are implemented, and the roots sign with P-384 and SHA-384. When either host moves to another intermediate, its pages are marked unverified until a kernel with the new authority is installed -- the self-update itself does not depend on it (the package is ed25519-signed). Other https hosts are unverified unless their authority is written into the settings. No revocation checking.
-- Self-update checks by fetching the whole package (a cheap version pre-check is a later refinement), so it runs at most every six hours; the release private key, if lost, means deployed machines can no longer be sent a signed update.
+- TLS: thirty-four roots from the Mozilla bundle and the intermediates of github.com and its release cdn are built in; a host under another root is unverified unless its authority is written into the settings. No revocation checking, no name constraints. The self-update does not depend on any of it (the package is ed25519-signed).
+- Self-update: the release private key, if lost, means deployed machines can no longer be sent a signed update.
 - Far-work answers are signed by the node that produced them and checked against its key, but the computation itself is not otherwise verified; running the same task on several nodes and comparing is left for later.
-- Node identity is trust on first use; `trust <name> <key>` pins one beforehand, `forget` re-pins a changed key, `renew key` rotates a key under the old key's signature, and `vouch` lets a node you have marked `vouch` pin a key for you -- but a vouch is only as good as your trust in the voucher, and no vouch is revoked once made.
-- A quorum takes the answer a verified majority agree on, but does not otherwise check the computation; a compiled or quorum task takes no split range yet.
+- Node identity is trust on first use; `trust <name> <key>` pins one beforehand, `forget` re-pins a changed key, `renew key` rotates a key under the old key's signature, `vouch` lets a node you have marked `vouch` pin a key for you and `unvouch` takes that back -- but a vouch is only as good as your trust in the voucher.
+- A quorum takes the answer a verified majority agree on, but does not otherwise check the computation; pieces times machines may not exceed eight.
 - A compiled task must fit one datagram (1024 bytes) and answers through the raw system-call ABI; one compile runs at a time per machine.
 - The ssh door serves up to four visitors at once (a fifth displaces the longest-idle); it honours a client-driven rekey but does not force one.
 - RTL8168/8169 driver written from documentation, untested on silicon.
@@ -246,6 +249,7 @@ Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes
 - EreBUS 0.8.4: self-update from a signed release -- `update | auto` checks now and then and installs a newer version on its own; the package's ed25519 signature is verified against a key built into the kernel (the signature, not the transport, is what makes it safe), and the loader's kernel.old rollback still applies. `update check` looks on demand. Larger tcp receive window for faster downloads; clean connection close.
 - EreBUS 0.8.5: self-update fixes so it works against a real release host -- the fetch carries the long signed redirect URLs a CDN returns (the request and Location buffers were too small and truncated the token), and no further check runs once an install is pending, so a machine updates and restarts exactly once. Verified end to end against the GitHub release.
 - EreBUS 0.8.6: `update check` answers in the terminal. The check runs in the background (the download can take a while), so its outcome -- already current, a newer version installing, or the source unreachable -- is now printed back into the terminal where it was typed, not only into the log.
+- EreBUS 0.8.9: the web verified -- thirty-four roots from the Mozilla bundle join the built-in authorities, with P-384 and RSA-4096 under SHA-256/384/512, so Wikipedia, Google, Amazon, Microsoft, heise and GitHub verify from the machine; `split` works for compiled tasks and under a quorum; `unvouch` withdraws a vouch and the nodes table says how each key came to be there; the self-update reads a one-line `version` file first; usb disks are driven, and a stick made with `tools/mkusb.sh` carries the store.
 - EreBUS 0.8.8: a round of fixes across the system. Fetching was 80 times slower than the link: the tcp window was a fixed 32 KiB regardless of the room left in the receive ring, so the peer sent what could not be kept, every cut costing its retransmit timeout (a 2.8 MB package took 93 s; it takes 1.2 s now) -- the window is the room now, a window update goes out when room opens, a fetch stops at Content-Length instead of waiting for the close, and the card's receive ring is four times larger; the scheduler no longer lets the idle thread keep the processor for a whole slice while another thread is ready; a pipe handshake in progress is no longer thrown away when a second address is knocked on (a task across two machines restarted both against each other); tcp no longer ends a stream short when the peer's fin arrives ahead of lost data; dns names ending in a compression pointer; a certificate extension with a malformed boolean read an uninitialized element (found by the new fuzzer); a full-length version name overflowed the update report; bundle and fat32 length checks that could wrap or run on a hostile disk; the fuzzers cover the certificate checker and the page renderer now.
 - EreBUS 0.8.7: the tls client verifies the server. The certificate chain is walked to a trusted authority (ECDSA P-256 and RSA signatures, host names, dates) and the server's signature over the handshake is checked against the leaf's key; github.com and the release cdn verify against authorities built into the kernel, `authority |` adds one of your own, `tls | strict` refuses what does not verify. The browser marks a page `verified` or `sealed, unverified`; the log and journal say why.
 

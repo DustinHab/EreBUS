@@ -1,8 +1,9 @@
 #!/bin/sh
 # tlstest.sh -- the tls client against a server of our own: verified under an authority of one's own, refused without.
 # - a test authority (EC) with an EC and an RSA intermediate, and a server leaf under each for the address 10.0.2.100
-# - a python tls 1.3 server per chain on the host loopback; qemu's guestfwd hands the guest's 10.0.2.100:443 to one of them
-#   (one connection per boot, which is why every case is its own boot)
+# - a python tls 1.3 server per chain on the host loopback; qemu's guestfwd hands the guest's 10.0.2.100:443 to one of
+#   them through a netcat per connection (the update check opens two: the version file, then the package); the netcat
+#   runs with -N so the guest's close reaches the server, which waits for it before taking the next connection
 # - the machine is pointed at https://10.0.2.100 as its release source and asked to check for an update; that fetch runs through tls
 #  boot 1: authority written, tls strict, the ec chain  -> "the server is verified" (ecdsa signatures, ecdsa certificate verify)
 #  boot 2: authority written, tls strict, the rsa chain -> verified (rsa pkcs1 in the chain, rsa-pss certificate verify)
@@ -51,13 +52,17 @@ s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("127.0.0.1", port))
 s.listen(4)
-# big enough for the updater to read it as a reply that is not a package, rather than as no reply
-body = b"EreBUS tls test page\n" * 250
+# the version file names something newer, so the check goes on to fetch the package;
+# the package is a page big enough to be read as a reply that is not a package, rather than as no reply
+page = b"EreBUS tls test page\n" * 250
 while True:
     c, _ = s.accept()
+    c.settimeout(10)     # a connection that stalls is dropped rather than blocking the ones behind it
     try:
         t = ctx.wrap_socket(c, server_side=True)
-        t.recv(4096)
+        req = t.recv(4096)
+        body = b"9.9.9\n" if b"/version" in req else page
+        sys.stderr.write("server: %s\n" % (req.split(b"\r\n")[0].decode("ascii", "replace") if req else "(no request)")); sys.stderr.flush()
         t.sendall(b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body)
         try: t.unwrap()
         except Exception: pass
@@ -101,7 +106,7 @@ boot() {
       -drive format=raw,file=$W/esp.img \
       -drive id=store,file=$W/store.img,format=raw,if=none \
       -device ide-hd,drive=store,bus=ide.1 \
-      -device e1000,netdev=n0 -netdev user,id=n0,guestfwd=tcp:10.0.2.100:443-tcp:127.0.0.1:$2 \
+      -device e1000,netdev=n0 -netdev "user,id=n0,guestfwd=tcp:10.0.2.100:443-cmd:nc -N 127.0.0.1 $2" \
       -serial file:$LOG >/dev/null 2>&1
 }
 

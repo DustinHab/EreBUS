@@ -2,7 +2,8 @@
 # mkusb.sh -- build/stick.img: GPT with an EFI system partition (loader, kernel) and a store partition.
 #   SIZE_MB=400 sh tools/mkusb.sh
 # - store partition type: E2EB0500-5354-4F52-4552-454255530001
-# - on real hardware usb disks are not driven: the stick boots, its store partition is out of reach
+# - the stick boots the machine and, reached through xhci, carries its store; on a machine with a sata store
+#   the stick is the exchange disk instead
 
 cd "$(dirname "$0")/.."
 make -s >/dev/null || exit 1

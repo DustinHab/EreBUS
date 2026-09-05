@@ -22,6 +22,8 @@ typedef struct {
     u16  port;
     char version[24];
     u32  may;
+    u8   via;                       /* NODE_VIA_*: how the key came to be here */
+    u8   voucher[32];               /* the key that vouched for it, when via is vouched */
 } noderec;
 
 static object  *nodes;
@@ -32,7 +34,7 @@ object *nodes_object(void) { return nodes; }
 u32     nodes_count(void)  { return count; }
 
 static const char header[] =
-    "name         | key                                         | address           | version       | may\n";
+    "name         | key                                         | address           | version       | may       | via\n";
 
 bool nodes_create(void)
 {
@@ -124,11 +126,11 @@ static u32 put_dec(char *d, u32 at, u64 v)
 
 static void read_row(const char *line, u64 len)
 {
-    const char *c[5];
-    u64 cl[5];
+    const char *c[6];
+    u64 cl[6];
     u32 nc = 0;
     u64 start = 0;
-    for (u64 i = 0; i <= len && nc < 5; i++) {
+    for (u64 i = 0; i <= len && nc < 6; i++) {
         if (i < len && line[i] != '|') continue;
         c[nc] = line + start;
         cl[nc] = i - start;
@@ -176,6 +178,24 @@ static void read_row(const char *line, u64 len)
         if (has_word(c[4], cl[4], "update")) r->may |= NODE_MAY_UPDATE;
         if (has_word(c[4], cl[4], "vouch"))  r->may |= NODE_MAY_VOUCH;
         if (has_word(c[4], cl[4], "all"))    r->may |= NODE_MAY_WORK | NODE_MAY_UPDATE | NODE_MAY_VOUCH;
+    }
+    if (nc > 5) {
+        /* How the key got here: "met", "by hand", or "vouched" and the
+         * voucher's key in ssh's letters. */
+        if (has_word(c[5], cl[5], "hand")) r->via = NODE_VIA_HAND;
+        else if (has_word(c[5], cl[5], "vouched")) {
+            u64 i = 0;
+            while (i + 7 <= cl[5] && memcmp(c[5] + i, "vouched", 7) != 0) i++;
+            i += 7;
+            while (i < cl[5] && c[5][i] == ' ') i++;
+            u64 from = i;
+            while (i < cl[5] && c[5][i] != ' ') i++;
+            u8 vk[48];
+            if (base64_decode(c[5] + from, (u32)(i - from), vk, sizeof(vk)) == 32) {
+                memcpy(r->voucher, vk, 32);
+                r->via = NODE_VIA_VOUCHED;
+            }
+        }
     }
     if (slot == count) count++;
 }
@@ -245,7 +265,16 @@ static void nodes_write(void)
         at = put(buf, at, " | ");
         char may[24];
         nodes_may_words(r->may, may);
-        at = put(buf, at, may);
+        at = put_pad(buf, at, may, 9);
+        at = put(buf, at, " | ");
+        if (r->via == NODE_VIA_HAND) {
+            at = put(buf, at, "by hand");
+        } else if (r->via == NODE_VIA_VOUCHED) {
+            at = put(buf, at, "vouched ");
+            at += base64_encode(r->voucher, 32, buf + at, false);
+        } else {
+            at = put(buf, at, "met");
+        }
         buf[at++] = '\n';
     }
     if ((u64)at + 1 > size) at = (u32)size - 1;
@@ -414,6 +443,34 @@ i32 nodes_meet(const char *claim, const u8 key[32], const u8 ip[4], u16 port,
     return i;
 }
 
+void nodes_note_via(u32 i, u8 via, const u8 voucher[32])
+{
+    if (i >= count) return;
+    noderec *r = &rows[i];
+    if (r->via == via && (via != NODE_VIA_VOUCHED || memcmp(r->voucher, voucher, 32) == 0)) return;
+    r->via = via;
+    if (via == NODE_VIA_VOUCHED && voucher) memcpy(r->voucher, voucher, 32);
+    else memset(r->voucher, 0, 32);
+    nodes_write();
+}
+
+u32 nodes_unvouch(const u8 voucher[32], const u8 key[32])
+{
+    i32 i = nodes_by_key(key);
+    if (i < 0) return 0;
+    noderec *r = &rows[i];
+    if (r->via != NODE_VIA_VOUCHED || memcmp(r->voucher, voucher, 32) != 0) return 2;
+    char name[24];
+    u32 n = 0;
+    while (r->name[n] && n < 23) { name[n] = r->name[n]; n++; }
+    name[n] = 0;
+    for (u32 k = (u32)i; k + 1 < count; k++) rows[k] = rows[k + 1];
+    count--;
+    nodes_write();
+    node_says(name, "'s vouch is withdrawn; its key is no longer pinned");
+    return 1;
+}
+
 bool nodes_allow(u32 i, u32 may)
 {
     if (i >= count) return false;
@@ -437,6 +494,8 @@ i32 nodes_trust(const char *name, const u8 key[32])
     }
     i = nodes_meet(name, key, NULL, 0, NULL, true);
     if (i < 0) return -1;
+    rows[i].via = NODE_VIA_HAND;
+    nodes_write();
     char fp[64];
     ssh_fingerprint_of(key, fp);
     kprintf("pipe: node '%s' trusted before meeting; key %s\n", rows[i].name, fp);

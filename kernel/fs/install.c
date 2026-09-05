@@ -58,11 +58,15 @@ static bool wait_line(char *out, u32 max, u64 limit_ns)
     }
 }
 
-/* Is there anything worth offering? A disk, and nowhere to keep
- * anything yet. */
+/* Is there anything worth offering? A disk on the machine itself, and
+ * no store yet -- or only the one on the stick the machine runs from,
+ * which is there to install from, not to stay. */
 static bool anything_to_take(void)
 {
-    return blk_store_disk() < 0 && blk_disk_count() > 0;
+    if (blk_store_disk() >= 0 && !blk_store_on_usb()) return false;
+    for (u32 i = 0; i < blk_disk_count(); i++)
+        if (!blk_disk_on_usb(i)) return true;
+    return false;
 }
 
 void install_offer(void)
@@ -70,14 +74,14 @@ void install_offer(void)
     if (!anything_to_take()) return;
 
     if (!ps2_keyboard_present() && !xhci_keyboards()) {
-        kprintf("disk: no store and no keyboard; "
-                "starting without a store\n");
+        kprintf("disk: %s and no keyboard; starting as it is\n",
+                blk_store_on_usb() ? "the store on the stick" : "no store");
         return;
     }
 
     kprintf("\n");
-    kprintf("disk: no store yet.  "
-            "a disk can be given to it now.\n");
+    kprintf("disk: %s.  a disk can be given to it now.\n",
+            blk_store_on_usb() ? "the store is on the stick" : "no store yet");
     settle_disks(say, NULL);
     kprintf("\n");
     kprintf("disk: type the number of a disk to give it to the system, "

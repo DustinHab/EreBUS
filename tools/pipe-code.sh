@@ -3,6 +3,7 @@
 # - A (alpha) welcomes work; B (beta) writes a small c program as a task and asks it "as code"
 # - A compiles it with the in-kernel compiler, runs the image, and it answers "7"; the answer is signed, so B shows "(by alpha)"
 # - then B asks a task that never returns (for(;;){}); A's deadline ends it and B hears "it ran out of time"
+# - then a split compiled task: each piece receives its range as a "RANG" message and sums it; B sums the pieces: 5050
 # - both machines are driven through the screen terminal; each has its own MAC
 
 cd "$(dirname "$0")/.."
@@ -102,6 +103,25 @@ sleep 1
     sleep 1
     echo "screendump $BUILD/code-attn.ppm"
     sleep 1
+    # a split compiled task: each piece's range arrives as a RANG message; the pieces are summed
+    say "back"
+    say "make text sums"
+    say "go sums"
+    say "write split 2 from 1 to 100"
+    say "write long main(long c, long n) {"
+    say "write long b[16]; long d[20]; long s = 0; long w = 0; long sh = 0; long k = 0;"
+    say "write syscall(3, n, b, 0, 0, 0);"
+    say "write long i = b[2];"
+    say "write while (i <= b[3]) { s = s + i; i = i + 1; }"
+    say "write while (s > 0) { d[k] = s % 10; s = s / 10; k = k + 1; }"
+    say "write while (k > 0) { k = k - 1; w = w | ((48 + d[k]) << sh); sh = sh + 8; }"
+    say "write syscall(2, c, 0x54584554, w, 0, 0);"
+    say "write return 0;"
+    say "write }"
+    say "back"
+    say "ask sums as code"
+    waitlog $BLOG 'pipe: job 3 answers\|pipe: job 3 failed' 120
+    sleep 1
     touch $BUILD/code-done
     echo quit
 } | qemu-system-x86_64 $QEMU_BASE \
@@ -131,4 +151,5 @@ grep -aq 'pipe: job 1 answers: 7 (by alpha)' $BLOG && echo "the compiled task an
 grep -aq 'being ended' $ALOG && echo "the runaway task was ended by the deadline" || { echo "FAILED: the runaway task was not ended"; ok=0; }
 grep -aq 'pipe: job 2.*ran out of time\|job 2 failed' $BLOG && echo "and B heard it ran out of time" || { echo "FAILED: B did not hear the deadline"; ok=0; }
 grep -aq 'attention: pipe: job 2 failed' $BLOG && echo "the failed job was raised on the attention page" || { echo "FAILED: the failure did not reach attention"; ok=0; }
-[ $ok = 1 ] && echo "compiled far work runs under a kernel-enforced deadline, and its failure is noticed" || echo "compiled far work FAILED"
+grep -aq 'pipe: job 3 answers: 5050 (2 parts by alpha)' $BLOG && echo "a split compiled task read its ranges and the two pieces summed to 5050" || { echo "FAILED: the split compiled task did not answer 5050"; ok=0; }
+[ $ok = 1 ] && echo "compiled far work runs under a kernel-enforced deadline, in pieces too, and its failure is noticed" || echo "compiled far work FAILED"

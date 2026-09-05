@@ -66,7 +66,7 @@ grep -a 'blk:\|snap:' $LOG2 | cut -c1-110
 echo "--- the checks ---"
 ok=1
 if grep -aq "'settle on disk 1'" $LOG1; then echo "the blank disk was offered, not taken"; else echo "FAILED: the blank disk was not offered"; ok=0; fi
-if grep -aq 'blank partition on port 1; it is the store now' $LOG1; then echo "the store was made and adopted"; else echo "FAILED: no store was adopted"; ok=0; fi
+if grep -aq 'blank partition on ahci port 1; it is the store now' $LOG1; then echo "the store was made and adopted"; else echo "FAILED: no store was adopted"; ok=0; fi
 if grep -aq 'generation 1 written' $LOG1; then echo "a generation was written to it"; else echo "FAILED: nothing was written"; ok=0; fi
 if grep -aq 'store partition on the boot disk' $LOG2; then echo "the second boot came from the disk"; else echo "FAILED: the second boot did not come from the disk"; ok=0; fi
 if grep -aq 'graph restored from generation' $LOG2; then echo "and found the graph"; else echo "FAILED: the graph was not found"; ok=0; fi

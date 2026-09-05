@@ -93,7 +93,7 @@ static bool check_identity(const u8 *cm, u32 cl, const u8 *vm, u32 vl,
         const u8 *spki = settings_authority(i, &len);
         if (!spki) break;
         extra[ne].name = "an authority from the settings";
-        extra[ne].spki = spki;
+        extra[ne].der = spki;
         extra[ne].len = len;
         ne++;
     }
@@ -120,15 +120,28 @@ static bool check_identity(const u8 *cm, u32 cl, const u8 *vm, u32 vl,
     while (*label) content[c++] = (u8)*label++;
     content[c++] = 0;
     for (u32 i = 0; i < 32; i++) content[c++] = th[i];
-    u8 h[32];
-    sha256(content, c, h);
 
-    bool ok;
-    if (scheme == 0x0403 && leaf.key.kind == KEY_P256)
-        ok = p256_verify_der(leaf.key.point, h, vm + 4, sl);
-    else if (scheme == 0x0804 && leaf.key.kind == KEY_RSA)
-        ok = rsa_verify_pss_sha256(leaf.key.n, leaf.key.nlen, leaf.key.e, leaf.key.elen, h, vm + 4, sl);
-    else { set_why("the server signed the handshake with a scheme not supported here", ""); return false; }
+    /* The schemes offered in the ClientHello: the curve fixes the hash
+     * for ecdsa; rsa-pss may hash with any of the three. */
+    u8 hk = HASH_NONE;
+    u8 want_key = KEY_NONE;
+    u32 curve = EC_P256;
+    if (scheme == 0x0403)      { hk = HASH_SHA256; want_key = KEY_P256; curve = EC_P256; }
+    else if (scheme == 0x0503) { hk = HASH_SHA384; want_key = KEY_P384; curve = EC_P384; }
+    else if (scheme == 0x0804) { hk = HASH_SHA256; want_key = KEY_RSA; }
+    else if (scheme == 0x0805) { hk = HASH_SHA384; want_key = KEY_RSA; }
+    else if (scheme == 0x0806) { hk = HASH_SHA512; want_key = KEY_RSA; }
+    if (hk == HASH_NONE || leaf.key.kind != want_key) {
+        set_why("the server signed the handshake with a scheme not supported here", "");
+        return false;
+    }
+    u8 h[64];
+    pki_hash(hk, content, c, h);
+    u32 dlen = pki_hash_len(hk);
+
+    bool ok = want_key == KEY_RSA
+            ? rsa_verify_pss(leaf.key.n, leaf.key.nlen, leaf.key.e, leaf.key.elen, hk, h, vm + 4, sl)
+            : ec_verify_der(curve, leaf.key.point, leaf.key.pointlen, h, dlen, vm + 4, sl);
     if (!ok) { set_why("the server's signature over the handshake did not verify", ""); return false; }
     return true;
 }
@@ -370,13 +383,18 @@ static u32 build_hello(u8 *out, const char *host, u32 hlen,
     body[b++]=0x00; body[b++]=0x0a; body[b++]=0x00; body[b++]=0x04;
     body[b++]=0x00; body[b++]=0x02; body[b++]=0x00; body[b++]=0x1d;
 
-    /* signature_algorithms: the two the CertificateVerify may use, and
-     * rsa_pkcs1_sha256 for the signatures within a chain. */
-    body[b++]=0x00; body[b++]=0x0d; body[b++]=0x00; body[b++]=0x08;
-    body[b++]=0x00; body[b++]=0x06;
+    /* signature_algorithms: the five the CertificateVerify may use, and
+     * the rsa_pkcs1 ones for the signatures within a chain. */
+    body[b++]=0x00; body[b++]=0x0d; body[b++]=0x00; body[b++]=0x12;
+    body[b++]=0x00; body[b++]=0x10;
     body[b++]=0x04; body[b++]=0x03;                  /* ecdsa_secp256r1_sha256 */
+    body[b++]=0x05; body[b++]=0x03;                  /* ecdsa_secp384r1_sha384 */
     body[b++]=0x08; body[b++]=0x04;                  /* rsa_pss_rsae_sha256 */
+    body[b++]=0x08; body[b++]=0x05;                  /* rsa_pss_rsae_sha384 */
+    body[b++]=0x08; body[b++]=0x06;                  /* rsa_pss_rsae_sha512 */
     body[b++]=0x04; body[b++]=0x01;                  /* rsa_pkcs1_sha256 */
+    body[b++]=0x05; body[b++]=0x01;                  /* rsa_pkcs1_sha384 */
+    body[b++]=0x06; body[b++]=0x01;                  /* rsa_pkcs1_sha512 */
 
     /* key_share: our x25519 public value */
     body[b++]=0x00; body[b++]=0x33;

@@ -3,6 +3,7 @@
 # - A (alpha) trusts a generated key by hand as 'gamma'; B (beta) meets A
 # - A vouches for gamma BEFORE B allows it: B ignores the vouch (a stranger's word pins nothing)
 # - B 'allow alpha vouch'; A vouches again: B pins gamma's key, and its fingerprint == the one A trusted
+# - A 'unvouch gamma': B drops the row, since only that vouch had put it there
 # - both machines driven through the screen terminal; each its own MAC
 
 cd "$(dirname "$0")/.."
@@ -19,7 +20,8 @@ GPUB=$(cut -d' ' -f1,2 $KEYS/gamma.pub)
 
 rm -f $BUILD/vouch-a.img $BUILD/vouch-b.img $BUILD/vouch-a-vars.fd $BUILD/vouch-b-vars.fd \
       $BUILD/vouch-a-esp.img $ALOG $BLOG \
-      $BUILD/v-a-ready $BUILD/v-b-met $BUILD/v-a-first $BUILD/v-b-allowed $BUILD/v-a-done $BUILD/v-done
+      $BUILD/v-a-ready $BUILD/v-b-met $BUILD/v-a-first $BUILD/v-b-allowed $BUILD/v-a-done \
+      $BUILD/v-b-pinned $BUILD/v-a-withdrawn $BUILD/v-done
 fresh_store $BUILD/vouch-a.img
 fresh_store $BUILD/vouch-b.img
 fresh_vars $BUILD/vouch-a-vars.fd
@@ -52,6 +54,12 @@ cp $BUILD/esp.img $BUILD/vouch-a-esp.img
     say "vouch gamma"
     waitlog $ALOG 'vouched for gamma' 20
     touch $BUILD/v-a-done
+    # once B has pinned gamma, withdraw the vouch: B must drop the row
+    waitfile $BUILD/v-b-pinned 90
+    sleep 1
+    say "unvouch gamma"
+    waitlog $ALOG 'withdrew the vouch for gamma' 20
+    touch $BUILD/v-a-withdrawn
     waitfile $BUILD/v-done 90
     sleep 1
     echo quit
@@ -97,6 +105,12 @@ sleep 1
     sleep 1
     echo "screendump $BUILD/vouch-nodes.ppm"
     sleep 1
+    touch $BUILD/v-b-pinned
+    waitfile $BUILD/v-a-withdrawn 60
+    waitlog $BLOG "withdraws its vouch for .gamma." 40
+    sleep 1
+    echo "screendump $BUILD/vouch-nodes2.ppm"
+    sleep 1
     touch $BUILD/v-done
     echo quit
 } | qemu-system-x86_64 $QEMU_BASE \
@@ -110,6 +124,7 @@ sleep 1
 
 wait $A_JOB 2>/dev/null
 python3 tools/ppm2png.py $BUILD/vouch-nodes.ppm $BUILD/vouch-nodes.png 2>/dev/null
+python3 tools/ppm2png.py $BUILD/vouch-nodes2.ppm $BUILD/vouch-nodes2.png 2>/dev/null
 
 echo "--- A (alpha) ---"
 grep -a 'pipe:\|node ' $ALOG | cut -c1-120 | tail -8
@@ -131,4 +146,5 @@ if [ -n "$afp" ] && [ "$afp" = "$bfp" ]; then
 else
     echo "FAILED: B did not pin the vouched key"; ok=0
 fi
-[ $ok = 1 ] && echo "a vouch from an allowed node pins a key before meeting" || echo "vouching FAILED"
+grep -aq "withdraws its vouch for 'gamma'; the key is no longer pinned" $BLOG && echo "A withdrew the vouch and B dropped the pinned key" || { echo "FAILED: the withdrawal did not drop the key"; ok=0; }
+[ $ok = 1 ] && echo "a vouch from an allowed node pins a key before meeting, and its withdrawal unpins it" || echo "vouching FAILED"

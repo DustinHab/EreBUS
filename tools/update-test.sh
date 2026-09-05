@@ -4,7 +4,9 @@
 # The machine is pointed at a local server that qemu's guestfwd sends to the host.
 #  boot 1: the package's signature is corrupted -> the machine refuses it, installs nothing.
 #  boot 2: the real package -> the machine installs it and reboots; the boot banner then reads 9.9.9.
-# Two boots because guestfwd forwards one connection per run; each boot's single check uses it.
+#  boot 3: the 'version' file names nothing newer -> the check reads it and fetches no package.
+# The guest reaches the server through guestfwd with a netcat per connection, so a boot may read
+# the version file and then the package; one boot per case keeps the outcomes apart.
 cd "$(dirname "$0")/.."
 . tools/testlib.sh
 LOG=$BUILD/upd.log
@@ -46,7 +48,10 @@ python3 $BUILD/upd-serve.py $PORT $SRV >$BUILD/upd-srv.log 2>&1 &
 SRV_JOB=$!
 sleep 1
 
-NET="-device e1000,netdev=n0 -netdev user,id=n0,guestfwd=tcp:10.0.2.100:80-tcp:127.0.0.1:$PORT"
+# The forward runs a netcat per connection, so a boot may open several
+# (the version file, then the package); a plain tcp forward carries one.
+FWD="user,id=n0,guestfwd=tcp:10.0.2.100:80-cmd:nc -N 127.0.0.1 $PORT"
+printf '9.9.9\n' > $SRV/version
 LOG1=$BUILD/upd1.log
 LOG2=$BUILD/upd2.log
 rm -f $LOG1 $LOG2
@@ -70,7 +75,7 @@ rm -f $LOG1 $LOG2
   -drive format=raw,file=$BUILD/upd-esp.img \
   -drive id=store,file=$BUILD/upd-store.img,format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
-  $NET -serial file:$LOG1 >/dev/null 2>&1
+  -device e1000,netdev=n0 -netdev "$FWD" -serial file:$LOG1 >/dev/null 2>&1
 
 # --- boot 2: the good package installs and reboots into 9.9.9 ---
 cp $SRV/update.pkg.good $SRV/update.pkg
@@ -94,11 +99,40 @@ fresh_vars $BUILD/upd-vars.fd
   -drive format=raw,file=$BUILD/upd-esp.img \
   -drive id=store,file=$BUILD/upd-store.img,format=raw,if=none \
   -device ide-hd,drive=store,bus=ide.1 \
-  $NET -serial file:$LOG2 >/dev/null 2>&1
+  -device e1000,netdev=n0 -netdev "$FWD" -serial file:$LOG2 >/dev/null 2>&1
+
+# --- boot 3: a version file that names nothing newer: no package is fetched ---
+printf '0.0.1\n' > $SRV/version
+LOG3=$BUILD/upd3.log
+rm -f $LOG3
+fresh_store $BUILD/upd-store.img
+fresh_vars $BUILD/upd-vars.fd
+cp build/esp.img $BUILD/upd-esp.img
+{
+    bootwait $LOG3
+    keys tab tab tab tab tab pause
+    say "go system"
+    say "go settings"
+    say "write update | auto http://10.0.2.100"
+    say "back"
+    say "back"
+    sleep 1
+    say "update check"
+    waitlog $LOG3 'update: the source names\|update: no update package\|update: package version' 120
+    sleep 2
+    echo quit
+} | qemu-system-x86_64 $QEMU_BASE \
+  -drive if=pflash,format=raw,file=$BUILD/upd-vars.fd \
+  -drive format=raw,file=$BUILD/upd-esp.img \
+  -drive id=store,file=$BUILD/upd-store.img,format=raw,if=none \
+  -device ide-hd,drive=store,bus=ide.1 \
+  -device e1000,netdev=n0 -netdev "$FWD" -serial file:$LOG3 >/dev/null 2>&1
 
 kill $SRV_JOB 2>/dev/null
 wait 2>/dev/null
 
+echo "--- boot 3 (version file, nothing newer) ---"
+grep -a 'update:' $LOG3 | cut -c1-120 | tail -4
 echo "--- boot 1 (bad signature) ---"
 grep -a 'update:\|attention: update' $LOG1 | cut -c1-120 | tail -8
 echo "--- boot 2 (good package) ---"
@@ -109,4 +143,7 @@ grep -aq 'signature did not verify' $LOG1 && echo "a package with a bad signatur
 grep -aq 'a signed kernel is installed' $LOG1 && { echo "FAILED: a bad package was installed"; ok=0; } || echo "and nothing was installed from it"
 grep -aq 'a signed kernel is installed' $LOG2 && echo "a correctly signed newer kernel was installed" || { echo "FAILED: good kernel not installed"; ok=0; }
 grep -aq 'EreBUS 9.9.9' $LOG2 && echo "the machine rebooted into the updated kernel" || { echo "FAILED: did not come up as 9.9.9"; ok=0; }
-[ $ok = 1 ] && echo "signed self-update installs a newer release and refuses a forged one" || echo "self-update FAILED"
+grep -aq "update: the source names version '9.9.9'" $LOG2 && echo "the version file was read before the package" || { echo "FAILED: the version file was not read"; ok=0; }
+grep -aq "update: the source names version '0.0.1'" $LOG3 && echo "a version file naming nothing newer was read" || { echo "FAILED: the version file was not read on boot 3"; ok=0; }
+grep -aq 'update: package version\|update: no update package' $LOG3 && { echo "FAILED: a package was fetched although nothing newer was named"; ok=0; } || echo "and no package was fetched for it"
+[ $ok = 1 ] && echo "signed self-update installs a newer release, refuses a forged one, and fetches nothing when nothing is newer" || echo "self-update FAILED"

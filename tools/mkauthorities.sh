@@ -1,7 +1,7 @@
 #!/bin/sh
-# mkauthorities.sh -- kernel/net/authorities.h from tools/pki/authorities.txt: the trusted authorities' public keys.
+# mkauthorities.sh -- kernel/net/authorities.h from tools/pki/authorities.txt: the trusted authorities' certificates.
 # - each line of the list: <pem file in tools/pki/authorities> | <name the log uses>
-# - only the SubjectPublicKeyInfo of each certificate goes into the kernel; the name and expiry are comments
+# - the whole certificate goes in (DER); the checker takes its key and tries it where an issuer names its subject
 cd "$(dirname "$0")/.."
 OUT=kernel/net/authorities.h
 i=0
@@ -16,7 +16,7 @@ table=""
         subject=$(openssl x509 -in tools/pki/authorities/$file -noout -subject | sed 's/subject=//')
         echo "/* $name: $subject; valid until $until */"
         echo "static const u8 AUTH_$i[] = {"
-        openssl x509 -in tools/pki/authorities/$file -pubkey -noout | openssl pkey -pubin -outform DER \
+        openssl x509 -in tools/pki/authorities/$file -outform DER \
             | od -An -v -tx1 | sed 's/ \([0-9a-f][0-9a-f]\)/0x\1,/g; s/^/   /'
         echo "};"
         table="$table    { \"$name\", AUTH_$i, sizeof AUTH_$i },
@@ -27,4 +27,4 @@ table=""
     printf '%s' "$table"
     echo "};"
 } > $OUT
-echo "wrote $OUT with $i authorities"
+echo "wrote $OUT with $i authorities, $(wc -c < $OUT) bytes of source"

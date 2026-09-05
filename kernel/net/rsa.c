@@ -1,7 +1,8 @@
 /*
- * rsa.c -- RSA signature verification with SHA-256: PKCS#1 v1.5 (certificate chains) and PSS (TLS 1.3 CertificateVerify).
+ * rsa.c -- RSA signature verification: PKCS#1 v1.5 (certificate chains) and PSS (TLS 1.3 CertificateVerify).
  * - the public operation is one exponentiation on bn.c; moduli of 2048 to 4096 bits, any exponent
- * - v1.5: the encoded message is compared whole against the expected bytes; PSS: salt of 32 bytes, MGF1 with SHA-256
+ * - SHA-256, SHA-384 or SHA-512 under either padding; PSS with a salt as long as the hash, MGF1 with the same hash
+ * - v1.5: the encoded message is compared whole against the expected bytes
  */
 #include <eb/pki.h>
 #include <eb/bn.h>
@@ -9,10 +10,26 @@
 
 static bn_mont M;                       /* a kibibyte; kept off the small thread stacks */
 
-/* The DigestInfo of SHA-256, as PKCS#1 spells it out. */
-static const u8 SHA256_INFO[19] = {
-    0x30,0x31,0x30,0x0D,0x06,0x09,0x60,0x86,0x48,0x01,
-    0x65,0x03,0x04,0x02,0x01,0x05,0x00,0x04,0x20 };
+u32 pki_hash_len(u8 kind)
+{
+    return kind == HASH_SHA256 ? 32 : kind == HASH_SHA384 ? 48 : kind == HASH_SHA512 ? 64 : 0;
+}
+
+void pki_hash(u8 kind, const void *data, u64 len, u8 *out)
+{
+    if (kind == HASH_SHA256)      sha256(data, len, out);
+    else if (kind == HASH_SHA384) sha384(data, len, out);
+    else if (kind == HASH_SHA512) sha512(data, len, out);
+}
+
+/* The DigestInfo prefixes, as PKCS#1 spells them out: the algorithm
+ * identifier and then an OCTET STRING as long as the hash. */
+static const u8 INFO_SHA256[19] = {
+    0x30,0x31,0x30,0x0D,0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01,0x05,0x00,0x04,0x20 };
+static const u8 INFO_SHA384[19] = {
+    0x30,0x41,0x30,0x0D,0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x02,0x05,0x00,0x04,0x30 };
+static const u8 INFO_SHA512[19] = {
+    0x30,0x51,0x30,0x0D,0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03,0x05,0x00,0x04,0x40 };
 
 /* sig^e mod n as big-endian bytes, as long as the modulus. */
 static bool rsa_public(const u8 *n, u32 nlen, const u8 *e, u32 elen,
@@ -35,15 +52,21 @@ static bool rsa_public(const u8 *n, u32 nlen, const u8 *e, u32 elen,
     return true;
 }
 
-bool rsa_verify_pkcs1_sha256(const u8 *n, u32 nlen, const u8 *e, u32 elen,
-                             const u8 hash[32], const u8 *sig, u32 siglen)
+bool rsa_verify_pkcs1(const u8 *n, u32 nlen, const u8 *e, u32 elen,
+                      u8 hash_kind, const u8 *hash, const u8 *sig, u32 siglen)
 {
+    const u8 *info = hash_kind == HASH_SHA256 ? INFO_SHA256
+                   : hash_kind == HASH_SHA384 ? INFO_SHA384
+                   : hash_kind == HASH_SHA512 ? INFO_SHA512 : 0;
+    u32 hlen = pki_hash_len(hash_kind);
+    if (!info) return false;
+
     u8 em[512];
     u32 k;
     if (!rsa_public(n, nlen, e, elen, sig, siglen, em, &k)) return false;
 
     /* 00 01 FF..FF 00 DigestInfo hash, with at least eight FF bytes. */
-    u32 tlen = 19 + 32;
+    u32 tlen = 19 + hlen;
     if (k < tlen + 11) return false;
     if (em[0] != 0x00 || em[1] != 0x01) return false;
     u32 i = 2;
@@ -53,29 +76,33 @@ bool rsa_verify_pkcs1_sha256(const u8 *n, u32 nlen, const u8 *e, u32 elen,
     }
     if (em[i] != 0x00) return false;
     i++;
-    for (u32 j = 0; j < 19; j++) if (em[i + j] != SHA256_INFO[j]) return false;
-    for (u32 j = 0; j < 32; j++) if (em[i + 19 + j] != hash[j]) return false;
+    for (u32 j = 0; j < 19; j++) if (em[i + j] != info[j]) return false;
+    for (u32 j = 0; j < hlen; j++) if (em[i + 19 + j] != hash[j]) return false;
     return true;
 }
 
-/* MGF1 with SHA-256: the mask of the seed, counter by counter. */
-static void mgf1(const u8 seed[32], u8 *out, u32 len)
+/* MGF1: the mask of the seed, counter by counter, with the given hash. */
+static void mgf1(u8 hash_kind, const u8 *seed, u32 slen, u8 *out, u32 len)
 {
-    u8 block[36];
-    for (u32 i = 0; i < 32; i++) block[i] = seed[i];
+    u8 block[64 + 4];
+    for (u32 i = 0; i < slen; i++) block[i] = seed[i];
     u32 at = 0;
     for (u32 c = 0; at < len; c++) {
-        block[32] = (u8)(c >> 24); block[33] = (u8)(c >> 16);
-        block[34] = (u8)(c >> 8);  block[35] = (u8)c;
-        u8 h[32];
-        sha256(block, 36, h);
-        for (u32 i = 0; i < 32 && at < len; i++) out[at++] = h[i];
+        block[slen] = (u8)(c >> 24); block[slen + 1] = (u8)(c >> 16);
+        block[slen + 2] = (u8)(c >> 8); block[slen + 3] = (u8)c;
+        u8 h[64];
+        pki_hash(hash_kind, block, slen + 4, h);
+        for (u32 i = 0; i < slen && at < len; i++) out[at++] = h[i];
     }
 }
 
-bool rsa_verify_pss_sha256(const u8 *n, u32 nlen, const u8 *e, u32 elen,
-                           const u8 hash[32], const u8 *sig, u32 siglen)
+bool rsa_verify_pss(const u8 *n, u32 nlen, const u8 *e, u32 elen,
+                    u8 hash_kind, const u8 *hash, const u8 *sig, u32 siglen)
 {
+    u32 hlen = pki_hash_len(hash_kind);
+    if (!hlen) return false;
+    u32 slen = hlen;                              /* the salt is as long as the hash */
+
     u8 em[512];
     u32 k;
     if (!rsa_public(n, nlen, e, elen, sig, siglen, em, &k)) return false;
@@ -92,7 +119,6 @@ bool rsa_verify_pss_sha256(const u8 *n, u32 nlen, const u8 *e, u32 elen,
     for (u32 i = 0; i < k - em_len; i++) if (em[i] != 0) return false;
     const u8 *EM = em + (k - em_len);
 
-    const u32 hlen = 32, slen = 32;
     if (em_len < hlen + slen + 2) return false;
     if (EM[em_len - 1] != 0xBC) return false;
 
@@ -103,7 +129,7 @@ bool rsa_verify_pss_sha256(const u8 *n, u32 nlen, const u8 *e, u32 elen,
     if (top && (masked[0] >> (8 - top)) != 0) return false;
 
     u8 db[512];
-    mgf1(H, db, dblen);
+    mgf1(hash_kind, H, hlen, db, dblen);
     for (u32 i = 0; i < dblen; i++) db[i] ^= masked[i];
     if (top) db[0] &= (u8)(0xFF >> top);
 
@@ -112,13 +138,13 @@ bool rsa_verify_pss_sha256(const u8 *n, u32 nlen, const u8 *e, u32 elen,
     if (db[pad] != 0x01) return false;
     const u8 *salt = db + pad + 1;
 
-    /* H' = SHA-256(8 zeros, the message hash, the salt) must equal H. */
-    u8 m2[8 + 32 + 32];
+    /* H' = hash(8 zeros, the message hash, the salt) must equal H. */
+    u8 m2[8 + 64 + 64];
     for (u32 i = 0; i < 8; i++) m2[i] = 0;
-    for (u32 i = 0; i < 32; i++) m2[8 + i] = hash[i];
-    for (u32 i = 0; i < slen; i++) m2[40 + i] = salt[i];
-    u8 h2[32];
-    sha256(m2, sizeof m2, h2);
-    for (u32 i = 0; i < 32; i++) if (h2[i] != H[i]) return false;
+    for (u32 i = 0; i < hlen; i++) m2[8 + i] = hash[i];
+    for (u32 i = 0; i < slen; i++) m2[8 + hlen + i] = salt[i];
+    u8 h2[64];
+    pki_hash(hash_kind, m2, 8 + hlen + slen, h2);
+    for (u32 i = 0; i < hlen; i++) if (h2[i] != H[i]) return false;
     return true;
 }

@@ -1,8 +1,10 @@
 #!/bin/sh
-# pipe-quorum.sh -- the same task on two machines, answers compared.
+# pipe-quorum.sh -- the same task on two machines, answers compared; then a split task across both.
 # - two workers (alpha, gamma) welcome work; the asker (beta) runs a task "across 2"
 # - the desk sends the whole task to each distinct worker, both answer 42, and the
 #   verified majority makes the result "42  (agreed by 2 of 2)"
+# - a second task "split 2 from 1 to 100 ... across 2": every piece runs on both machines,
+#   each piece's majority is taken, the pieces summed: "5050 (2 pieces, each agreed by at least 2 of 2)"
 # - three QEMUs share a multicast socket as the cable; each has its own MAC
 
 cd "$(dirname "$0")/.."
@@ -89,6 +91,26 @@ sleep 1
     sleep 1
     echo "screendump $BUILD/q-b.ppm"
     sleep 1
+    # a split task across two machines: every piece on both, the pieces summed
+    say "make text sums"
+    say "go sums"
+    say "write split 2 from 1 to 100"
+    say "write wait"
+    say "write set a m"
+    say "write wait"
+    say "write set b m"
+    say "write set s 0"
+    say "write add s a"
+    say "write add a 1"
+    say "write if a > b"
+    say "write skip 1"
+    say "write back 4"
+    say "write answer s"
+    say "write stop"
+    say "back"
+    say "ask sums across 2"
+    waitlog $BLOG 'pipe: job 2 answers\|pipe: job 2 failed' 150
+    sleep 1
     touch $BUILD/q-done
     echo quit
 } | qemu-system-x86_64 $QEMU_BASE \
@@ -115,4 +137,7 @@ a1=$(grep -ac 'pipe: running a job' $A1LOG)
 a2=$(grep -ac 'pipe: running a job' $A2LOG)
 [ "$a1" -ge 1 ] && [ "$a2" -ge 1 ] && echo "both machines ran the task" || { echo "FAILED: the task did not reach two machines (alpha $a1, gamma $a2)"; ok=0; }
 grep -aq 'pipe: job 1 answers: 42  (agreed by 2 of 2)' $BLOG && echo "the two answers agreed: 42 by 2 of 2" || { echo "FAILED: no verified agreement"; ok=0; }
-[ $ok = 1 ] && echo "a quorum agrees on a verified result" || echo "the quorum FAILED"
+grep -aq 'pipe: job 2 answers: 5050 (2 pieces, each agreed by at least 2 of 2)' $BLOG && echo "a split task across two machines: both pieces agreed, summed to 5050" || { echo "FAILED: the split quorum did not answer 5050 by agreement"; ok=0; }
+a1=$(grep -ac 'pipe: running a job' $A1LOG); a2=$(grep -ac 'pipe: running a job' $A2LOG)
+[ "$a1" -ge 3 ] && [ "$a2" -ge 3 ] && echo "each machine ran a replica of every piece (alpha $a1, gamma $a2 jobs)" || { echo "FAILED: the pieces were not spread (alpha $a1, gamma $a2)"; ok=0; }
+[ $ok = 1 ] && echo "a quorum agrees on a verified result, whole and in pieces" || echo "the quorum FAILED"

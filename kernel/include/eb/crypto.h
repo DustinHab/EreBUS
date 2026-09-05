@@ -48,6 +48,11 @@ void sha512_update(sha512_ctx *c, const void *data, u64 len);
 void sha512_final(sha512_ctx *c, u8 out[64]);
 void sha512(const void *data, u64 len, u8 out[64]);
 
+/* SHA-384: the same context and update, other starting values, 48 bytes out. */
+void sha384_init(sha512_ctx *c);
+void sha384_final(sha512_ctx *c, u8 out[48]);
+void sha384(const void *data, u64 len, u8 out[48]);
+
 /* Curve25519 scalar multiplication, RFC 7748. */
 void x25519(u8 out[32], const u8 scalar[32], const u8 point[32]);
 void x25519_base(u8 out[32], const u8 scalar[32]);

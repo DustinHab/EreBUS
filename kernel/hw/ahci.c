@@ -1,6 +1,7 @@
 /*
- * ahci.c -- SATA disks through AHCI, polled (works in early start-up and fault handlers).
- * - up to 8 disks; roles: boot disk (port 0), store, exchange disk
+ * ahci.c -- the block layer: SATA disks through AHCI, polled (works in early start-up and fault handlers),
+ *           and disks from other buses (usb, through xhci.c) registered with their own sector movers.
+ * - up to 8 disks; roles: boot disk (port 0, or a usb stick with a store), store, exchange disk
  * - store: GPT partition of the store type on the boot disk or the next, else a marked or blank next disk
  * - foreign disks are never written
  */
@@ -100,6 +101,8 @@ typedef struct {
     cmd_table  *table;
     u8         *stage;
     phys_addr   clp, fp, tp, sp;
+    blk_io      io;         /* a disk on another bus moves its sectors through this */
+    void       *io_ctx;
 } ahci_disk;
 
 static hba_mem  *hba;
@@ -277,6 +280,7 @@ static bool disk_up(ahci_disk *d, hba_port *p, u32 index)
 static bool disk_read(ahci_disk *d, u64 lba, u32 count, void *dst)
 {
     if (!d || !d->ready || count == 0) return false;
+    if (d->io) return d->io(d->io_ctx, lba, count, dst, false);
 
     u8 *out = (u8 *)dst;
     while (count > 0) {
@@ -299,6 +303,7 @@ static bool disk_read(ahci_disk *d, u64 lba, u32 count, void *dst)
 static bool disk_write(ahci_disk *d, u64 lba, u32 count, const void *src)
 {
     if (!d || !d->ready || count == 0) return false;
+    if (d->io) return d->io(d->io_ctx, lba, count, (void *)src, true);
 
     const u8 *in = (const u8 *)src;
     while (count > 0) {
@@ -376,20 +381,35 @@ static bool find_store_partition(ahci_disk *d, u64 *first, u64 *count)
     return false;
 }
 
+/* Where a disk hangs, for the log: "ahci port 0", or "usb". */
+static const char *where_of(const ahci_disk *d)
+{
+    static char where[24];
+    if (d->io) return "usb";
+    const char *p = "ahci port ";
+    u32 n = 0;
+    while (p[n]) { where[n] = p[n]; n++; }
+    u32 v = d->index;
+    if (v >= 10) where[n++] = (char)('0' + v / 10);
+    where[n++] = (char)('0' + v % 10);
+    where[n] = 0;
+    return where;
+}
+
 static bool claim(ahci_disk *d, u64 base, u64 span, bool take_blank)
 {
     static u8 sector[BLK_SECTOR_SIZE];
     static u8 probe[64 * BLK_SECTOR_SIZE];
-    u32 port = d->index;
+    const char *where = where_of(d);
     const char *what = base ? "the partition" : "the disk";
 
     if (span < STORE_MIN_SECTORS) {
-        kprintf("blk:  %s on port %u is too small for a store\n", what, port);
+        kprintf("blk:  %s on %s is too small for a store\n", what, where);
         return false;
     }
     if (!disk_read(d, base, 1, sector)) return false;
     if (memcmp(sector, STORE_MARK, sizeof(STORE_MARK) - 1) == 0) {
-        kprintf("blk:  %s on port %u carries the store mark; it is the store\n", what, port);
+        kprintf("blk:  %s on %s carries the store mark; it is the store\n", what, where);
         return true;
     }
 
@@ -397,22 +417,22 @@ static bool claim(ahci_disk *d, u64 base, u64 span, bool take_blank)
         if (!disk_read(d, base + lba, 64, probe)) return false;
         for (u32 i = 0; i < sizeof(probe); i++) {
             if (!probe[i]) continue;
-            kprintf("blk:  %s on port %u carries something that is not ours; "
-                    "nothing will be written to it\n", what, port);
+            kprintf("blk:  %s on %s carries something that is not ours; "
+                    "nothing will be written to it\n", what, where);
             return false;
         }
     }
     if (!take_blank) {
-        kprintf("blk:  a blank disk on port %u; 'settle on disk %u' in the terminal would make it the store\n",
-                port, (u32)(d - disks) + 1);
+        kprintf("blk:  a blank disk on %s; 'settle on disk %u' in the terminal would make it the store\n",
+                where, (u32)(d - disks) + 1);
         return false;
     }
 
     memset(sector, 0, BLK_SECTOR_SIZE);
     memcpy(sector, STORE_MARK, sizeof(STORE_MARK) - 1);
     if (!disk_write(d, base, 1, sector)) return false;
-    kprintf("blk:  a blank %s on port %u; it is the store now and carries the store mark\n",
-            base ? "partition" : "disk", port);
+    kprintf("blk:  a blank %s on %s; it is the store now and carries the store mark\n",
+            base ? "partition" : "disk", where);
     return true;
 }
 
@@ -520,6 +540,71 @@ bool blk_adopt(u32 which, u64 first, u64 count)
     present = true;
     return true;
 }
+
+/* --- a disk from another bus ------------------------------------------- */
+
+i32 blk_add(const char *model, u64 sectors, blk_io io, void *ctx)
+{
+    if (ndisks >= DISK_MAX || !io || sectors == 0) return -1;
+    ahci_disk *d = &disks[ndisks];
+    memset(d, 0, sizeof(*d));
+    d->index = 0x100 + ndisks;                  /* past any ahci port */
+    d->sectors = sectors;
+    d->io = io;
+    d->io_ctx = ctx;
+    u32 n = 0;
+    while (model && model[n] && n < 40) { d->model[n] = model[n]; n++; }
+    d->model[n] = 0;
+    d->ready = true;
+    i32 which = (i32)ndisks;
+    ndisks++;
+
+    /* The roles, looked at anew. A stick carrying a store partition
+     * on a machine with no store yet is the store -- and the disk the
+     * machine booted from, since that is what such a stick is for.
+     * Beside a machine that has its store, such a stick keeps to
+     * itself: it is this system's own, not an exchange disk whose
+     * files would be taken in. A plain disk is the exchange disk
+     * when none stands on sata. */
+    u64 first = 0, count = 0;
+    bool ours = find_store_partition(d, &first, &count);
+    if (!present && ours) {
+        kprintf("blk:  a store partition on the usb disk, %llu sectors from sector %llu\n",
+                count, first);
+        if (claim(d, first, count, true)) {
+            store_p = d;
+            store_base = first;
+            store_span = count;
+            present = true;
+            if (!boot_p) boot_p = d;
+            return which;
+        }
+    }
+    if (ours) {
+        kprintf("blk:  the usb disk carries a store of its own; the machine keeps the one it has\n");
+    } else if (!aux_p) {
+        aux_p = d;
+        kprintf("blk:  the usb disk is the exchange disk, %llu sectors\n", sectors);
+    }
+    return which;
+}
+
+bool blk_disk_on_usb(u32 which) { return which < ndisks && disks[which].io != NULL; }
+
+void blk_remove(i32 which)
+{
+    if (which < 0 || (u32)which >= ndisks) return;
+    disks[which].ready = false;
+    if (aux_p == &disks[which]) aux_p = NULL;
+}
+
+const char *blk_disk_where(u32 which)
+{
+    if (which >= ndisks) return "nowhere";
+    return where_of(&disks[which]);
+}
+
+bool blk_store_on_usb(void) { return present && store_p && store_p->io; }
 
 /* --- by number --------------------------------------------------------- */
 

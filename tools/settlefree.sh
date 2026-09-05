@@ -60,7 +60,7 @@ grep -a 'blk:\|snap:' $LOG2 | cut -c1-110
 
 echo "--- the checks ---"
 ok=1
-if grep -aq 'blank partition on port 1; it is the store now' $LOG1; then echo "a store was made in the free space"; else echo "FAILED: no store was made"; ok=0; fi
+if grep -aq 'blank partition on ahci port 1; it is the store now' $LOG1; then echo "a store was made in the free space"; else echo "FAILED: no store was made"; ok=0; fi
 if [ "$before" = "$after" ]; then echo "the other partition is byte for byte as it was"; else echo "FAILED: the other partition changed"; ok=0; fi
 if sgdisk -p $BUILD/free.img 2>/dev/null | grep -q 'EREBUS STORE'; then echo "the table shows the store beside it"; else echo "FAILED: no store in the table"; ok=0; fi
 if grep -aq 'graph restored from generation' $LOG2; then echo "the second boot found the graph"; else echo "FAILED: the graph was not found"; ok=0; fi

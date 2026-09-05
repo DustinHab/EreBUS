@@ -1,7 +1,8 @@
 /*
  * update.c -- self-update from a signed release over the network.
- * - checks a 'version' file under the release base; if newer, fetches kernel.elf and kernel.elf.sig
- * - verifies the detached ed25519 signature against the built-in release key; installs only if it checks
+ * - reads the small 'version' file under the release base first; only a newer one fetches update.pkg
+ *   (a source without the file is asked for the package, which names its version itself)
+ * - verifies the package's ed25519 signature against the built-in release key; installs only if it checks
  * - runs in the network thread; the loader's kernel.old rollback is the last net
  */
 #include <eb/update.h>
@@ -128,6 +129,40 @@ static void do_check(bool manual)
     char base[192];
     base_url(base, sizeof base);
     kprintf("update: checking %s\n", base);
+
+    /* A small file under the base names the newest version. When it is
+     * not newer than the running one, the package is not fetched at all.
+     * A source without the file -- an older release -- is asked for the
+     * package as before, which says the version itself. */
+    {
+        static u8 vbuf[8192];
+        char vurl[256];
+        u32 vl = join(vurl, sizeof vurl, base, "/version");
+        u32 voff = 0, vlen = 0;
+        if (net_fetch(vurl, vl, vbuf, sizeof vbuf, &voff, &vlen, NULL) && vlen > 0) {
+            char named[25];
+            u32 ni = 0;
+            for (u32 i = 0; i < vlen && ni < 24; i++) {
+                char c = (char)vbuf[voff + i];
+                if (c == '\n' || c == '\r' || c == ' ' || c == 0) break;
+                if (c >= 0x20 && c < 0x7F) named[ni++] = c;
+            }
+            named[ni] = 0;
+            kprintf("update: the source names version '%s', running %s\n", named, erebus_version);
+            if (ni && ver_cmp(named, erebus_version) <= 0) {
+                if (manual) {
+                    journal_says("update", "already current");
+                    char m[96];
+                    u32 a = 0; const char *s = "already current, at ";
+                    while (*s) m[a++] = *s++;
+                    for (u32 i = 0; erebus_version[i] && a < sizeof(m) - 1; i++) m[a++] = erebus_version[i];
+                    m[a] = 0;
+                    report(m);
+                }
+                return;
+            }
+        }
+    }
 
     object *k = obj_create(TYPE_BYTES, KERNEL_MAX, 0);
     if (!k) return;

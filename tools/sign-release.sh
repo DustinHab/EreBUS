@@ -2,8 +2,9 @@
 # sign-release.sh -- build the signed update package the self-updater fetches.
 #   build/update.pkg = "EBUPDATE" (8) | signature (64) | version (24, padded) | kernel.elf
 # The signature is ed25519 over the version and kernel together, made with
-# release-key.pem at the repo root (never committed). Publish update.pkg as
-# a release asset; the machine fetches <base>/update.pkg.
+# release-key.pem at the repo root (never committed). Publish update.pkg and
+# build/version as release assets ("update.pkg", "version"); the machine
+# reads <base>/version first and fetches <base>/update.pkg only when newer.
 cd "$(dirname "$0")/.."
 KEY=${RELEASE_KEY:-release-key.pem}
 [ -f "$KEY" ] || { echo "no release key at $KEY"; exit 1; }
@@ -23,4 +24,7 @@ cat build/pkg.sig  >> build/update.pkg
 cat build/pkg.signed >> build/update.pkg
 rm -f build/pkg.signed build/pkg.sig
 
-echo "built build/update.pkg ($(wc -c < build/update.pkg) bytes) for version $VER"
+# The small file the updater reads first: publish it as the asset "version" beside update.pkg.
+printf '%s\n' "$VER" > build/version
+
+echo "built build/update.pkg ($(wc -c < build/update.pkg) bytes) and build/version for version $VER"

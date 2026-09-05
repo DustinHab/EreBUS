@@ -1,6 +1,7 @@
 /*
  * pki_selftest.c -- known answers for the certificate checker's arithmetic, run before https may claim identity.
- * - ECDSA P-256: RFC 6979 A.2.5 (the "sample" and "test" signatures over SHA-256), and a bent one refused
+ * - SHA-384("abc") (FIPS 180-4)
+ * - ECDSA: RFC 6979 A.2.5 (P-256, SHA-256, "sample" and "test") and A.2.6 (P-384, SHA-384, "sample"); bent ones refused
  * - RSA-2048: a fixed key with one PKCS#1 v1.5 and one PSS signature made by openssl over SHA-256("sample"), each also bent
  * - times: a UTCTime and a GeneralizedTime against their known second counts
  */
@@ -27,6 +28,29 @@ static const u8 TEST_R[32] = {
 static const u8 TEST_S[32] = {
     0x01,0x9F,0x41,0x13,0x74,0x2A,0x2B,0x14,0xBD,0x25,0x92,0x6B,0x49,0xC6,0x49,0x15,
     0x5F,0x26,0x7E,0x60,0xD3,0x81,0x4B,0x4C,0x0C,0xC8,0x42,0x50,0xE4,0x6F,0x00,0x83 };
+
+/* RFC 6979 A.2.6: P-384 with SHA-384, the message "sample". */
+static const u8 P384_PUB[97] = {
+    0x04,
+    0xEC,0x3A,0x4E,0x41,0x5B,0x4E,0x19,0xA4,0x56,0x86,0x18,0x02,0x9F,0x42,0x7F,0xA5,
+    0xDA,0x9A,0x8B,0xC4,0xAE,0x92,0xE0,0x2E,0x06,0xAA,0xE5,0x28,0x6B,0x30,0x0C,0x64,
+    0xDE,0xF8,0xF0,0xEA,0x90,0x55,0x86,0x60,0x64,0xA2,0x54,0x51,0x54,0x80,0xBC,0x13,
+    0x80,0x15,0xD9,0xB7,0x2D,0x7D,0x57,0x24,0x4E,0xA8,0xEF,0x9A,0xC0,0xC6,0x21,0x89,
+    0x67,0x08,0xA5,0x93,0x67,0xF9,0xDF,0xB9,0xF5,0x4C,0xA8,0x4B,0x3F,0x1C,0x9D,0xB1,
+    0x28,0x8B,0x23,0x1C,0x3A,0xE0,0xD4,0xFE,0x73,0x44,0xFD,0x25,0x33,0x26,0x47,0x20 };
+static const u8 P384_R[48] = {
+    0x94,0xED,0xBB,0x92,0xA5,0xEC,0xB8,0xAA,0xD4,0x73,0x6E,0x56,0xC6,0x91,0x91,0x6B,
+    0x3F,0x88,0x14,0x06,0x66,0xCE,0x9F,0xA7,0x3D,0x64,0xC4,0xEA,0x95,0xAD,0x13,0x3C,
+    0x81,0xA6,0x48,0x15,0x2E,0x44,0xAC,0xF9,0x6E,0x36,0xDD,0x1E,0x80,0xFA,0xBE,0x46 };
+static const u8 P384_S[48] = {
+    0x99,0xEF,0x4A,0xEB,0x15,0xF1,0x78,0xCE,0xA1,0xFE,0x40,0xDB,0x26,0x03,0x13,0x8F,
+    0x13,0x0E,0x74,0x0A,0x19,0x62,0x45,0x26,0x20,0x3B,0x63,0x51,0xD0,0xA3,0xA9,0x4F,
+    0xA3,0x29,0xC1,0x45,0x78,0x6E,0x67,0x9E,0x7B,0x82,0xC7,0x1A,0x38,0x62,0x8A,0xC8 };
+
+static const u8 SHA384_ABC[48] = {
+    0xcb,0x00,0x75,0x3f,0x45,0xa3,0x5e,0x8b,0xb5,0xa0,0x3d,0x69,0x9a,0xc6,0x50,0x07,
+    0x27,0x2c,0x32,0xab,0x0e,0xde,0xd1,0x63,0x1a,0x8b,0x60,0x5a,0x43,0xff,0x5b,0xed,
+    0x80,0x86,0x07,0x2b,0xa1,0xe7,0xcc,0x23,0x58,0xba,0xec,0xa1,0x34,0xc8,0x25,0xa7 };
 
 /* RSA-2048 vectors: a fixed key, SHA-256("sample"), one signature in each padding. */
 static const u8 RSA_N[256] = {
@@ -87,50 +111,75 @@ static const u8 RSA_SIG_PSS[256] = {
 
 bool pki_selftest(void)
 {
-    u8 h[32];
+    u8 h[64];
+
+    /* SHA-384. */
+    sha384("abc", 3, h);
+    for (u32 i = 0; i < 48; i++)
+        if (h[i] != SHA384_ABC[i]) { kprintf("pki: sha384 vector failed\n"); return false; }
 
     /* ECDSA P-256, RFC 6979 A.2.5. */
     sha256("sample", 6, h);
-    if (!p256_verify(P256_PUB, h, SAMPLE_R, 32, SAMPLE_S, 32)) {
-        kprintf("pki: ecdsa vector 'sample' failed\n"); return false;
+    if (!ec_verify(EC_P256, P256_PUB, 65, h, 32, SAMPLE_R, 32, SAMPLE_S, 32)) {
+        kprintf("pki: ecdsa p-256 vector 'sample' failed\n"); return false;
     }
     sha256("test", 4, h);
-    if (!p256_verify(P256_PUB, h, TEST_R, 32, TEST_S, 32)) {
-        kprintf("pki: ecdsa vector 'test' failed\n"); return false;
+    if (!ec_verify(EC_P256, P256_PUB, 65, h, 32, TEST_R, 32, TEST_S, 32)) {
+        kprintf("pki: ecdsa p-256 vector 'test' failed\n"); return false;
     }
-    if (p256_verify(P256_PUB, h, SAMPLE_R, 32, SAMPLE_S, 32)) {
+    if (ec_verify(EC_P256, P256_PUB, 65, h, 32, SAMPLE_R, 32, SAMPLE_S, 32)) {
         kprintf("pki: ecdsa accepted a signature over another message\n"); return false;
     }
     {
         u8 bent[32];
         for (u32 i = 0; i < 32; i++) bent[i] = TEST_S[i];
         bent[31] ^= 1;
-        if (p256_verify(P256_PUB, h, TEST_R, 32, bent, 32)) {
+        if (ec_verify(EC_P256, P256_PUB, 65, h, 32, TEST_R, 32, bent, 32)) {
             kprintf("pki: ecdsa accepted a bent signature\n"); return false;
+        }
+    }
+
+    /* ECDSA P-384, RFC 6979 A.2.6. */
+    sha384("sample", 6, h);
+    if (!ec_verify(EC_P384, P384_PUB, 97, h, 48, P384_R, 48, P384_S, 48)) {
+        kprintf("pki: ecdsa p-384 vector 'sample' failed\n"); return false;
+    }
+    {
+        u8 bent[48];
+        for (u32 i = 0; i < 48; i++) bent[i] = P384_R[i];
+        bent[0] ^= 1;
+        if (ec_verify(EC_P384, P384_PUB, 97, h, 48, bent, 48, P384_S, 48)) {
+            kprintf("pki: ecdsa p-384 accepted a bent signature\n"); return false;
+        }
+        if (ec_verify(EC_P256, P256_PUB, 65, h, 48, SAMPLE_R, 32, SAMPLE_S, 32)) {
+            kprintf("pki: ecdsa p-256 accepted a signature under another hash\n"); return false;
         }
     }
 
     /* RSA-2048, both paddings. */
     sha256("sample", 6, h);
-    if (!rsa_verify_pkcs1_sha256(RSA_N, 256, RSA_E, 3, h, RSA_SIG_V15, 256)) {
+    if (!rsa_verify_pkcs1(RSA_N, 256, RSA_E, 3, HASH_SHA256, h, RSA_SIG_V15, 256)) {
         kprintf("pki: rsa pkcs1 vector failed\n"); return false;
     }
-    if (!rsa_verify_pss_sha256(RSA_N, 256, RSA_E, 3, h, RSA_SIG_PSS, 256)) {
+    if (!rsa_verify_pss(RSA_N, 256, RSA_E, 3, HASH_SHA256, h, RSA_SIG_PSS, 256)) {
         kprintf("pki: rsa pss vector failed\n"); return false;
     }
-    if (rsa_verify_pkcs1_sha256(RSA_N, 256, RSA_E, 3, h, RSA_SIG_PSS, 256) ||
-        rsa_verify_pss_sha256(RSA_N, 256, RSA_E, 3, h, RSA_SIG_V15, 256)) {
+    if (rsa_verify_pkcs1(RSA_N, 256, RSA_E, 3, HASH_SHA256, h, RSA_SIG_PSS, 256) ||
+        rsa_verify_pss(RSA_N, 256, RSA_E, 3, HASH_SHA256, h, RSA_SIG_V15, 256)) {
         kprintf("pki: rsa accepted a signature under the other padding\n"); return false;
+    }
+    if (rsa_verify_pkcs1(RSA_N, 256, RSA_E, 3, HASH_SHA384, h, RSA_SIG_V15, 256)) {
+        kprintf("pki: rsa accepted a signature under another hash\n"); return false;
     }
     {
         u8 bent[256];
         for (u32 i = 0; i < 256; i++) bent[i] = RSA_SIG_V15[i];
         bent[100] ^= 1;
-        if (rsa_verify_pkcs1_sha256(RSA_N, 256, RSA_E, 3, h, bent, 256)) {
+        if (rsa_verify_pkcs1(RSA_N, 256, RSA_E, 3, HASH_SHA256, h, bent, 256)) {
             kprintf("pki: rsa accepted a bent signature\n"); return false;
         }
         h[0] ^= 1;
-        if (rsa_verify_pss_sha256(RSA_N, 256, RSA_E, 3, h, RSA_SIG_PSS, 256)) {
+        if (rsa_verify_pss(RSA_N, 256, RSA_E, 3, HASH_SHA256, h, RSA_SIG_PSS, 256)) {
             kprintf("pki: rsa pss accepted a signature over another hash\n"); return false;
         }
     }

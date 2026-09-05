@@ -1755,6 +1755,34 @@ static void cmd_vouch(term_session *s, const char *rest)
     }
 }
 
+/* "unvouch <node>": withdraw the vouch; nodes that pinned the key on
+ * our word drop it, those that met the node since keep it. */
+static void cmd_unvouch(term_session *s, const char *rest)
+{
+    if (!rest[0]) { t_say(s, "withdraw the vouch for which node?  'unvouch <node>'."); return; }
+    char name[64];
+    u32 nl = 0;
+    while (rest[nl] && nl < sizeof(name) - 1) { name[nl] = rest[nl]; nl++; }
+    while (nl > 0 && name[nl - 1] == ' ') nl--;
+    name[nl] = 0;
+
+    nodes_apply();
+    i32 i = nodes_by_name(name);
+    if (i < 0) {
+        t_puts(s, "no node called '");
+        t_puts(s, name);
+        t_say(s, "' in nodes.  'nodes' lists them.");
+        return;
+    }
+    if (pipe_unvouch((u32)i)) {
+        t_puts(s, "the vouch for ");
+        t_puts(s, name);
+        t_say(s, " is withdrawn; nodes that pinned its key on your word drop it.");
+    } else {
+        t_say(s, "the withdrawal could not be sent.  the journal says why.");
+    }
+}
+
 /* "update <node>", "update <node> with <kernel.elf>", "update all". */
 static void cmd_update(term_session *s, const char *rest)
 {
@@ -2081,6 +2109,7 @@ static void cmd_help(term_session *s)
     t_say(s, "  forget <node>    drop its row; the next handshake meets it fresh");
     t_say(s, "  trust <name> ssh-ed25519 ...   write a node's key before meeting it");
     t_say(s, "  vouch <node>     tell known nodes its key is one you recognise");
+    t_say(s, "  unvouch <node>   withdraw that; nodes that pinned the key on your word drop it");
     t_say(s, "  renew key        make a fresh door key and tell known nodes");
     t_say(s, "  update <node>    send this kernel to that node; it installs and restarts.  'update all'; '... with <kernel.elf>'");
     t_say(s, "  update check     ask the release source whether a newer version is out; 'update | auto' keeps it current on its own");
@@ -2314,6 +2343,7 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "allow", &rest))   cmd_allow(s, rest);
     else if (word_starts(line, "forget", &rest))  cmd_forget(s, rest);
     else if (word_starts(line, "trust", &rest))   cmd_trust(s, rest);
+    else if (word_starts(line, "unvouch", &rest)) cmd_unvouch(s, rest);
     else if (word_starts(line, "vouch", &rest))   cmd_vouch(s, rest);
     else if (word_starts(line, "renew", &rest))   cmd_renew(s, rest);
     else if (word_starts(line, "update", &rest))  cmd_update(s, rest);

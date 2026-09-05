@@ -2,3 +2,37 @@ sectigo-dv-e36.pem  | Sectigo DV E36
 letsencrypt-yr1.pem | Let's Encrypt YR1
 letsencrypt-yr2.pem | Let's Encrypt YR2
 letsencrypt-yr3.pem | Let's Encrypt YR3
+root-isrg-root-x1.pem | ISRG Root X1
+root-isrg-root-x2.pem | ISRG Root X2
+root-usertrust-rsa-certification-authority.pem | USERTrust RSA Certification Authority
+root-usertrust-ecc-certification-authority.pem | USERTrust ECC Certification Authority
+root-sectigo-public-server-authentication-root-r46.pem | Sectigo Public Server Authentication Root R46
+root-sectigo-public-server-authentication-root-e46.pem | Sectigo Public Server Authentication Root E46
+root-comodo-rsa-certification-authority.pem | COMODO RSA Certification Authority
+root-comodo-ecc-certification-authority.pem | COMODO ECC Certification Authority
+root-digicert-global-root-g2.pem | DigiCert Global Root G2
+root-digicert-global-root-g3.pem | DigiCert Global Root G3
+root-globalsign-root-ca-r3.pem | GlobalSign Root CA - R3
+root-globalsign-root-ca-r6.pem | GlobalSign Root CA - R6
+root-globalsign-root-r46.pem | GlobalSign Root R46
+root-globalsign-root-e46.pem | GlobalSign Root E46
+root-gts-root-r1.pem | GTS Root R1
+root-gts-root-r3.pem | GTS Root R3
+root-gts-root-r4.pem | GTS Root R4
+root-amazon-root-ca-1.pem | Amazon Root CA 1
+root-amazon-root-ca-2.pem | Amazon Root CA 2
+root-amazon-root-ca-3.pem | Amazon Root CA 3
+root-amazon-root-ca-4.pem | Amazon Root CA 4
+root-starfield-services-root-certificate-authority-g2.pem | Starfield Services Root Certificate Authority - G2
+root-starfield-root-certificate-authority-g2.pem | Starfield Root Certificate Authority - G2
+root-go-daddy-root-certificate-authority-g2.pem | Go Daddy Root Certificate Authority - G2
+root-microsoft-rsa-root-certificate-authority-2017.pem | Microsoft RSA Root Certificate Authority 2017
+root-microsoft-ecc-root-certificate-authority-2017.pem | Microsoft ECC Root Certificate Authority 2017
+root-harica-tls-rsa-root-ca-2021.pem | HARICA TLS RSA Root CA 2021
+root-harica-tls-ecc-root-ca-2021.pem | HARICA TLS ECC Root CA 2021
+root-hellenic-academic-and-research-institutions-rootca-2015.pem | Hellenic Academic and Research Institutions RootCA 2015
+root-ssl-com-tls-rsa-root-ca-2022.pem | SSL.com TLS RSA Root CA 2022
+root-ssl-com-tls-ecc-root-ca-2022.pem | SSL.com TLS ECC Root CA 2022
+root-t-telesec-globalroot-class-2.pem | T-TeleSec GlobalRoot Class 2
+root-d-trust-br-root-ca-1-2020.pem | D-TRUST BR Root CA 1 2020
+root-d-trust-ev-root-ca-1-2020.pem | D-TRUST EV Root CA 1 2020

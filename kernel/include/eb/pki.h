@@ -1,41 +1,55 @@
 /*
  * pki.h -- the signatures under certificates, and the certificates themselves.
- * - ECDSA over P-256 and RSA (PKCS#1 v1.5 and PSS), both with SHA-256: what the chains of github.com and its release cdn use
+ * - ECDSA over P-256 and P-384, RSA (PKCS#1 v1.5 and PSS) with SHA-256, SHA-384 or SHA-512
  * - X.509: parsing, host names, dates, and the walk from a server's chain to a trusted authority
- * - an authority is a SubjectPublicKeyInfo; the built-in ones are the intermediates that sign the release host and cdn
+ * - an authority is a certificate (the built-in roots) or a bare SubjectPublicKeyInfo (from the settings)
  */
 #ifndef EB_PKI_H
 #define EB_PKI_H
 
 #include <eb/types.h>
 
-/* ECDSA P-256 with SHA-256. pub is the uncompressed point (04, x, y);
- * r and s are big-endian with any leading zeros. */
-bool p256_verify(const u8 pub[65], const u8 hash[32],
-                 const u8 *r, u32 rlen, const u8 *s, u32 slen);
-bool p256_point_ok(const u8 pub[65]);
-/* The same with the signature as DER (SEQUENCE of r and s), the form certificates and TLS carry. */
-bool p256_verify_der(const u8 pub[65], const u8 hash[32], const u8 *sig, u32 siglen);
+#define HASH_NONE   0
+#define HASH_SHA256 1
+#define HASH_SHA384 2
+#define HASH_SHA512 3
 
-/* RSA with SHA-256 under a modulus n and exponent e (big-endian, leading
- * zeros allowed) of 2048 to 4096 bits. The signature must be as long as
- * the modulus. PSS with a 32-byte salt, as TLS 1.3 requires. */
-bool rsa_verify_pkcs1_sha256(const u8 *n, u32 nlen, const u8 *e, u32 elen,
-                             const u8 hash[32], const u8 *sig, u32 siglen);
-bool rsa_verify_pss_sha256(const u8 *n, u32 nlen, const u8 *e, u32 elen,
-                           const u8 hash[32], const u8 *sig, u32 siglen);
+u32  pki_hash_len(u8 kind);
+void pki_hash(u8 kind, const void *data, u64 len, u8 *out);   /* out holds pki_hash_len bytes */
+
+/* The curves. pub is the uncompressed point: 04, x, y -- 65 bytes for
+ * P-256, 97 for P-384. The hash is taken by its leftmost bytes when it
+ * is longer than the curve; r and s are big-endian with any leading zeros. */
+#define EC_P256 0
+#define EC_P384 1
+bool ec_point_ok(u32 curve, const u8 *pub, u32 publen);
+bool ec_verify(u32 curve, const u8 *pub, u32 publen, const u8 *hash, u32 hlen,
+               const u8 *r, u32 rlen, const u8 *s, u32 slen);
+/* The same with the signature as DER (SEQUENCE of r and s), the form certificates and TLS carry. */
+bool ec_verify_der(u32 curve, const u8 *pub, u32 publen, const u8 *hash, u32 hlen,
+                   const u8 *sig, u32 siglen);
+
+/* RSA under a modulus n and exponent e (big-endian, leading zeros
+ * allowed) of 2048 to 4096 bits; the signature must be as long as the
+ * modulus. PSS with a salt as long as the hash, as TLS 1.3 requires. */
+bool rsa_verify_pkcs1(const u8 *n, u32 nlen, const u8 *e, u32 elen,
+                      u8 hash_kind, const u8 *hash, const u8 *sig, u32 siglen);
+bool rsa_verify_pss(const u8 *n, u32 nlen, const u8 *e, u32 elen,
+                    u8 hash_kind, const u8 *hash, const u8 *sig, u32 siglen);
 
 #define KEY_NONE 0
-#define KEY_P256 1
-#define KEY_RSA  2
+#define KEY_RSA  1
+#define KEY_P256 2
+#define KEY_P384 3
 
-#define SIG_NONE         0
-#define SIG_ECDSA_SHA256 1
-#define SIG_RSA_SHA256   2
+#define SIG_NONE      0
+#define SIG_ECDSA     1
+#define SIG_RSA_PKCS1 2
 
 typedef struct {
     u8        kind;
-    u8        point[65];          /* KEY_P256 */
+    u8        point[97];          /* KEY_P256, KEY_P384: the uncompressed point */
+    u32       pointlen;
     const u8 *n; u32 nlen;        /* KEY_RSA: modulus and exponent, into the source bytes */
     const u8 *e; u32 elen;
 } pki_key;
@@ -49,8 +63,8 @@ typedef struct {
     const u8 *issuer;  u32 issuerlen;   /* the Name, whole element */
     const u8 *subject; u32 subjectlen;
     i64       not_before, not_after;    /* seconds since 1970 */
-    u8        sigalg;                   /* SIG_* */
-    const u8 *sig;     u32 siglen;
+    u8        sig, hash;                /* SIG_* and HASH_* of the signature */
+    const u8 *sigbytes; u32 siglen;
     const u8 *spki;    u32 spkilen;     /* the SubjectPublicKeyInfo, whole element */
     pki_key   key;                      /* kind KEY_NONE when the key is not supported */
     const u8 *san;     u32 sanlen;      /* the GeneralNames, or NULL */
@@ -64,8 +78,10 @@ bool x509_parse(const u8 *der, u32 len, x509_cert *out);
 bool x509_matches_host(const x509_cert *c, const char *host, u32 hlen);
 bool x509_check_signature(const x509_cert *c, const pki_key *issuer);
 
-/* A trusted authority: a name for the log and its SubjectPublicKeyInfo. */
-typedef struct { const char *name; const u8 *spki; u32 len; } pki_authority;
+/* A trusted authority: a name for the log and its bytes -- a whole
+ * certificate (whose subject then narrows where it is tried) or a bare
+ * SubjectPublicKeyInfo. */
+typedef struct { const char *name; const u8 *der; u32 len; } pki_authority;
 
 u32                  pki_builtin_count(void);
 const pki_authority *pki_builtin(u32 i);
@@ -95,7 +111,7 @@ x509_status x509_verify_chain(const u8 *const *ders, const u32 *lens, u32 count,
                               x509_cert *leaf, const char **by);
 const char *x509_status_text(x509_status s);
 
-/* Known-answer tests: RFC 6979 for the curve, fixed RSA vectors, dates. */
+/* Known-answer tests: RFC 6979 for both curves, fixed RSA vectors, the hashes, dates. */
 bool pki_selftest(void);
 
 #endif /* EB_PKI_H */

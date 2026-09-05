@@ -59,4 +59,17 @@ i32  nodes_trust(const char *name, const u8 key[32]);
  * name, address and rights and carries the new key from here on. */
 bool nodes_rekey(u32 i, const u8 newkey[32]);
 
+/* How a row's key came to be here -- the "via" column: met in a
+ * handshake, written by hand, or pinned on another node's vouch (whose
+ * key is kept, so that node's withdrawal can undo it). */
+#define NODE_VIA_MET     0
+#define NODE_VIA_HAND    1
+#define NODE_VIA_VOUCHED 2
+void nodes_note_via(u32 i, u8 via, const u8 voucher[32]);
+
+/* A voucher withdraws its vouch for key: the row goes when it is still
+ * the vouch that put it here. 1 dropped, 2 kept (met since, or written
+ * by hand, or vouched by another), 0 no such row. */
+u32  nodes_unvouch(const u8 voucher[32], const u8 key[32]);
+
 #endif /* EB_NODES_H */

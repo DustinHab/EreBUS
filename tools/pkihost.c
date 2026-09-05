@@ -3,7 +3,7 @@
  *   pkihost self                                             the known-answer tests
  *   pkihost chain <host> <now|unix seconds> [-a auth.der]... <leaf.der> [more.der]...
  *                                                            the walk; prints the outcome, exit 0 when verified
- *   pkihost sig <spki.der> <0403|0804> <content> <sig>       a CertificateVerify-style signature over the content
+ *   pkihost sig <spki.der> <0403|0503|0804|0805|0806> <content> <sig>   a CertificateVerify-style signature over the content
  * The same kernel files as on the machine, against libc only.
  */
 #include <stdio.h>
@@ -52,11 +52,9 @@ static int do_chain(int argc, char **argv)
         if (strcmp(argv[i], "-a") == 0 && i + 1 < argc) {
             unsigned n;
             unsigned char *d = slurp(argv[++i], &n);
-            x509_cert c;
-            if (!x509_parse(d, n, &c)) { printf("authority %s: unreadable\n", argv[i]); return 2; }
             extra[nextra].name = argv[i];
-            extra[nextra].spki = c.spki;
-            extra[nextra].len = c.spkilen;
+            extra[nextra].der = d;
+            extra[nextra].len = n;
             nextra++;
         } else {
             if (count >= X509_MAX_CHAIN) break;
@@ -87,14 +85,19 @@ static int do_sig(int argc, char **argv)
 
     pki_key k;
     if (!pki_key_parse(spki, kl, &k)) { printf("key unreadable\n"); return 2; }
-    u8 h[32];
-    sha256(content, cl, h);
-    bool ok = false;
-    if (strcmp(scheme, "0403") == 0 && k.kind == KEY_P256)
-        ok = p256_verify_der(k.point, h, sig, sl);
-    else if (strcmp(scheme, "0804") == 0 && k.kind == KEY_RSA)
-        ok = rsa_verify_pss_sha256(k.n, k.nlen, k.e, k.elen, h, sig, sl);
-    else { printf("scheme and key do not fit\n"); return 1; }
+    u8 hk = HASH_NONE, want = KEY_NONE;
+    u32 curve = EC_P256;
+    if (strcmp(scheme, "0403") == 0)      { hk = HASH_SHA256; want = KEY_P256; }
+    else if (strcmp(scheme, "0503") == 0) { hk = HASH_SHA384; want = KEY_P384; curve = EC_P384; }
+    else if (strcmp(scheme, "0804") == 0) { hk = HASH_SHA256; want = KEY_RSA; }
+    else if (strcmp(scheme, "0805") == 0) { hk = HASH_SHA384; want = KEY_RSA; }
+    else if (strcmp(scheme, "0806") == 0) { hk = HASH_SHA512; want = KEY_RSA; }
+    if (hk == HASH_NONE || k.kind != want) { printf("scheme and key do not fit\n"); return 1; }
+    u8 h[64];
+    pki_hash(hk, content, cl, h);
+    bool ok = want == KEY_RSA
+            ? rsa_verify_pss(k.n, k.nlen, k.e, k.elen, hk, h, sig, sl)
+            : ec_verify_der(curve, k.point, k.pointlen, h, pki_hash_len(hk), sig, sl);
     printf("%s\n", ok ? "signature verified" : "signature did not verify");
     return ok ? 0 : 1;
 }
@@ -108,6 +111,6 @@ int main(int argc, char **argv)
     }
     if (argc >= 2 && strcmp(argv[1], "chain") == 0) return do_chain(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "sig") == 0) return do_sig(argc, argv);
-    fprintf(stderr, "usage: pkihost self | chain <host> <now> [-a auth.der]... leaf.der [more.der]... | sig <spki.der> <0403|0804> <content> <sig>\n");
+    fprintf(stderr, "usage: pkihost self | chain <host> <now> [-a auth.der]... leaf.der [more.der]... | sig <spki.der> <scheme> <content> <sig>\n");
     return 2;
 }

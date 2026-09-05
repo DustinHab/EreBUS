@@ -1,10 +1,13 @@
 /*
- * xhci.c -- USB keyboards and mice via xHCI, polled by a thread.
+ * xhci.c -- USB keyboards, mice and disks via xHCI, polled by a thread.
  * - firmware handoff, port power, Intel port routing, root ports, hubs (route string, TT), hotplug
  * - keyboards: boot protocol, 8-byte reports, repeat in the driver
  * - mice: report descriptor parsed (buttons, axes, wheel, report id); boot protocol as fallback
  * - reports are fed into the PS/2 queues as scancode set 1 / mouse packets
- * - not driven: USB disks, isochronous endpoints
+ * - disks: bulk-only transport, scsi (inquiry, test unit ready, read capacity, read/write 10), 64 KiB per
+ *   transfer through sixteen chained blocks; registered with the block layer (blk_add), which may make one
+ *   the store; the controller is held by one thread at a time
+ * - not driven: isochronous endpoints, disks with sectors other than 512 bytes
  */
 #include <eb/xhci.h>
 #include <eb/pci.h>
@@ -17,6 +20,7 @@
 #include <eb/fmt.h>
 #include <eb/string.h>
 #include <eb/journal.h>
+#include <eb/blk.h>
 
 /* ------------------------------------------------------------------ */
 /* Registers                                                           */
@@ -79,10 +83,12 @@ typedef struct {
 #define TRB_CYCLE      (1u << 0)
 #define TRB_TOGGLE     (1u << 1)
 #define TRB_ISP        (1u << 2)
+#define TRB_CHAIN      (1u << 4)
 #define TRB_IOC        (1u << 5)
 #define TRB_IDT        (1u << 6)
 #define TRB_DIR_IN     (1u << 16)
 #define TRB_SLOT(s)    ((u32)(s) << 24)
+#define TRB_EP(d)      ((u32)(d) << 16)
 
 #define T_NORMAL   1
 #define T_SETUP    2
@@ -94,6 +100,8 @@ typedef struct {
 #define T_ADDRESS_DEVICE  11
 #define T_CONFIGURE_EP    12
 #define T_EVALUATE_CTX    13
+#define T_RESET_EP        14
+#define T_SET_DEQUEUE     16
 #define T_TRANSFER_EVENT  32
 #define T_COMMAND_EVENT   33
 #define T_PORT_EVENT      34
@@ -158,6 +166,22 @@ static phys_addr ring_put(ring *r, u64 param, u32 status, u32 control)
 #define KIND_MOUSE 2
 #define KIND_HUB 3
 #define KIND_OTHER 4
+#define KIND_STORAGE 5
+
+/* A disk: bulk-only transport carrying scsi commands, the way every
+ * usb stick and card reader speaks. Two bulk endpoints, a page for the
+ * command and status wrappers, and sixteen pages in a row for the data. */
+#define STORE_PAGES 16
+typedef struct {
+    bool      used;
+    ring      in, out;
+    u32       dci_in, dci_out;
+    u8        iface;
+    u8       *data; phys_addr data_pa;
+    u64       sectors;
+    u32       tag;
+    i32       disk;                       /* its number in the block layer */
+} usbstore;
 
 /* One human input on a device: a keyboard, or a mouse.
  *
@@ -204,6 +228,7 @@ typedef struct {
     u8  *buf; phys_addr buf_pa;      /* one page of transfer memory */
     u8   kind;
     char name[32];
+    usbstore st;                      /* for a disk */
 
     /* Where it hangs, for anything not plugged into the machine itself.
      * The route is the chain of hub ports the controller follows to
@@ -219,7 +244,33 @@ typedef struct {
 } usbdev;
 
 static usbdev dev[DEV_MAX];
-static u32 keyboards, mice;
+static u32 keyboards, mice, disks;
+
+/* The controller's rings and event queue are one set of state, and a
+ * disk is read from whichever thread wants its sectors while the usb
+ * thread keeps looking at ports and keys. One holder at a time, then,
+ * and the same thread may take it twice: a disk found while ports are
+ * being looked at is read for its partition table on the spot. */
+static volatile int held;
+static thread *holder;
+static u32 hold_depth;
+
+static void take(void)
+{
+    thread *me = sched_current();
+    if (held && holder == me) { hold_depth++; return; }
+    while (__atomic_exchange_n(&held, 1, __ATOMIC_ACQUIRE)) sched_yield();
+    holder = me;
+    hold_depth = 1;
+}
+
+static void give(void)
+{
+    if (hold_depth > 1) { hold_depth--; return; }
+    hold_depth = 0;
+    holder = NULL;
+    __atomic_store_n(&held, 0, __ATOMIC_RELEASE);
+}
 
 /* What the last events said, for whoever is waiting on them. */
 static struct {
@@ -660,6 +711,238 @@ static void say_where(const usbdev *d, char *out, u32 max)
 static bool device_up(const where *w);
 
 /* ------------------------------------------------------------------ */
+/* Disks                                                               */
+/* ------------------------------------------------------------------ */
+/*
+ * A usb disk is a scsi disk behind a thin wrapper: a command block goes
+ * out on the bulk-out endpoint, the data crosses on whichever endpoint
+ * its direction says, and a status block comes back on bulk-in. Every
+ * stick and card reader speaks this, and QEMU's usb-storage does too.
+ *
+ * A transfer of many pages is one transfer descriptor of chained
+ * blocks, one per page, with the completion asked for on the last and
+ * a short packet reported from any of them.
+ */
+
+static phys_addr td_trbs[STORE_PAGES + 1];
+static u32       td_off[STORE_PAGES + 1];
+static u32       td_len[STORE_PAGES + 1];
+static u32       td_n;
+
+static bool td_done(void)
+{
+    if (!last_transfer.have) return false;
+    for (u32 i = 0; i < td_n; i++) if (last_transfer.trb == td_trbs[i]) return true;
+    return false;
+}
+
+/* One bulk transfer: len bytes from pa onward, in or out. Answers how
+ * many bytes crossed, which a short packet makes fewer than asked. */
+static bool bulk(usbdev *d, bool in, phys_addr pa, u32 len, u32 *moved)
+{
+    usbstore *s = &d->st;
+    ring *r = in ? &s->in : &s->out;
+    u32 dci = in ? s->dci_in : s->dci_out;
+
+    if (moved) *moved = 0;
+    if (len == 0) return true;
+    last_transfer.have = false;
+    td_n = 0;
+    u32 off = 0;
+    while (off < len && td_n < STORE_PAGES) {
+        u32 n = len - off;
+        u32 room = (u32)(PAGE_SIZE - ((pa + off) & (PAGE_SIZE - 1)));
+        if (n > room) n = room;
+        bool last = off + n >= len;
+        td_off[td_n] = off;
+        td_len[td_n] = n;
+        td_trbs[td_n++] = ring_put(r, pa + off, n,
+                                   TRB_TYPE(T_NORMAL) | TRB_ISP | (last ? TRB_IOC : TRB_CHAIN));
+        off += n;
+    }
+    db[d->slot] = dci;
+    if (!wait_ns(5000000000ULL, td_done)) return false;
+    if (last_transfer.code != 1 && last_transfer.code != 13) return false;
+    if (moved) {
+        for (u32 i = 0; i < td_n; i++)
+            if (td_trbs[i] == last_transfer.trb) {
+                u32 got = td_len[i] > last_transfer.residue ? td_len[i] - last_transfer.residue : 0;
+                *moved = td_off[i] + got;
+            }
+    }
+    return true;
+}
+
+/* A stalled endpoint: reset it and point its ring at where the next
+ * block will be put, so the next transfer starts clean. */
+static void endpoint_recover(usbdev *d, ring *r, u32 dci)
+{
+    command(0, TRB_TYPE(T_RESET_EP) | TRB_SLOT(d->slot) | TRB_EP(dci), NULL);
+    phys_addr next = r->pa + (phys_addr)r->enq * sizeof(trb);
+    command(next | (r->cycle ? 1 : 0), TRB_TYPE(T_SET_DEQUEUE) | TRB_SLOT(d->slot) | TRB_EP(dci), NULL);
+}
+
+/* One scsi command through the bulk-only wrapper: the command block,
+ * the data if any, the status block. The data lies in the disk's own
+ * pages. */
+static bool scsi(usbdev *d, const u8 *cdb, u32 cdblen, bool in, u32 len, u32 *got)
+{
+    usbstore *s = &d->st;
+    u8 *cbw = d->buf + 2048;
+    memset(cbw, 0, 31);
+    cbw[0] = 'U'; cbw[1] = 'S'; cbw[2] = 'B'; cbw[3] = 'C';
+    u32 tag = ++s->tag;
+    cbw[4] = (u8)tag; cbw[5] = (u8)(tag >> 8); cbw[6] = (u8)(tag >> 16); cbw[7] = (u8)(tag >> 24);
+    cbw[8] = (u8)len; cbw[9] = (u8)(len >> 8); cbw[10] = (u8)(len >> 16); cbw[11] = (u8)(len >> 24);
+    cbw[12] = in ? 0x80 : 0x00;
+    cbw[13] = 0;                                   /* the first unit */
+    cbw[14] = (u8)cdblen;
+    memcpy(cbw + 15, cdb, cdblen);
+    if (!bulk(d, false, d->buf_pa + 2048, 31, NULL)) {
+        endpoint_recover(d, &s->out, s->dci_out);
+        return false;
+    }
+
+    u32 moved = 0;
+    if (len && !bulk(d, in, s->data_pa, len, &moved))
+        endpoint_recover(d, in ? &s->in : &s->out, in ? s->dci_in : s->dci_out);
+
+    u8 *csw = d->buf + 2112;
+    memset(csw, 0, 13);
+    if (!bulk(d, true, d->buf_pa + 2112, 13, NULL)) {
+        endpoint_recover(d, &s->in, s->dci_in);
+        if (!bulk(d, true, d->buf_pa + 2112, 13, NULL)) return false;
+    }
+    if (csw[0] != 'U' || csw[1] != 'S' || csw[2] != 'B' || csw[3] != 'S') return false;
+    u32 rtag = (u32)csw[4] | ((u32)csw[5] << 8) | ((u32)csw[6] << 16) | ((u32)csw[7] << 24);
+    if (rtag != tag) return false;
+    if (got) *got = moved;
+    return csw[12] == 0;
+}
+
+/* Sectors in or out, for the block layer. Held for the duration, since
+ * whichever thread wants the sectors shares the controller with the one
+ * watching the ports. */
+static bool storage_io(void *ctx, u64 lba, u32 count, void *buf, bool write)
+{
+    usbdev *d = (usbdev *)ctx;
+    usbstore *s = &d->st;
+    if (!d->used || !s->used) return false;
+    take();
+    u8 *p = (u8 *)buf;
+    bool ok = true;
+    while (count && ok) {
+        u32 n = count > STORE_PAGES * 8 ? STORE_PAGES * 8 : count;   /* 64 KiB at a time */
+        u32 bytes = n * 512;
+        if (write) memcpy(s->data, p, bytes);
+        u8 cdb[10] = { write ? 0x2A : 0x28, 0,
+                       (u8)(lba >> 24), (u8)(lba >> 16), (u8)(lba >> 8), (u8)lba,
+                       0, (u8)(n >> 8), (u8)n, 0 };
+        u32 got = 0;
+        ok = scsi(d, cdb, 10, !write, bytes, &got);
+        if (ok && !write) {
+            if (got < bytes) ok = false;
+            else memcpy(p, s->data, bytes);
+        }
+        p += bytes;
+        lba += n;
+        count -= n;
+    }
+    give();
+    return ok;
+}
+
+static bool storage_up(usbdev *d, u8 config_value, u8 iface, u8 ep_in, u8 ep_out,
+                       u32 in_packet, u32 out_packet)
+{
+    usbstore *s = &d->st;
+    s->iface = iface;
+    s->dci_in  = ((ep_in & 0xF) << 1) | 1;
+    s->dci_out = ((ep_out & 0xF) << 1);
+    if (!ring_make(&s->in) || !ring_make(&s->out)) return false;
+    /* A transfer of many blocks may run across the ring's end: the link
+     * back to the start carries the chain, so it stays one transfer. */
+    s->in.t[RING_TRBS - 1].control |= TRB_CHAIN;
+    s->out.t[RING_TRBS - 1].control |= TRB_CHAIN;
+    s->data_pa = pmm_alloc_contig(STORE_PAGES);
+    if (s->data_pa == PMM_NO_FRAME) return false;
+    s->data = (u8 *)phys_to_virt(s->data_pa);
+    s->disk = -1;
+
+    /* The two bulk endpoints, in one configure. */
+    u32 *icc = ictx_at(d, 0);
+    u32 *sl = ictx_at(d, 1);
+    u32 top = s->dci_in > s->dci_out ? s->dci_in : s->dci_out;
+    icc[0] = 0;
+    icc[1] = 0x1 | (1u << s->dci_in) | (1u << s->dci_out);
+    u32 dflt = d->speed >= 4 ? 1024 : d->speed == 3 ? 512 : 64;
+    if (!in_packet) in_packet = dflt;
+    if (!out_packet) out_packet = dflt;
+    u32 *ei = ictx_at(d, s->dci_in + 1);
+    memset(ei, 0, csz);
+    ei[1] = (6u << 3) | (in_packet << 16) | (3u << 1);      /* bulk in */
+    ei[2] = (u32)s->in.pa | 1;
+    ei[3] = (u32)(s->in.pa >> 32);
+    ei[4] = in_packet;
+    u32 *eo = ictx_at(d, s->dci_out + 1);
+    memset(eo, 0, csz);
+    eo[1] = (2u << 3) | (out_packet << 16) | (3u << 1);     /* bulk out */
+    eo[2] = (u32)s->out.pa | 1;
+    eo[3] = (u32)(s->out.pa >> 32);
+    eo[4] = out_packet;
+    sl[0] = (sl[0] & ~(0x1Fu << 27)) | (top << 27);
+    if (command(d->ictx_pa, TRB_TYPE(T_CONFIGURE_EP) | TRB_SLOT(d->slot), NULL) != 1) {
+        kprintf("usb:  the disk's endpoints could not be set up\n");
+        return false;
+    }
+    if (!control(d, 0x00, 9, config_value, 0, 0, 0)) return false;   /* set configuration */
+    s->used = true;
+    d->kind = KIND_STORAGE;
+
+    /* Who it is, whether it is ready, and how big. A disk asked too
+     * soon says it is not ready and wants its sense read; a few tries. */
+    static const u8 inquiry[6] = { 0x12, 0, 0, 0, 36, 0 };
+    u32 got = 0;
+    char label[32];
+    label[0] = 0;
+    if (scsi(d, inquiry, 6, true, 36, &got) && got >= 32) {
+        u32 n = 0;
+        for (u32 i = 8; i < 32 && n < sizeof(label) - 1; i++) {
+            u8 c = s->data[i];
+            label[n++] = (c >= 0x20 && c < 0x7F) ? (char)c : ' ';
+        }
+        while (n && label[n - 1] == ' ') n--;
+        label[n] = 0;
+    }
+    static const u8 ready_q[6] = { 0, 0, 0, 0, 0, 0 };
+    static const u8 sense_q[6] = { 0x03, 0, 0, 0, 18, 0 };
+    bool ready = false;
+    for (u32 tries = 0; tries < 8 && !ready; tries++) {
+        ready = scsi(d, ready_q, 6, false, 0, NULL);
+        if (!ready) { scsi(d, sense_q, 6, true, 18, &got); wait_ms(100); }
+    }
+    static const u8 capacity[10] = { 0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    if (!ready || !scsi(d, capacity, 10, true, 8, &got) || got < 8) {
+        kprintf("usb:  the disk did not say its size; not driven\n");
+        s->used = false;
+        return true;
+    }
+    u32 last = ((u32)s->data[0] << 24) | ((u32)s->data[1] << 16) | ((u32)s->data[2] << 8) | s->data[3];
+    u32 bsize = ((u32)s->data[4] << 24) | ((u32)s->data[5] << 16) | ((u32)s->data[6] << 8) | s->data[7];
+    if (bsize != 512) {
+        kprintf("usb:  the disk has %u-byte sectors; only 512 are driven\n", bsize);
+        s->used = false;
+        return true;
+    }
+    s->sectors = (u64)last + 1;
+    disks++;
+    kprintf("usb:  a disk, %s, %llu sectors\n", label[0] ? label : "unnamed", s->sectors);
+    s->disk = blk_add(label[0] ? label : d->name, s->sectors, storage_io, d);
+    if (s->disk < 0) kprintf("usb:  the block layer has no room for the disk\n");
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
 /* Hubs                                                                */
 /* ------------------------------------------------------------------ */
 /*
@@ -704,6 +987,13 @@ static void device_gone(usbdev *d)
         if (!d->in[k].used) continue;
         if (d->in[k].kind == KIND_KEYBOARD && keyboards) keyboards--;
         if (d->in[k].kind == KIND_MOUSE && mice) mice--;
+    }
+    if (d->st.used) {
+        blk_remove(d->st.disk);
+        if (disks) disks--;
+        if (d->st.in.pa) pmm_free(d->st.in.pa);
+        if (d->st.out.pa) pmm_free(d->st.out.pa);
+        if (d->st.data_pa) pmm_free_contig(d->st.data_pa, STORE_PAGES);
     }
     if (d->kind == KIND_HUB)
         for (u32 i = 0; i < DEV_MAX; i++)
@@ -942,6 +1232,10 @@ static bool device_up(const where *w)
     u8 seen_class[8]; u32 nclass = 0;
     u8 cur_kind = 0, cur_iface = 0;
     u32 cur_report_len = 0;
+    /* A disk: its interface and its two bulk endpoints. */
+    bool storage = false;
+    u8 st_iface = 0, st_in = 0, st_out = 0;
+    u32 st_in_packet = 0, st_out_packet = 0;
 
     for (u32 i = 0; i + 1 < total; i += d->buf[i] ? d->buf[i] : 1) {
         u8 len = d->buf[i], type = d->buf[i + 1];
@@ -963,6 +1257,19 @@ static bool device_up(const where *w)
                 cur_iface = d->buf[i + 2];
                 cur_report_len = 0;
                 (void)sub;
+            }
+            /* Mass storage, scsi over bulk-only transport: what sticks
+             * and card readers are. The first such interface counts. */
+            if (cls == 8 && sub == 6 && proto == 0x50 && !storage) {
+                storage = true;
+                cur_kind = KIND_STORAGE;
+                st_iface = d->buf[i + 2];
+            }
+        } else if (type == 5 && len >= 7 && cur_kind == KIND_STORAGE) {
+            if ((d->buf[i + 3] & 3) == 2) {                    /* bulk */
+                u32 packet = (u32)(d->buf[i + 4] | (d->buf[i + 5] << 8)) & 0x7FF;
+                if ((d->buf[i + 2] & 0x80) && !st_in)  { st_in = d->buf[i + 2]; st_in_packet = packet; }
+                if (!(d->buf[i + 2] & 0x80) && !st_out) { st_out = d->buf[i + 2]; st_out_packet = packet; }
             }
         } else if (type == 0x21 && len >= 9 && cur_kind) {
             /* The interface's own descriptor, whose one useful number
@@ -992,13 +1299,18 @@ static bool device_up(const where *w)
         return true;
     }
 
+    if (!nfound && storage && st_in && st_out) {
+        kprintf("usb:  %s: %s (%04x:%04x), a disk\n", at, d->name, vendor, product);
+        return storage_up(d, config_value, st_iface, st_in, st_out, st_in_packet, st_out_packet);
+    }
+
     if (!nfound) {
         d->kind = KIND_OTHER;
         kprintf("usb:  %s: %s (%04x:%04x), device class %u, interface class",
                 at, d->name, vendor, product, dclass);
         for (u32 k = 0; k < nclass; k++) kprintf(" %u", seen_class[k]);
         if (!nclass) kprintf(" none");
-        kprintf("; no keyboard or pointer interface\n");
+        kprintf("; no keyboard, pointer or disk interface\n");
         return true;
     }
 
@@ -1298,6 +1610,7 @@ static void usb_thread(void *arg)
     (void)arg;
     u64 last_look = 0;
     for (;;) {
+        take();
         process_events();
         repeat_held();
         u64 now = time_ns();
@@ -1305,6 +1618,7 @@ static void usb_thread(void *arg)
             last_look = now;
             look_at_ports();
         }
+        give();
         u64 since = time_ns();
         while (time_ns() - since < 4000000ULL) sched_yield();
     }
@@ -1501,10 +1815,13 @@ bool xhci_init(void)
                 "this controller's ports\n", max_ports, unpowered);
     }
 
+    take();
     look_at_ports();
+    give();
     if (!keyboards && !mice) kprintf("usb:  no keyboard and no mouse were found\n");
     else kprintf("usb:  %u keyboard%s and %u mouse%s\n",
                  keyboards, keyboards == 1 ? "" : "s", mice, mice == 1 ? "" : "s");
+    if (disks) kprintf("usb:  %u disk%s\n", disks, disks == 1 ? "" : "s");
 
     thread_create("usb", usb_thread, NULL, thread_domain(sched_current()));
     return true;
@@ -1513,3 +1830,4 @@ bool xhci_init(void)
 bool xhci_present(void)   { return present; }
 u32  xhci_keyboards(void) { return keyboards; }
 u32  xhci_mice(void)      { return mice; }
+u32  xhci_disks(void)     { return disks; }

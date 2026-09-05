@@ -109,7 +109,7 @@ KERN_C   := kernel/main.c \
             kernel/net/crypto_selftest.c \
             kernel/net/asn1.c \
             kernel/net/bn.c \
-            kernel/net/p256.c \
+            kernel/net/ec.c \
             kernel/net/rsa.c \
             kernel/net/x509.c \
             kernel/net/pki_selftest.c \

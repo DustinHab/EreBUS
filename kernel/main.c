@@ -1565,8 +1565,9 @@ void kmain(eb_boot_info *bi)
     }
 
     if (blk_init()) {
-        kprintf("blk:  %s on ahci port %u, %llu sectors (",
-                blk_model(), blk_port(), blk_sectors());
+        kprintf("blk:  %s on %s, %llu sectors (",
+                blk_model(), blk_disk_where(blk_store_disk() >= 0 ? (u32)blk_store_disk() : 0),
+                blk_sectors());
         print_size(blk_sectors() * BLK_SECTOR_SIZE);
         kprintf("), %u disks found\n", blk_disk_count());
 
@@ -1590,8 +1591,17 @@ void kmain(eb_boot_info *bi)
             ps2_keyboard_present() ? "ready" : "absent",
             ps2_mouse_present() ? "ready" : "absent");
     /* USB keyboards and mice speak into the same queues; a machine
-     * without a PS/2 controller has its keys this way. */
+     * without a PS/2 controller has its keys this way. A usb disk with
+     * a store partition, on a machine with no store yet, becomes the
+     * store here: that is how a stick carries the whole system. */
     xhci_init();
+    if (blk_store_on_usb()) {
+        kprintf("blk:  %s on usb, %llu sectors (", blk_model(), blk_sectors());
+        print_size(blk_sectors() * BLK_SECTOR_SIZE);
+        kprintf("), %u disks found\n", blk_disk_count());
+        kprintf("blk:  %s\n", blk_selftest() ? "self test passed, a written sector reads back"
+                                             : "self test FAILED");
+    }
 
     /* With the disks known and a keyboard to answer on, the one
      * question a machine started for the first time actually needs

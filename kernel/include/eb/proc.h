@@ -47,6 +47,7 @@ bool    proc_grant_word(object *program, object *what, u32 rights,
 
 /* A bare number into the program's letter box, no capability. */
 bool    proc_post_number(object *program, u64 tag, u64 w0);
+bool    proc_post_range(object *program, u64 tag, u64 w0, u64 w1);
 
 /* Ends a running program from outside; it finishes at its next step
  * into the kernel and is reaped like any other end. */

@@ -175,8 +175,8 @@ static void say_disk_line(settle_say_fn say, void *ctx, u32 d)
     at = put_str(line, at, sizeof(line), blk_disk_model(d));
     at = put_str(line, at, sizeof(line), "  ");
     at = put_size(line, at, sizeof(line), blk_disk_sectors(d) * 512);
-    at = put_str(line, at, sizeof(line), "  port ");
-    at = put_num(line, at, sizeof(line), blk_disk_port(d));
+    at = put_str(line, at, sizeof(line), "  ");
+    at = put_str(line, at, sizeof(line), blk_disk_where(d));
     /* Not "the machine runs from it": a machine booted from a stick has
      * somebody else's system at the first port, and saying otherwise
      * would be putting a guess where a fact belongs. */

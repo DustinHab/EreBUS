@@ -3,8 +3,9 @@
  * - parsing keeps pointers into the DER; nothing is copied but the point of an EC key
  * - the walk starts at the server's first certificate; each step needs a signature that verifies under a trusted
  *   authority's key (done) or under the key of another certificate in the chain that is marked as an authority
- * - names select the next certificate; signatures are the proof
- * - the built-in authorities (kernel/net/authorities.h) are the intermediates that sign github.com and its release cdn
+ * - names select the next certificate and the authorities tried; signatures are the proof
+ * - the built-in authorities (kernel/net/authorities.h) are the roots most of the web hangs under, and the
+ *   intermediates that sign github.com and its release cdn; each is a whole certificate
  */
 #include <eb/pki.h>
 #include <eb/asn1.h>
@@ -13,9 +14,14 @@
 #include "authorities.h"
 
 static const u8 OID_ECDSA_SHA256[] = { 0x2A,0x86,0x48,0xCE,0x3D,0x04,0x03,0x02 };
+static const u8 OID_ECDSA_SHA384[] = { 0x2A,0x86,0x48,0xCE,0x3D,0x04,0x03,0x03 };
+static const u8 OID_ECDSA_SHA512[] = { 0x2A,0x86,0x48,0xCE,0x3D,0x04,0x03,0x04 };
 static const u8 OID_RSA_SHA256[]   = { 0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x0B };
+static const u8 OID_RSA_SHA384[]   = { 0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x0C };
+static const u8 OID_RSA_SHA512[]   = { 0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x0D };
 static const u8 OID_EC_KEY[]       = { 0x2A,0x86,0x48,0xCE,0x3D,0x02,0x01 };
 static const u8 OID_P256[]         = { 0x2A,0x86,0x48,0xCE,0x3D,0x03,0x01,0x07 };
+static const u8 OID_P384[]         = { 0x2B,0x81,0x04,0x00,0x22 };
 static const u8 OID_RSA_KEY[]      = { 0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x01 };
 static const u8 OID_SAN[]          = { 0x55,0x1D,0x11 };
 static const u8 OID_BASIC[]        = { 0x55,0x1D,0x13 };
@@ -59,11 +65,14 @@ bool pki_key_parse(const u8 *spki, u32 len, pki_key *out)
 
     if (OID(&oid, OID_EC_KEY)) {
         asn1_tlv curve;
-        if (!asn1_expect(&alg, ASN1_OID, &curve) || !OID(&curve, OID_P256)) return false;
-        if (klen != 65 || kp[0] != 0x04) return false;
-        memcpy(out->point, kp, 65);
-        if (!p256_point_ok(out->point)) return false;
-        out->kind = KEY_P256;
+        if (!asn1_expect(&alg, ASN1_OID, &curve)) return false;
+        u32 ec;
+        if (OID(&curve, OID_P256))      { ec = EC_P256; out->kind = KEY_P256; }
+        else if (OID(&curve, OID_P384)) { ec = EC_P384; out->kind = KEY_P384; }
+        else return false;
+        if (klen > sizeof out->point || !ec_point_ok(ec, kp, klen)) { out->kind = KEY_NONE; return false; }
+        memcpy(out->point, kp, klen);
+        out->pointlen = klen;
         return true;
     }
     if (OID(&oid, OID_RSA_KEY)) {
@@ -143,6 +152,18 @@ static bool parse_extensions(x509_cert *c, const asn1_tlv *wrap)
     return true;
 }
 
+/* The signature algorithm's kind and hash, or SIG_NONE. */
+static void algorithm_of(const asn1_tlv *oid, u8 *sig, u8 *hash)
+{
+    *sig = SIG_NONE; *hash = HASH_NONE;
+    if (OID(oid, OID_ECDSA_SHA256))      { *sig = SIG_ECDSA;     *hash = HASH_SHA256; }
+    else if (OID(oid, OID_ECDSA_SHA384)) { *sig = SIG_ECDSA;     *hash = HASH_SHA384; }
+    else if (OID(oid, OID_ECDSA_SHA512)) { *sig = SIG_ECDSA;     *hash = HASH_SHA512; }
+    else if (OID(oid, OID_RSA_SHA256))   { *sig = SIG_RSA_PKCS1; *hash = HASH_SHA256; }
+    else if (OID(oid, OID_RSA_SHA384))   { *sig = SIG_RSA_PKCS1; *hash = HASH_SHA384; }
+    else if (OID(oid, OID_RSA_SHA512))   { *sig = SIG_RSA_PKCS1; *hash = HASH_SHA512; }
+}
+
 bool x509_parse(const u8 *der, u32 len, x509_cert *c)
 {
     asn1_span s, cert, tbs, seq;
@@ -201,16 +222,15 @@ bool x509_parse(const u8 *der, u32 len, x509_cert *c)
     asn1_inside(&t, &seq);
     if (!asn1_expect(&seq, ASN1_OID, &alg_out)) return false;
     if (alg_out.len != alg_in.len || memcmp(alg_out.p, alg_in.p, alg_in.len) != 0) return false;
-    if (OID(&alg_out, OID_ECDSA_SHA256))    c->sigalg = SIG_ECDSA_SHA256;
-    else if (OID(&alg_out, OID_RSA_SHA256)) c->sigalg = SIG_RSA_SHA256;
-    else                                     c->sigalg = SIG_NONE;
+    algorithm_of(&alg_out, &c->sig, &c->hash);
 
     if (!asn1_expect(&cert, ASN1_BITSTRING, &t)) return false;
-    if (!asn1_bits(&t, &c->sig, &c->siglen)) return false;
+    if (!asn1_bits(&t, &c->sigbytes, &c->siglen)) return false;
     return asn1_done(&cert);
 }
 
-bool p256_verify_der(const u8 pub[65], const u8 hash[32], const u8 *sig, u32 siglen)
+bool ec_verify_der(u32 curve, const u8 *pub, u32 publen, const u8 *hash, u32 hlen,
+                   const u8 *sig, u32 siglen)
 {
     asn1_span s, in;
     asn1_tlv t, ri, si;
@@ -222,22 +242,26 @@ bool p256_verify_der(const u8 pub[65], const u8 hash[32], const u8 *sig, u32 sig
     const u8 *r, *sv;
     u32 rlen, slen;
     if (!asn1_uint(&ri, &r, &rlen) || !asn1_uint(&si, &sv, &slen)) return false;
-    return p256_verify(pub, hash, r, rlen, sv, slen);
+    return ec_verify(curve, pub, publen, hash, hlen, r, rlen, sv, slen);
+}
+
+static bool key_fits(u8 sig, u8 kind)
+{
+    return (sig == SIG_ECDSA && (kind == KEY_P256 || kind == KEY_P384)) ||
+           (sig == SIG_RSA_PKCS1 && kind == KEY_RSA);
 }
 
 bool x509_check_signature(const x509_cert *c, const pki_key *k)
 {
-    u8 h[32];
-    sha256(c->tbs, c->tbslen, h);
-    if (c->sigalg == SIG_ECDSA_SHA256) {
-        if (k->kind != KEY_P256) return false;
-        return p256_verify_der(k->point, h, c->sig, c->siglen);
-    }
-    if (c->sigalg == SIG_RSA_SHA256) {
-        if (k->kind != KEY_RSA) return false;
-        return rsa_verify_pkcs1_sha256(k->n, k->nlen, k->e, k->elen, h, c->sig, c->siglen);
-    }
-    return false;
+    if (!key_fits(c->sig, k->kind)) return false;
+    u32 hlen = pki_hash_len(c->hash);
+    if (!hlen) return false;
+    u8 h[64];
+    pki_hash(c->hash, c->tbs, c->tbslen, h);
+    if (c->sig == SIG_ECDSA)
+        return ec_verify_der(k->kind == KEY_P384 ? EC_P384 : EC_P256, k->point, k->pointlen,
+                             h, hlen, c->sigbytes, c->siglen);
+    return rsa_verify_pkcs1(k->n, k->nlen, k->e, k->elen, c->hash, h, c->sigbytes, c->siglen);
 }
 
 /* ------------------------------------------------------------------ */
@@ -307,14 +331,58 @@ bool x509_matches_host(const x509_cert *c, const char *host, u32 hlen)
 }
 
 /* ------------------------------------------------------------------ */
-/* The walk                                                            */
+/* Authorities                                                         */
 /* ------------------------------------------------------------------ */
 
-static bool key_fits(u8 sigalg, u8 kind)
+/* An authority opened: its key, and its subject when it is a
+ * certificate (then it is tried only where the issuer names it). */
+typedef struct {
+    pki_key   key;
+    const u8 *subject; u32 subjectlen;
+    bool      ok;
+} opened;
+
+static bool authority_open(const pki_authority *a, opened *o)
 {
-    return (sigalg == SIG_ECDSA_SHA256 && kind == KEY_P256) ||
-           (sigalg == SIG_RSA_SHA256 && kind == KEY_RSA);
+    x509_cert c;
+    o->subject = NULL;
+    o->subjectlen = 0;
+    if (x509_parse(a->der, a->len, &c) && c.key.kind != KEY_NONE) {
+        o->key = c.key;
+        o->subject = c.subject;
+        o->subjectlen = c.subjectlen;
+        o->ok = true;
+        return true;
+    }
+    o->ok = pki_key_parse(a->der, a->len, &o->key);
+    return o->ok;
 }
+
+#define BUILTIN_MAX 64
+static opened builtin[BUILTIN_MAX];
+static bool builtin_opened;
+
+static void open_builtin(void)
+{
+    if (builtin_opened) return;
+    u32 n = pki_builtin_count();
+    if (n > BUILTIN_MAX) n = BUILTIN_MAX;
+    for (u32 i = 0; i < n; i++) authority_open(&AUTHORITIES[i], &builtin[i]);
+    builtin_opened = true;
+}
+
+/* Whether this authority is the one to try for c: a certificate only
+ * where the issuer names its subject, a bare key anywhere. */
+static bool worth_trying(const opened *o, const x509_cert *c)
+{
+    if (!o->ok || !key_fits(c->sig, o->key.kind)) return false;
+    if (!o->subject) return true;
+    return o->subjectlen == c->issuerlen && memcmp(o->subject, c->issuer, c->issuerlen) == 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* The walk                                                            */
+/* ------------------------------------------------------------------ */
 
 static x509_status dates_ok(const x509_cert *c, i64 now)
 {
@@ -340,26 +408,30 @@ x509_status x509_verify_chain(const u8 *const *ders, const u32 *lens, u32 count,
     if (!ok[0]) return X509_UNREADABLE;
 
     const x509_cert *l = &certs[0];
-    if (l->unknown_critical || l->key.kind == KEY_NONE || l->sigalg == SIG_NONE) return X509_UNSUPPORTED;
+    if (l->unknown_critical || l->key.kind == KEY_NONE || l->sig == SIG_NONE) return X509_UNSUPPORTED;
     x509_status d = dates_ok(l, now);
     if (d != X509_VERIFIED) return d;
     if (!x509_matches_host(l, host, hlen)) return X509_WRONG_HOST;
     if (l->has_eku && !l->eku_server) return X509_NOT_A_SERVER;
 
+    open_builtin();
+    u32 nb = pki_builtin_count();
+    if (nb > BUILTIN_MAX) nb = BUILTIN_MAX;
+
     u32 cur = 0;
     used[0] = true;
-    u32 builtin = pki_builtin_count();
     for (u32 depth = 0; depth < X509_MAX_CHAIN; depth++) {
         const x509_cert *c = &certs[cur];
-        if (c->sigalg == SIG_NONE) return X509_UNSUPPORTED;
+        if (c->sig == SIG_NONE) return X509_UNSUPPORTED;
 
-        /* A trusted authority whose key fits the signature? */
-        for (u32 a = 0; a < builtin + nextra; a++) {
-            const pki_authority *au = a < builtin ? &AUTHORITIES[a] : &extra[a - builtin];
-            pki_key k;
-            if (!pki_key_parse(au->spki, au->len, &k)) continue;
-            if (!key_fits(c->sigalg, k.kind)) continue;
-            if (x509_check_signature(c, &k)) {
+        /* A trusted authority named by the issuer, whose key verifies? */
+        for (u32 a = 0; a < nb + nextra; a++) {
+            opened o;
+            const pki_authority *au;
+            if (a < nb) { o = builtin[a]; au = &AUTHORITIES[a]; }
+            else        { au = &extra[a - nb]; if (!authority_open(au, &o)) continue; }
+            if (!worth_trying(&o, c)) continue;
+            if (x509_check_signature(c, &o.key)) {
                 if (leaf) *leaf = certs[0];
                 if (by) *by = au->name;
                 return X509_VERIFIED;
@@ -380,7 +452,7 @@ x509_status x509_verify_chain(const u8 *const *ders, const u32 *lens, u32 count,
         if (!p->is_ca || (p->has_key_usage && !p->may_sign_certs)) return X509_NOT_AN_AUTHORITY;
         d = dates_ok(p, now);
         if (d != X509_VERIFIED) return d;
-        if (!key_fits(c->sigalg, p->key.kind)) return X509_UNSUPPORTED;
+        if (!key_fits(c->sig, p->key.kind)) return X509_UNSUPPORTED;
         if (!x509_check_signature(c, &p->key)) return X509_BAD_SIGNATURE;
         used[next] = true;
         cur = next;

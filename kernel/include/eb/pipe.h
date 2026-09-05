@@ -57,6 +57,10 @@ bool pipe_ask_full(object *o, bool writable, object *input,
  * marked this machine 'vouch' pins the key before it meets it. */
 bool pipe_vouch(u32 node);
 
+/* Withdraw that vouch: the same nodes are told, over a signature; a row
+ * that rested on the vouch goes, one met since stays. */
+bool pipe_unvouch(u32 node);
+
 /* The door-key object (BYTES, 64: seed and public half), held so a
  * renewal can write a fresh pair into it and have it saved. */
 void pipe_door_key_set(object *t);

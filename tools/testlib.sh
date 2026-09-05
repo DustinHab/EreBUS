@@ -80,6 +80,7 @@ key_name() {
         '[')      echo bracket_left ;;
         ']')      echo bracket_right ;;
         '*')      echo shift-8 ;;
+        '%')      echo shift-5 ;;
         '&')      echo shift-7 ;;
         '<')      echo shift-comma ;;
         '>')      echo shift-dot ;;

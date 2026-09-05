@@ -44,6 +44,7 @@
 #define K_HAVE    12                 /* how far a transfer has come */
 #define K_ROTATE  13                 /* my door key is renewed: old, new, each signed by the other */
 #define K_VOUCH   14                 /* i recognise this node's key: voucher, vouchee, address, name, signed by the voucher */
+#define K_UNVOUCH 15                 /* i withdraw that: voucher, vouchee, signed by the voucher */
 
 /* One chunk fills one datagram: 20 bytes of envelope, 24 of chunk head,
  * 16 of tag, under the 1400 the wire takes. */
@@ -85,6 +86,7 @@
 #define F_FOR_WORK 1                 /* offer: an input for work, held for the ask that follows */
 #define F_HAS_INPUT 1                /* ask: hand the held input to the script as its third gift */
 #define F_COMPILED  2                /* ask: the recipe is c source; compile it there and run the image */
+#define F_SPLIT     4                /* ask: the range lo..hi is a real one; a compiled worker is told it */
 #define INPUTS_MAX 4                 /* inputs held, one per asking machine */
 
 /* Wire kinds, deliberately not the kernel's type ids. */
@@ -116,6 +118,7 @@ static void wr64(u8 *p, u64 v);
 static void rotate_message(u8 m[80], const u8 oldp[32], const u8 newp[32]);
 static void vouch_message(u8 m[110], const u8 vk[32], const u8 ek[32],
                           const u8 ip[4], u16 port, const char name[24]);
+static void unvouch_message(u8 m[82], const u8 vk[32], const u8 ek[32]);
 
 /* ------------------------------------------------------------------ */
 /* Small tools                                                         */
@@ -820,6 +823,7 @@ static i32 identity_verdict(const u8 *ip, u16 port, const u8 *idkey)
         journal_says("pipe", "the nodes table is full");
         return 0;
     }
+    nodes_note_via((u32)row, NODE_VIA_MET, NULL);     /* proven now, whatever put the row here */
     return me < 0 ? 1 : 0;
 }
 
@@ -884,7 +888,9 @@ typedef struct {
     u64     scan_until_ns;
     u64     deadline_ns;
 
-    u32     parts;
+    u32     parts;                 /* slots dealt out: pieces, times the quorum's replicas */
+    u32     pieces;                /* how many ways the range is divided (1 when not split) */
+    bool    split;                 /* a split line was given: the range is real */
     i64     lo, hi;
     u32     len;
     u8      recipe[RECIPE_MAX];
@@ -997,16 +1003,23 @@ static bool answer_verified(const sealrec *s, u64 id, const u8 *p, u32 len)
     return ed25519_verify(s->idkey, msg, sizeof(msg), p + 40);
 }
 
+/* How many machines run each piece: one, or the quorum. */
+static u32 replicas_of(const desk_job *j)
+{
+    return j->pieces ? j->parts / j->pieces : 1;
+}
+
+/* The range of a slot: the slot's piece of the whole, divided evenly
+ * with the remainder on the front pieces. Every replica of a piece
+ * carries the same range. */
 static void part_range(const desk_job *j, u32 part, i64 *lo, i64 *hi)
 {
-    /* A quorum is not a division: every machine runs the whole task, so
-     * every part carries the whole range (none, in practice). */
-    if (j->quorum) { *lo = j->lo; *hi = j->hi; return; }
-    if (j->parts <= 1 || j->hi < j->lo) { *lo = j->lo; *hi = j->hi; return; }
+    u32 piece = part / replicas_of(j);
+    if (j->pieces <= 1 || j->hi < j->lo) { *lo = j->lo; *hi = j->hi; return; }
     u64 n = (u64)(j->hi - j->lo + 1);
-    u64 base = n / j->parts, rem = n % j->parts;
-    u64 from = (u64)part * base + (part < rem ? part : rem);
-    u64 count = base + (part < rem ? 1 : 0);
+    u64 base = n / j->pieces, rem = n % j->pieces;
+    u64 from = (u64)piece * base + (piece < rem ? piece : rem);
+    u64 count = base + (piece < rem ? 1 : 0);
     *lo = j->lo + (i64)from;
     *hi = *lo + (i64)(count ? count - 1 : 0);
 }
@@ -1020,7 +1033,7 @@ static void fask_send(sealrec *s, u32 fi)
     u8 pkt[40 + RECIPE_MAX];
     wr32(pkt, MAGIC);
     pkt[4] = K_ASK;
-    pkt[5] = (j->input ? F_HAS_INPUT : 0) | (j->compiled ? F_COMPILED : 0);
+    pkt[5] = (j->input ? F_HAS_INPUT : 0) | (j->compiled ? F_COMPILED : 0) | (j->split ? F_SPLIT : 0);
     pkt[6] = pkt[7] = 0;
     wr64(pkt + 8, fask[fi].id);
     wr32(pkt + 16, j->len);
@@ -1249,17 +1262,15 @@ static bool ask_take(object *o, bool writable, object *input,
     u64 eol = 0;
     while (eol < len && d[eol] != '\n') eol++;
 
-    u32 parts = 1;
+    u32 pieces = 1;
     i64 lo = 0, hi = 0;
     u64 recipe_at = 0;
-    /* A quorum runs the whole task on N machines and compares; it is not
-     * divided, so a split line is not read and the recipe is the whole
-     * text. */
+    /* A split line divides the range into pieces; a quorum runs every
+     * piece on N distinct machines and compares. Both at once deal
+     * pieces times N slots. */
     if (quorum > PART_MAX) quorum = PART_MAX;
-    bool split = !quorum &&
-                 (eol >= 5 && d[0]=='s' && d[1]=='p' && d[2]=='l' &&
+    bool split = (eol >= 5 && d[0]=='s' && d[1]=='p' && d[2]=='l' &&
                   d[3]=='i' && d[4]=='t');
-    if (quorum) parts = quorum;
     if (split) {
         i64 nums[3];
         u32 got = 0;
@@ -1278,10 +1289,22 @@ static bool ask_take(object *o, bool writable, object *input,
                                  "split P from LO to HI");
             return false;
         }
-        parts = (u32)(nums[0] > PART_MAX ? PART_MAX : nums[0]);
+        pieces = (u32)(nums[0] > PART_MAX ? PART_MAX : nums[0]);
         lo = nums[1];
         hi = nums[2];
         recipe_at = eol + 1;
+    }
+    u32 parts = pieces * (quorum ? quorum : 1);
+    if (parts > PART_MAX) {
+        char line[80];
+        u32 at = put(line, 0, "too many parts: ");
+        at = put_dec(line, at, pieces);
+        at = put(line, at, " pieces across ");
+        at = put_dec(line, at, quorum);
+        at = put(line, at, " machines exceed 8 slots");
+        line[at] = 0;
+        journal_says("pipe", line);
+        return false;
     }
 
     if (recipe_at >= len) {
@@ -1298,6 +1321,8 @@ static bool ask_take(object *o, bool writable, object *input,
     memcpy(j->recipe, d + recipe_at, rlen);
     j->len = (u32)rlen;
     j->parts = parts;
+    j->pieces = pieces;
+    j->split = split;
     j->lo = lo;
     j->hi = hi;
     j->writable = writable;
@@ -2082,6 +2107,11 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
             obj_set_name(image, "task code");
             prog = work_code_launch(image, reply, input);
             obj_release(image);
+            /* A split task: the piece's range goes into the letter box
+             * as a message tagged "RANG", its two words lo and hi -- after
+             * the input, when one was sent. */
+            if (prog && (p[5] & F_SPLIT))
+                proc_post_range(prog, 0x474E4152ULL /* "RANG" */, (u64)wlo, (u64)whi);
         } else {
             object *script = obj_create(TYPE_TEXT, rlen + 512, 0);
             if (!script) { cap_revoke(pipe_kdom, h); obj_release(reply); return; }
@@ -2161,52 +2191,92 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
             static char text[400];
             u32 at = 0;
             if (j->quorum) {
-                /* Every machine ran the whole task. The result is what a
-                 * strict majority answered the same; only verified
-                 * answers count toward the majority. */
-                u32 best = 0, bestcnt = 0;
-                for (u32 i = 0; i < j->parts; i++) {
-                    if (!j->pverified[i]) continue;
-                    u32 c = 0;
-                    for (u32 k = 0; k < j->parts; k++)
-                        if (j->pverified[k] &&
-                            strcmp(j->ptext[i], j->ptext[k]) == 0) c++;
-                    if (c > bestcnt) { bestcnt = c; best = i; }
-                }
-                if (bestcnt * 2 > j->parts) {
-                    at = put(text, at, j->ptext[best][0] ? j->ptext[best]
-                                                         : "nothing");
-                    at = put(text, at, "  (agreed by ");
-                    at = put_dec(text, at, bestcnt);
-                    at = put(text, at, " of ");
-                    at = put_dec(text, at, j->parts);
-                    at = put(text, at, ")");
-                    text[at] = 0;
-                    job_end(j, true, text, NULL);
-                } else {
-                    /* No verified majority: name the distinct answers, so
-                     * the disagreement is visible, not hidden. */
-                    at = put(text, at, "no agreement -- ");
-                    u32 named = 0;
-                    for (u32 i = 0; i < j->parts &&
-                                    at < sizeof(text) - 48; i++) {
-                        bool seen = false;
-                        for (u32 k = 0; k < i; k++)
-                            if (strcmp(j->ptext[i], j->ptext[k]) == 0)
-                                seen = true;
-                        if (seen) continue;
-                        if (named++) at = put(text, at, ", ");
-                        char nm[24];
-                        name_of(j->pby[i], seal_by_ip(j->pby[i]), nm);
-                        at = put(text, at, nm);
-                        at = put(text, at, j->pverified[i] ? " said "
-                                                           : " said (unverified) ");
-                        at = put(text, at, j->ptext[i][0] ? j->ptext[i]
-                                                          : "nothing");
+                /* Every piece ran on N machines. A piece's result is what
+                 * a strict majority of its replicas answered the same;
+                 * only verified answers count toward the majority. The
+                 * pieces then combine as an ordinary split does. */
+                u32 R = replicas_of(j);
+                i64 total = 0;
+                bool all_num = true;
+                u32 least = R;
+                static char joined[200];
+                u32 ja = 0;
+                for (u32 q = 0; q < j->pieces; q++) {
+                    u32 base = q * R, best = base, bestcnt = 0;
+                    for (u32 i = base; i < base + R; i++) {
+                        if (!j->pverified[i]) continue;
+                        u32 c = 0;
+                        for (u32 k = base; k < base + R; k++)
+                            if (j->pverified[k] &&
+                                strcmp(j->ptext[i], j->ptext[k]) == 0) c++;
+                        if (c > bestcnt) { bestcnt = c; best = i; }
                     }
-                    text[at] = 0;
-                    job_end(j, false, NULL, text);
+                    if (bestcnt * 2 <= R) {
+                        /* No verified majority for this piece: name the
+                         * distinct answers, so the disagreement is
+                         * visible, not hidden. */
+                        at = put(text, at, "no agreement");
+                        if (j->pieces > 1) {
+                            at = put(text, at, " on piece ");
+                            at = put_dec(text, at, q + 1);
+                        }
+                        at = put(text, at, " -- ");
+                        u32 named = 0;
+                        for (u32 i = base; i < base + R &&
+                                        at < sizeof(text) - 48; i++) {
+                            bool seen = false;
+                            for (u32 k = base; k < i; k++)
+                                if (strcmp(j->ptext[i], j->ptext[k]) == 0)
+                                    seen = true;
+                            if (seen) continue;
+                            if (named++) at = put(text, at, ", ");
+                            char nm[24];
+                            name_of(j->pby[i], seal_by_ip(j->pby[i]), nm);
+                            at = put(text, at, nm);
+                            at = put(text, at, j->pverified[i] ? " said "
+                                                               : " said (unverified) ");
+                            at = put(text, at, j->ptext[i][0] ? j->ptext[i]
+                                                              : "nothing");
+                        }
+                        text[at] = 0;
+                        job_end(j, false, NULL, text);
+                        return;
+                    }
+                    if (bestcnt < least) least = bestcnt;
+                    const char *t = j->ptext[best];
+                    u32 k = (t[0] == '-') ? 1 : 0;
+                    if (!t[k]) all_num = false;
+                    for (; t[k]; k++) if (t[k] < '0' || t[k] > '9') all_num = false;
+                    total += j->presult[best];
+                    if (q) joined[ja++] = ' ';
+                    ja = put(joined, ja, t[0] ? t : "nothing");
                 }
+                joined[ja] = 0;
+                if (j->pieces == 1) {
+                    at = put(text, at, joined);
+                    at = put(text, at, "  (agreed by ");
+                    at = put_dec(text, at, least);
+                    at = put(text, at, " of ");
+                    at = put_dec(text, at, R);
+                    at = put(text, at, ")");
+                } else {
+                    if (all_num) {
+                        u64 mag = total < 0 ? (u64)-total : (u64)total;
+                        if (total < 0) text[at++] = '-';
+                        at = put_dec(text, at, mag);
+                    } else {
+                        at = put(text, at, joined);
+                    }
+                    at = put(text, at, " (");
+                    at = put_dec(text, at, j->pieces);
+                    at = put(text, at, " pieces, each agreed by at least ");
+                    at = put_dec(text, at, least);
+                    at = put(text, at, " of ");
+                    at = put_dec(text, at, R);
+                    at = put(text, at, ")");
+                }
+                text[at] = 0;
+                job_end(j, true, text, NULL);
                 return;
             }
             if (j->parts == 1) {
@@ -2392,7 +2462,9 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         if (nodes_by_key(ek) >= 0) return;         /* already known */
 
         bool has = (ip[0] | ip[1] | ip[2] | ip[3]) != 0;
-        if (nodes_meet(name, ek, has ? ip : NULL, eport, NULL, true) < 0) return;
+        i32 row = nodes_meet(name, ek, has ? ip : NULL, eport, NULL, true);
+        if (row < 0) return;
+        nodes_note_via((u32)row, NODE_VIA_VOUCHED, vk);
 
         char vname[24];
         nodes_name_at((u32)vi, vname);
@@ -2406,6 +2478,40 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
         at = put(line, at, " vouches for ");
         for (u32 k = 0; name[k] && at < sizeof(line) - 16; k++) line[at++] = name[k];
         at = put(line, at, "; its key is pinned");
+        line[at] = 0;
+        journal_says("pipe", line);
+        return;
+    }
+
+    if (kind == K_UNVOUCH && len >= 136) {
+        /* A node withdrawing its vouch. The same gate as the vouch: the
+         * voucher must be held and allowed to vouch, and the statement
+         * signed by its key. The row goes only when it is still that
+         * vouch that put it here -- a node met since, or written by
+         * hand, stays. */
+        const u8 *vk = p + 8, *ek = p + 40, *sig = p + 72;
+        u8 msg[82];
+        unvouch_message(msg, vk, ek);
+        if (!ed25519_verify(vk, msg, sizeof(msg), sig)) return;
+
+        nodes_apply();
+        i32 vi = nodes_by_key(vk);
+        if (vi < 0 || !(nodes_may_at((u32)vi) & NODE_MAY_VOUCH)) return;
+
+        char vname[24], ename[24];
+        nodes_name_at((u32)vi, vname);
+        i32 ei = nodes_by_key(ek);
+        if (ei < 0) return;
+        nodes_name_at((u32)ei, ename);
+        u32 what = nodes_unvouch(vk, ek);
+        kprintf("pipe: '%s' withdraws its vouch for '%s'; %s\n", vname, ename,
+                what == 1 ? "the key is no longer pinned" : "the row stays, it did not rest on that vouch");
+        char line[96];
+        u32 at = 0;
+        for (u32 k = 0; vname[k] && at < 24; k++) line[at++] = vname[k];
+        at = put(line, at, " withdraws its vouch for ");
+        for (u32 k = 0; ename[k] && at < 56; k++) line[at++] = ename[k];
+        at = put(line, at, what == 1 ? "; the key is no longer pinned" : "; the row stays");
         line[at] = 0;
         journal_says("pipe", line);
         return;
@@ -2670,6 +2776,16 @@ static void vouch_message(u8 m[110], const u8 vk[32], const u8 ek[32],
     for (u32 i = 0; i < 24; i++) m[86 + i] = (u8)name[i];
 }
 
+/* The message a withdrawal signs: its own label, then the two keys. */
+static void unvouch_message(u8 m[82], const u8 vk[32], const u8 ek[32])
+{
+    static const char label[] = "erebus unvouch v1";   /* 17 + NUL = 18 */
+    memset(m, 0, 82);
+    memcpy(m, label, 18);
+    memcpy(m + 18, vk, 32);
+    memcpy(m + 50, ek, 32);
+}
+
 static void vouch_send(const u8 dst[4], u16 dport, const u8 vk[32],
                        const u8 ek[32], const u8 ip[4], u16 eport,
                        const char name[24], const u8 sig[64])
@@ -2724,6 +2840,57 @@ bool pipe_vouch(u32 node)
     }
     char line[64];
     u32 at = put(line, 0, "vouched for ");
+    for (u32 i = 0; name[i] && at < 40; i++) line[at++] = name[i];
+    at = put(line, at, " to ");
+    at = put_dec(line, at, sent);
+    at = put(line, at, " node(s)");
+    line[at] = 0;
+    journal_says("pipe", line);
+    memset(vk64, 0, 64);
+    return true;
+}
+
+/* Withdraw a vouch: sign the withdrawal and send it to every other
+ * known node. A node whose row for the vouchee rests on our vouch drops
+ * it; one that met the node since keeps it. */
+bool pipe_unvouch(u32 node)
+{
+    nodes_apply();
+    if (node >= nodes_count()) return false;
+
+    u8 ek[32], vk64[64];
+    char name[24];
+    if (!nodes_key_at(node, ek)) return false;
+    nodes_name_at(node, name);
+    if (!ssh_key_bytes(vk64)) {
+        journal_says("pipe", "there is no door key to sign the withdrawal with");
+        return false;
+    }
+
+    u8 msg[82];
+    unvouch_message(msg, vk64 + 32, ek);
+    u8 sig[64];
+    ed25519_sign(sig, vk64, vk64 + 32, msg, sizeof(msg));
+
+    u8 pkt[136];
+    memset(pkt, 0, sizeof(pkt));
+    wr32(pkt, MAGIC);
+    pkt[4] = K_UNVOUCH;
+    memcpy(pkt + 8, vk64 + 32, 32);
+    memcpy(pkt + 40, ek, 32);
+    memcpy(pkt + 72, sig, 64);
+
+    u32 sent = 0;
+    for (u32 i = 0; i < nodes_count(); i++) {
+        if (i == node) continue;
+        u8 ip[4]; u16 port;
+        if (nodes_address_at(i, ip, &port)) {
+            net_udp_send(ip, PIPE_PORT, port, pkt, sizeof(pkt));
+            sent++;
+        }
+    }
+    char line[64];
+    u32 at = put(line, 0, "withdrew the vouch for ");
     for (u32 i = 0; name[i] && at < 40; i++) line[at++] = name[i];
     at = put(line, at, " to ");
     at = put_dec(line, at, sent);
@@ -3173,10 +3340,13 @@ void pipe_service(void)
                         if (!fask[i].active) { fi = i; break; }
                     if (fi == FASK_MAX) break;
 
-                    /* A quorum wants each part on a distinct machine, so
-                     * part i goes to candidate i; an ordinary job deals
-                     * round-robin. */
-                    u32 c = j->quorum ? pi : (j->next_cand % j->cand_count);
+                    /* A quorum wants every replica of a piece on a distinct
+                     * machine: replica r of piece q goes to candidate q + r,
+                     * which are distinct while the quorum fits the
+                     * candidates. An ordinary job deals round-robin. */
+                    u32 c = j->quorum
+                          ? (pi / replicas_of(j) + pi % replicas_of(j)) % j->cand_count
+                          : (j->next_cand % j->cand_count);
                     if (c >= j->cand_count) break;
 
                     /* The input is transferred before a machine's first

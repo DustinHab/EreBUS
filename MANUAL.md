@@ -1,6 +1,6 @@
 # EreBUS Manual
 
-For EreBUS 0.8.8. This manual is updated with every release; the version it describes is the one on the releases page.
+For EreBUS 0.8.9. This manual is updated with every release; the version it describes is the one on the releases page.
 
 Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions
 
@@ -45,7 +45,7 @@ Vocabulary used below:
 
 ### 2.2 First start
 
-1. The machine boots to the desktop from the stick. Without a store it has no memory: nothing typed survives a restart.
+1. The machine boots to the desktop from the stick. A stick made with `tools/mkusb.sh` carries a store partition and keeps what is typed; the plain iso written to a stick has none, and then nothing typed survives a restart until the machine settles on a disk.
 2. If a keyboard is present and at least one disk is on the bus, the start-up lists the disks and asks which one to take. Type the disk's number, then `yes`. Escape, or two minutes of silence, continues without a store.
 3. Taking a disk erases it: it gets a boot volume (loader and kernel) and a store partition. The machine then boots from that disk on its own.
 4. Less drastic ways are in the terminal: `settle in partition P of disk N` (only that partition becomes the store) or `settle in the free space of disk N` (a store is made in unpartitioned room; nothing else is touched). `disks` lists what is on the bus first.
@@ -185,7 +185,7 @@ The terminal walks like the shell does: it stands on an object and can go only w
 
 ### 5.6 Nodes and the other machines (chapter 13)
 
-`scan`, `found`, `point at <name or address>`, `send <name>`, `ask <name> [with <object>] [as code] [across N]`, `say <words>`, `nodes`, `allow <node> work|update|vouch|all|nothing`, `forget <node>`, `trust <name> ssh-ed25519 ...`, `vouch <node>`, `renew key`, `update <node> [with <kernel.elf>]`, `update all`, `update check`.
+`scan`, `found`, `point at <name or address>`, `send <name>`, `ask <name> [with <object>] [as code] [across N]`, `say <words>`, `nodes`, `allow <node> work|update|vouch|all|nothing`, `forget <node>`, `trust <name> ssh-ed25519 ...`, `vouch <node>`, `unvouch <node>`, `renew key`, `update <node> [with <kernel.elf>]`, `update all`, `update check`.
 
 ### 5.7 The machine
 
@@ -309,7 +309,7 @@ Any text can be a program: stand on it and press `run`, or `run <name>`. The tex
 A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs there in the interpreter with a time budget (20 s) and holds only its words and a reply port ("the way home").
 
 - The recipe begins with `wait`: the first gift is the reply port; `m` is the low end of the range. A second `wait` delivers the high end as `m`. `answer <v>` sends the result to the reply port.
-- `split P from LO to HI` as the first line divides the task into P parts over the machines that answered the scan willing; each part runs with its own stretch; numeric answers are summed, word answers are gathered in order.
+- `split P from LO to HI` as the first line divides the task into P pieces over the machines that answered the scan willing; each piece runs with its own stretch; numeric answers are summed, word answers are gathered in order. The line works the same for a compiled task (9.3) and under a quorum (9.5).
 - The answer is written back into the task as a `= ...` line when the task came writable, else laid into arrivals as `answer N`. It names the machines that gave it: `50005000 (4 parts by alpha, beta)`.
 - `ask <task> with <object>`: the object (text, bytes or picture, up to 8 MiB) goes ahead of every part; the script receives it as its third gift, so a third `wait` makes it "it" and `get` reads it.
 - Pointing a task at the foreman program hands it in without another click; `again N` in its first line repeats it every N seconds.
@@ -320,13 +320,15 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 - `ask <task> as code` sends the task as C source. The far machine compiles it with its own compiler, loads the image, and runs it under a deadline the kernel enforces -- a compiled program that never returns is ended when the budget runs out, even a bare `for(;;){}` with no system calls.
 - The program is entered with its console capability in the first argument and its letter box in the second (`long main(long console, long inbox)`). It answers by sending one message: `syscall(2, console, 0x54584554, w0, w1, w2)` -- tag `"TEXT"`, up to 24 bytes across the three words. A run of ASCII digits is read as a number, anything else as text.
 - An input sent with the task (`... with <object>`) arrives as a read-only capability in the letter box: `syscall(3, inbox, buffer, 0)` receives the message, its `caps[0]` (at byte 48 of the message) is the input's handle, and `syscall(4, handle, offset)` reads eight bytes at a time.
-- The source must fit one datagram (1024 bytes); a compiled task takes no range yet; one compile runs at a time on a machine (the compiler's tables are shared), so a busy machine answers "busy" and the asker retries.
+- A split task (`split P from LO to HI` as the first line, before the source) hands each piece its stretch as a message in the letter box: tag `"RANG"` (`0x474E4152`), the two words low and high -- `syscall(3, inbox, buffer, 0)` receives it, `buffer[2]` and `buffer[3]` as longs are the ends. When an input was sent too, the input's message comes first. The pieces' answers are summed or gathered like a script's.
+- The source must fit one datagram (1024 bytes); one compile runs at a time on a machine (the compiler's tables are shared), so a busy machine answers "busy" and the asker retries.
 
 ### 9.5 Quorum
 
 - `ask <task> across N` runs the whole task on N distinct machines and takes the answer a verified majority agree on: `42  (agreed by 2 of 2)`. Only signed, verified answers count toward the majority.
 - When no majority agrees, the disagreement is named rather than hidden: `no agreement -- alpha said 42, gamma said 41`. When fewer than N machines answer the scan willing, the job says so.
 - Combine freely: `ask <task> as code across N with <object>` -- code, quorum and input in any order. Each of the N machines gets its own copy of the input.
+- With a split line too, every piece runs on N distinct machines: each piece's result is what a majority of its replicas agree on, and the pieces are then summed or gathered: `5050 (2 pieces, each agreed by at least 2 of 2)`; a piece without agreement names the disagreement (`no agreement on piece 2 -- ...`). Pieces times N may not exceed eight.
 
 ### 9.4 Signed answers and the ledger
 
@@ -373,11 +375,11 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 
 ## 11 Storage
 
-- **Disks**: AHCI, up to eight. Roles: the boot disk (port 0, the FAT volume with `\EFI\BOOT\BOOTX64.EFI` and `\erebus\kernel.elf`), the store (a GPT partition of type `E2EB0500-5354-4F52-4552-454255530001`), and an exchange disk (FAT32) when one stands beside them.
+- **Disks**: AHCI, up to eight, and usb disks (sticks, card readers: bulk-only transport, 512-byte sectors) through the xhci driver. Roles: the boot disk (port 0, the FAT volume with `\EFI\BOOT\BOOTX64.EFI` and `\erebus\kernel.elf`), the store (a GPT partition of type `E2EB0500-5354-4F52-4552-454255530001`), and an exchange disk (FAT32) when one stands beside them.
 - **Settling** (2.2): the store is where the graph lives; a disk taken whole boots the machine; a partition or free space only holds the store. Foreign disks are never written.
 - **Snapshots**: two alternating slots, generation number and checksum, sixteen generations kept; objects from 4 KiB up go into a content-addressed blob log that is compacted when full.
 - **Exchange disk**: its root directory appears as `the disk` on the system shelf (`take in <list>`); `write out <list>` writes texts and bytes back under 8.3 names. Files up to 4 MiB in, 16 MiB out.
-- **USB sticks** boot the machine but cannot hold the store.
+- **USB sticks**: a stick made with `tools/mkusb.sh` boots the machine and holds its store -- on a machine with no store yet, the store partition on the stick is the store and the stick counts as the boot disk; the start-up still offers the machine's own disks (2.2), since a stick is there to install from. Beside a machine that has its store, such a stick keeps to itself. A plain usb disk (no store partition) is the exchange disk when none stands on sata. A usb disk can be settled on (`settle on disk N`) like any other. Reads and writes go 64 KiB at a time; a usb disk unplugged while it is the store leaves the machine without one until the next start.
 
 ---
 
@@ -405,11 +407,11 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 ### 12.5 Verified servers (https)
 
 - What is checked: the server's certificate chain is walked from its own certificate to a trusted authority -- every signature on the way (ECDSA P-256 or RSA, both with SHA-256), every certificate's dates against the clock, that a certificate in the middle is marked as an authority, and that the server's certificate names the host asked for (its subject alternative names; a wildcard stands for one label). Then the server's signature over the handshake is checked against the key in that certificate, which is what proves the server holds the key and not only a copy of the certificate.
-- The trusted authorities built in are the intermediates that sign github.com (Sectigo DV E36) and the release cdn (Let's Encrypt YR1, YR2, YR3) -- the two hosts the self-update speaks to. The kernel says at start how many it carries (`tls: certificate checks ready`).
+- The trusted authorities built in are the roots most of the web hangs under -- ISRG (Let's Encrypt), USERTrust and Sectigo, DigiCert, GlobalSign, Google Trust Services, Amazon and Starfield, Go Daddy, Microsoft, HARICA, SSL.com, T-TeleSec, D-TRUST, COMODO: thirty-four of them, taken from the Mozilla bundle -- and, besides, the intermediates that sign github.com (Sectigo DV E36) and the release cdn (Let's Encrypt YR1, YR2, YR3). Signatures with ECDSA over P-256 or P-384 and RSA up to 4096 bits, each with SHA-256, SHA-384 or SHA-512, are checked. The kernel says at start how many authorities it carries (`tls: certificate checks ready`).
 - An authority of your own: write `authority | <base64>` into the settings, the base64 being the authority certificate's public key as `openssl x509 -in ca.pem -pubkey -noout | openssl pkey -pubin -outform DER | base64 -w0` prints it. Up to four lines. A server whose chain reaches one of them counts as verified.
 - What becomes of an unverified server: by default the page still comes, marked `sealed, unverified`, and the log and journal say why (`no trusted authority signs the chain`, `the certificate names no host that matches`, `a certificate in the chain has expired`, ...). `tls | strict` refuses such a page instead.
 - The clock matters: dates are judged against the machine's clock, which comes from the real-time clock at start and from the net once a time server answered (`net: the clock was set from the net`).
-- Limits: only the intermediates above are built in, not the roots (the roots sign with P-384 and SHA-384, which are not implemented); when github or the cdn move to another intermediate their pages are marked unverified until a kernel with the new authority is installed. No revocation checking. The self-update does not depend on any of this: its package is ed25519-signed (13.8).
+- Limits: a host under a root not in the list is unverified until its authority is written into the settings; no revocation checking; no name constraints. The self-update does not depend on any of this: its package is ed25519-signed (13.8).
 
 ### 12.4 Wireless
 
@@ -431,14 +433,15 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 
 `nodes` on the system shelf, one row per node:
 
-    name         | key (base64)                                | address           | version       | may
-    bochum       | AAAAC3Nz...                                 | 10.9.9.21 7800    | 0.5.0         | work update
+    name         | key (base64)                                | address           | version       | may       | via
+    bochum       | AAAAC3Nz...                                 | 10.9.9.21 7800    | 0.5.0         | work update | met
 
-- The kernel writes key, address and version; it rewrites the table when a node appears, moves or changes version.
+- The kernel writes key, address, version and via; it rewrites the table when a node appears, moves or changes version. `via` says how the key came to be here: `met` (a proven handshake), `by hand` (a `trust` line), or `vouched <key>` (pinned on that node's vouch, not yet met).
 - The person edits `name` (a petname) and `may`: `work`, `update`, `vouch`, `all`, or nothing. `allow <node> work update`, `allow <node> all`, `allow <node> nothing` write the column from the terminal.
 - `forget <node>` drops the row: the node is met fresh next time, trust on first use again. This is how a changed key is accepted on purpose (forget the node, then let it knock) and how a wrong trust is undone.
 - `trust <name> ssh-ed25519 AAAA...` writes a row before the node is met, so its first handshake is recognised rather than trusted on sight -- the key checked out of band beforehand. (Editing the text by hand does the same.)
 - `vouch <node>` tells every other known node, over a signature, that this node's key is one you recognise. A node that has marked this machine `allow ... vouch` pins the vouched key before it ever meets it -- a third party's word, checked by signature, standing in for trust on first use. Only recognition travels: no rights ride along, and a vouch from a node you have not marked `vouch` is ignored.
+- `unvouch <node>` withdraws that, over the same signature to the same nodes: a row that still rests on the vouch (`via` says `vouched` by you) is dropped; a node met since, written by hand, or vouched by another keeps its row.
 - `renew key` rotates this machine's own door key: a fresh pair is made and announced to every known node, each announcement signed with the old key and the new so the far side moves its row for you without meeting you afresh; a node that does not already hold the old key ignores it and meets the new key later. Losing `the door key` object still makes a fresh key at the next start -- but then the peers do not know it, and each must `forget` and meet you again.
 - `nodes` in the terminal lists the rows with when each was last heard.
 
@@ -478,10 +481,10 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 A machine on the network can keep itself current from a published release, with no other node involved.
 
 - Turn it on with a settings line: `update | auto`. Off by default. `update check` in the terminal looks once, on demand, whichever way the setting is; because the check runs in the background and can take a while, its outcome is printed back into the terminal when it is done -- already current, a newer version installing, or the source unreachable -- as well as into the log.
-- What happens: now and then (soon after start, then every six hours) the machine fetches an update package from the release source, reads the version inside it, and if it is newer than the running one, verifies the package's signature and -- only if it verifies -- installs the kernel and restarts. The loader's kernel.old rollback still applies, so a kernel that will not come up twice is backed out.
+- What happens: now and then (soon after start, then every six hours) the machine reads the small `version` file under the release source; only when it names something newer than the running version does it fetch the update package, verify the package's signature and -- only if it verifies -- install the kernel and restart. A source without the file (an older release) is asked for the package, which names its version itself. The loader's kernel.old rollback still applies, so a kernel that will not come up twice is backed out.
 - Why it is safe on its own: the package is signed with the project's ed25519 key, and the matching public key is built into the kernel. The signature covers the version and the kernel together; a package that does not verify is refused. The network only decides *when* to update; the signature decides *what* may be installed. So a man in the middle, or a wrong file, cannot plant a kernel. The transport's own verification of github.com and the cdn (12.5) comes on top and is said in the log, but the update does not depend on it -- with `tls | strict` an unverified hop refuses the fetch, and the check reports the source as unreachable.
 - The source: by default `https://github.com/DustinHab/EreBUS/releases/latest/download`, under which it fetches `update.pkg`. `update | auto http://host[:port]` in the value points it at another base -- a local server, for a test.
-- The package `update.pkg` is `magic | signature | version | kernel.elf`, published as a release asset and built with `tools/sign-release.sh` from the private key that never leaves the build machine.
+- The package `update.pkg` is `magic | signature | version | kernel.elf`, published as a release asset beside the one-line `version` file; both are built with `tools/sign-release.sh` from the private key that never leaves the build machine.
 - A failed or refused update is said on the attention page (7); an installed one restarts the machine.
 
 ### 13.9 Limits
@@ -490,7 +493,7 @@ A machine on the network can keep itself current from a published release, with 
 - A far-work result is signed by the node that produced it, but not otherwise checked: the answer is that node's word, not a proof the computation is right. Running the same task on several nodes and comparing is left for a later version.
 - Broadcast discovery covers the local network only; across routers a node must be entered as peer once, after which gossip and heartbeat keep it known.
 - One transfer at a time per node; one job at a time per worker.
-- https verifies servers against a handful of built-in intermediates and the authorities written into the settings (12.5); there is no general root store and no revocation checking.
+- https verifies servers against thirty-eight built-in authorities and those written into the settings (12.5); no revocation checking, no name constraints.
 
 ---
 
@@ -537,3 +540,4 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 | 0.8.6 | 2026-09-05 | `update check` answers in the terminal where it was typed. The check runs in the network thread and can take a while, so it cannot reply on the same line; its outcome -- already current, a newer version installing, or the source unreachable -- is now printed back into the terminal when it is done, not only into the log. |
 | 0.8.7 | 2026-09-05 | the tls client verifies the server (12.5): the certificate chain is walked to a trusted authority -- ECDSA P-256 and RSA (PKCS#1 v1.5) signatures with SHA-256, dates, host names from the subject alternative names, authority marks in the middle -- and the server's signature over the handshake (ECDSA or RSA-PSS) is checked against the certificate's key. Built-in authorities: Sectigo DV E36 for github.com, Let's Encrypt YR1-YR3 for the release cdn; `authority \|` adds one of your own; `tls \| strict` refuses an unverified server, otherwise the page is marked `sealed, unverified` and the journal says why. New at start: `tls: certificate checks ready`. The machine now keeps a full date, from the real-time clock and the net. |
 | 0.8.8 | 2026-09-05 | fixes across the system, no new words. Fetching ran at a fraction of the link: the tcp window was a fixed 32 KiB whatever room the receive ring had left, so the peer sent what could not be kept and every cut cost its retransmit timeout -- the release package (2.8 MB) took 93 s and takes 1.2 s now. The window is the room in the ring, a window update goes out when room opens again (the door too), a fetch stops when Content-Length is reached instead of waiting for the peer's close, and the card's receive ring holds 128 frames. Scheduler: the idle thread yields after every interrupt and is passed over while another thread is ready. Pipe: a handshake in progress is no longer replaced by one for another address (a task sent across two machines restarted both handshakes against each other every round; the slow scheduler had hidden it). TCP: a fin arriving ahead of lost data no longer ends the stream short (the late data was then dropped and the page or package came truncated); a retransmission that begins before the expected byte is taken from that byte on; malformed header offsets are refused; the log counts what arrived out of order. DNS: names that end in a compression pointer. Certificates: an extension with a malformed boolean read an uninitialized element (the fuzzer found it). Self-update: a version name of full length overflowed the report line. Bundles and FAT32: length checks that could wrap; a volume whose tables lie past its end or whose root cluster is out of range is refused. The fuzzers (15) now cover the certificate checker and the page renderer. |
+| 0.8.9 | 2026-09-06 | the web verified: thirty-four roots from the Mozilla bundle join the built-in authorities, with ECDSA over P-384 and RSA up to 4096 bits under SHA-256, SHA-384 and SHA-512 -- Wikipedia, Google, Amazon, Microsoft, heise and GitHub verify from the machine (12.5). Far work: `split` works for compiled tasks (the range comes as a `RANG` message, 9.3) and under a quorum (every piece on N machines, majority per piece, 9.5). `unvouch <node>` withdraws a vouch; the nodes table's new `via` column says how each key came to be there (13.2). Self-update reads a one-line `version` file first and fetches the package only when it names something newer (13.8). USB disks: sticks and card readers are driven through xhci, and a stick made with `tools/mkusb.sh` carries the store (11). |

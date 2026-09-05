@@ -66,4 +66,21 @@ bool blk_boot_write(u64 lba, u32 count, const void *src);
  * Runs on a sector below anything the store keeps. */
 bool blk_selftest(void);
 
+/* A disk on another bus -- a usb stick -- registered with its own way
+ * of moving sectors (count of them, at lba, into or out of buf; the
+ * driver copies through its own memory). It takes a number like the
+ * others; the roles are looked at anew: with no store yet, a store
+ * partition on it becomes the store and it counts as the boot disk;
+ * else, with no exchange disk yet, it is that. Returns the number, or
+ * -1 when the row is full. */
+typedef bool (*blk_io)(void *ctx, u64 lba, u32 count, void *buf, bool write);
+i32  blk_add(const char *model, u64 sectors, blk_io io, void *ctx);
+/* The disk is gone: reads and writes to it fail from here on. */
+void blk_remove(i32 which);
+/* Where a disk hangs, in a few words: "ahci port 0", "usb". */
+const char *blk_disk_where(u32 which);
+/* Whether the store lies on a usb disk; whether a disk is one. */
+bool blk_store_on_usb(void);
+bool blk_disk_on_usb(u32 which);
+
 #endif /* EB_BLK_H */
