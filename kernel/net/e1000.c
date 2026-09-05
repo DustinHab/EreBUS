@@ -73,7 +73,8 @@ typedef struct {
     u16 special;
 } __attribute__((packed)) tx_desc;
 
-#define RX_COUNT 32
+#define RX_COUNT 128                 /* a page of descriptors holds 256; the buffers take 64 pages;
+                                      * more than the largest tcp window (64 KiB) in frames */
 #define TX_COUNT 8
 #define BUF_SIZE 2048
 
