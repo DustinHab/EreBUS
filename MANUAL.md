@@ -1,6 +1,6 @@
 # EreBUS Manual
 
-For EreBUS 0.5.2. This manual is updated with every release; the version it describes is the one on the releases page.
+For EreBUS 0.6.0. This manual is updated with every release; the version it describes is the one on the releases page.
 
 Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions
 
@@ -475,3 +475,4 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 | 0.5.0 | 2026-09-04 | nodes: identity by key, the nodes table and rights per node, kernel updates through the pipe, the network page, heartbeat and gossip, work with input objects, answers with provenance, `version`, `peer` by name |
 | 0.5.1 | 2026-09-05 | compiler fix: members of a struct that contains an inner struct body were resolved against the inner body's members; a self-built kernel's compiler could not compile anything. selfkernel test extended to a second generation. Runtime messages reworded. Test battery parallel and under KVM. |
 | 0.5.2 | 2026-09-05 | console messages of the assembler programs reworded to factual wording. Test battery: relay, agent and persist as scripts in the parallel lanes, per-test directories and time limit, pipe tests driven through the terminal; 22 tests in about 4 minutes. No change to what the machine does. |
+| 0.6.0 | 2026-09-05 | visual overhaul of the shell: one warm ground with a single accent used only for agency and position (the caret, the write right, the picked row, the mode in use), regions parted by rules rather than filled boxes, the focused object's name at double height, region labels as spaced capitals, marked text in inverse video. The structure, the layout and what the machine does are unchanged. |

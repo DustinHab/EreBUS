@@ -43,27 +43,33 @@ typedef struct {
           accent, write, readonly, bar;
 } palette;
 
+/* One warm ground, one ink, two greys between them, one accent. The
+ * panels are the ground itself: regions are told apart by rules, not
+ * by boxes. The accent marks agency and position -- the caret, the
+ * write right, the picked row, the mode in use -- and nothing else.
+ * "write" is the accent; "readonly" is a sand tone for what is only
+ * to be read or was named by someone else. */
 static const palette pal_dark = {
-    RGB( 12,  14,  19), RGB( 22,  26,  34), RGB( 30,  36,  48),
-    RGB( 48,  56,  72), RGB(214, 219, 230), RGB(120, 130, 150),
-    RGB( 74,  82,  98), RGB(122, 172, 255), RGB(126, 200, 140),
-    RGB(206, 158,  92), RGB(  8,  10,  14),
+    RGB( 16,  15,  13), RGB( 16,  15,  13), RGB( 44,  40,  34),
+    RGB( 58,  53,  46), RGB(228, 220, 206), RGB(146, 138, 124),
+    RGB( 92,  86,  76), RGB(232, 102,  44), RGB(232, 102,  44),
+    RGB(178, 160, 128), RGB( 16,  15,  13),
 };
 
-/* Paper, not a photograph negative: the light palette is chosen by
- * hand, since inverting the dark one produces glare, not light. */
+/* Paper: an ivory ground and near-black ink, the same accent a shade
+ * deeper. Chosen by hand; inverting the dark palette gives glare. */
 static const palette pal_light = {
-    RGB(232, 230, 224), RGB(219, 216, 208), RGB(205, 201, 191),
-    RGB(178, 174, 164), RGB( 34,  37,  43), RGB( 92,  97, 106),
-    RGB(150, 152, 155), RGB( 38,  86, 168), RGB( 26, 112,  53),
-    RGB(158,  90,  18), RGB(210, 206, 197),
+    RGB(236, 231, 220), RGB(236, 231, 220), RGB(220, 213, 198),
+    RGB(196, 188, 172), RGB( 28,  26,  22), RGB( 98,  92,  82),
+    RGB(150, 143, 130), RGB(196,  66,  22), RGB(196,  66,  22),
+    RGB(130, 104,  60), RGB(236, 231, 220),
 };
 
 static palette pal = {
-    RGB( 12,  14,  19), RGB( 22,  26,  34), RGB( 30,  36,  48),
-    RGB( 48,  56,  72), RGB(214, 219, 230), RGB(120, 130, 150),
-    RGB( 74,  82,  98), RGB(122, 172, 255), RGB(126, 200, 140),
-    RGB(206, 158,  92), RGB(  8,  10,  14),
+    RGB( 16,  15,  13), RGB( 16,  15,  13), RGB( 44,  40,  34),
+    RGB( 58,  53,  46), RGB(228, 220, 206), RGB(146, 138, 124),
+    RGB( 92,  86,  76), RGB(232, 102,  44), RGB(232, 102,  44),
+    RGB(178, 160, 128), RGB( 16,  15,  13),
 };
 
 #define C_BACK      (pal.back)
@@ -633,17 +639,31 @@ static void text_at(i32 x, i32 y, i32 limit, const char *s, color c)
     }
 }
 
-/* One muted colour per kind of thing, used wherever a type is named.
- * The eye learns them without being told: green things run, amber
- * things are raw, blue things are for reading and writing. */
+/* A region's label: capitals with a space between the letters, faint.
+ * The bitmap font has no small capitals; spaced capitals do the same
+ * work, and read as a label rather than as a word. */
+static void label_caps(i32 x, i32 y, i32 limit, const char *s)
+{
+    while (*s && x + GLYPH_W <= limit) {
+        char c = *s++;
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+        fb_glyph(x, y, (u8)c, C_FAINT, 0, false);
+        x += 2 * GLYPH_W;
+    }
+}
+
+/* A one-pixel rule under a run of text whose top is y. */
+static void underline(i32 x, i32 y, i32 w, color c)
+{
+    fb_rect(x, y + GLYPH_H + 1, w, 1, c);
+}
+
+/* The kind of a thing is a word, set like the other words; the accent
+ * is kept for what can be done, not for what something is. */
 static color type_color(type_id t)
 {
-    switch (t) {
-    case TYPE_TEXT:    return C_ACCENT;
-    case TYPE_BYTES:   return C_READONLY;
-    case TYPE_PROGRAM: return C_WRITE;
-    default:           return C_DIM;
-    }
+    (void)t;
+    return C_DIM;
 }
 
 static u32 put(char *buf, u32 at, const char *s)
@@ -880,7 +900,7 @@ static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
         if (ch == '\n' || cx >= cols) {
             if (i >= lo && i < hi && ch == '\n' && on)
                 fb_rect(x + cx * GLYPH_W, py, GLYPH_W / 2, GLYPH_H,
-                        C_EDGE);
+                        C_TEXT);
             cx = 0; cy++;
             past_bar = false;
             if (ch == '\n') continue;
@@ -889,13 +909,11 @@ static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
         }
         if (cy >= scroll + (u32)vis) break;
 
-        if (i >= lo && i < hi && on)
-            fb_rect(x + cx * GLYPH_W, py, GLYPH_W, GLYPH_H, C_EDGE);
-
+        bool marked = (i >= lo && i < hi);
+        bool hit = false;
         if (fnum) {
             while (fk < fnum && i >= fstarts[fk] + tfind_len) fk++;
-            if (fk < fnum && i >= fstarts[fk] && on)
-                fb_rect(x + cx * GLYPH_W, py, GLYPH_W, GLYPH_H, C_EDGE);
+            hit = (fk < fnum && i >= fstarts[fk]);
         }
 
         color c = C_TEXT;
@@ -903,7 +921,17 @@ static void lens_text(object *o, i32 x, i32 y, i32 w, i32 h, bool caret)
             if (ch == '|') { c = C_FAINT; past_bar = true; }
             else if (!past_bar) c = C_DIM;
         }
-        if (on) fb_glyph(x + cx * GLYPH_W, py, ch, c, 0, false);
+        if (on) {
+            /* Marked letters in inverse video; a letter the search
+             * found keeps its ink and gets a rule beneath. */
+            if (marked)
+                fb_glyph(x + cx * GLYPH_W, py, ch, C_BACK, C_TEXT, true);
+            else
+                fb_glyph(x + cx * GLYPH_W, py, ch, c, 0, false);
+            if (hit)
+                fb_rect(x + cx * GLYPH_W, py + GLYPH_H - 1, GLYPH_W, 1,
+                        C_ACCENT);
+        }
         cx++;
     }
 
@@ -1550,7 +1578,7 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
             text_at(x, ty, x + w, "state", C_DIM);
             text_at(x + 9 * GLYPH_W, ty, x + w,
                     alive ? "running" : "ended",
-                    alive ? C_WRITE : C_READONLY);
+                    alive ? C_TEXT : C_READONLY);
         }
         ty += ROW;
     }
@@ -1619,7 +1647,7 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
             bool lit = is_hovered(HOT_SCAN, 0);
             i32 sx2 = x + 10 * GLYPH_W;
             if (lit) fb_rect(sx2 - 4, ty - 3, 4 * GLYPH_W + 8, ROW, C_EDGE);
-            text_at(sx2, ty, x + w, "scan", lit ? C_TEXT : C_ACCENT);
+            text_at(sx2, ty, x + w, "scan", lit ? C_ACCENT : C_TEXT);
             hot_add(sx2 - 4, ty - 3, 4 * GLYPH_W + 8, ROW, HOT_SCAN, 0);
         }
         ty += ROW;
@@ -1671,7 +1699,7 @@ static void lens_structure(object *o, i32 x, i32 y, i32 w, i32 h)
 
                 bool plit = is_hovered(HOT_PEERPICK, i);
                 if (plit) fb_rect(x, ty - 3, w, ROW, C_EDGE);
-                text_at(x, ty, x + w, line, plit ? C_TEXT : C_ACCENT);
+                text_at(x, ty, x + w, line, plit ? C_ACCENT : C_TEXT);
                 hot_add(x, ty - 3, w, ROW, HOT_PEERPICK, i);
             }
             ty += ROW;
@@ -1791,8 +1819,10 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
 
     /* --- the path we took --------------------------------------- */
     fb_rect(PAD, top, left_w, bottom - top, C_PANEL);
-    text_at(PAD + PAD, top + PAD, PAD + left_w, "path", C_FAINT);
+    label_caps(PAD + PAD, top + PAD, PAD + left_w, "path");
     fb_rect(PAD + PAD, top + PAD + ROW - 2, left_w - 2 * PAD, 1, C_EDGE);
+    /* The three regions are parted by rules, not by boxes. */
+    fb_rect(PAD + left_w + PAD / 2, top, 1, bottom - top, C_EDGE);
 
     i32 ty = top + PAD + ROW + 4;
     for (u32 i = 0; i < nav.depth; i++) {
@@ -1814,6 +1844,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         bool hot = is_hovered(HOT_TRAIL, i);
         if (here || hot)
             fb_rect(PAD, ty - 3, left_w, ROW, here ? C_PANEL_HI : C_EDGE);
+        if (here) fb_rect(PAD, ty - 3, 2, ROW, C_ACCENT);
         text_at(PAD + PAD, ty, PAD + left_w - PAD, line,
                 (here || hot) ? C_TEXT : C_DIM);
         hot_add(PAD, ty - 3, left_w, ROW, HOT_TRAIL, i);
@@ -1831,12 +1862,15 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         const char *n = lens_name((lens_kind)i);
         i32 w = (i32)(10 * GLYPH_W);
         bool hot = is_hovered(HOT_LENS, i);
+        i32 nl = 0;
+        while (n[nl]) nl++;
 
+        /* The lens in use is underlined in the accent; a hovered one
+         * in the rule colour. The word itself stays a word. */
         if (on || hot)
-            fb_rect(tab_x - 4, top + PAD - 4, w, ROW,
-                    on ? C_PANEL_HI : C_EDGE);
+            underline(tab_x, top + PAD, nl * GLYPH_W, on ? C_ACCENT : C_EDGE);
         text_at(tab_x, top + PAD, mid_x + mid_w, n,
-                on ? C_ACCENT : (hot ? C_TEXT : C_FAINT));
+                (on || hot) ? C_TEXT : C_FAINT);
         hot_add(tab_x - 4, top + PAD - 4, w, ROW, HOT_LENS, i);
         tab_x += w + 8;
     }
@@ -1860,8 +1894,7 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         i32 fx = mid_x + mid_w - PAD - fw;
         bool flit = is_hovered(HOT_TFIND, 0);
         if (flit || tfind_on)
-            fb_rect(fx - 4, top + PAD - 4, fw + 8, ROW,
-                    tfind_on ? C_PANEL_HI : C_EDGE);
+            underline(fx, top + PAD, fw, tfind_on ? C_ACCENT : C_EDGE);
         text_at(fx, top + PAD, mid_x + mid_w, fword,
                 tfind_on ? C_TEXT : (flit ? C_TEXT : C_FAINT));
         hot_add(fx - 4, top + PAD - 4, fw + 8, ROW, HOT_TFIND, 0);
@@ -1884,7 +1917,8 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     /* --- where it leads ------------------------------------------ */
     i32 rx = sw - PAD - right_w;
     fb_rect(rx, top, right_w, bottom - top, C_PANEL);
-    text_at(rx + PAD, top + PAD, sw - PAD, "contents", C_FAINT);
+    fb_rect(rx - PAD / 2, top, 1, bottom - top, C_EDGE);
+    label_caps(rx + PAD, top + PAD, sw - PAD, "contents");
     fb_rect(rx + PAD, top + PAD + ROW - 2, right_w - 2 * PAD, 1, C_EDGE);
 
     i32 list_top = top + PAD + ROW + 4;
@@ -1920,9 +1954,10 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         bool hot = is_hovered(HOT_REFERENCE, (u32)i);
         if (picked || hot)
             fb_rect(rx, ty - 3, right_w, ROW, picked ? C_PANEL_HI : C_EDGE);
+        /* The picked row carries a bar at the panel's edge, not an
+         * arrow in the text: the row is marked, the words are left. */
+        if (picked) fb_rect(rx, ty - 3, 2, ROW, C_ACCENT);
         hot_add(rx, ty - 3, right_w, ROW, HOT_REFERENCE, (u32)i);
-
-        text_at(rx + PAD, ty, sw, picked ? ">" : " ", C_ACCENT);
 
         /* The three rights, one letter each, each its own target.
          *
@@ -2274,11 +2309,14 @@ static void draw_graph_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         if (x + node_w < 0 || x > sw) continue;
 
         bool hot = is_hovered(HOT_NODE, i);
+        /* A node is a frame one pixel wide on the ground; the one in
+         * focus in the accent, the ones on the path in ink, the rest
+         * in the rule colour. */
         fb_rect(x - 2, y - 2, node_w + 4, node_h + 4,
-                is_focus ? C_ACCENT : (hot ? C_DIM
-                                           : (on_path ? C_EDGE : C_PANEL)));
-        fb_rect(x, y, node_w, node_h,
-                (is_focus || hot) ? C_PANEL_HI : C_PANEL);
+                (is_focus || hot) ? C_PANEL_HI : C_BACK);
+        fb_frame(x - 2, y - 2, node_w + 4, node_h + 4, 1,
+                 is_focus ? C_ACCENT : (hot ? C_TEXT
+                                            : (on_path ? C_DIM : C_EDGE)));
         hot_add(x - 2, y - 2, node_w + 4, node_h + 4, HOT_NODE, i);
 
         /* Labels only where they fit: a shrunken box with a full
@@ -2302,7 +2340,7 @@ static void draw_graph_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     /* The focused object's content, below the map. Even here one is
      * looking at something, not only at a diagram of it. */
     i32 py = bottom - 220;
-    fb_rect(PAD, py, (i32)fb_width() - 2 * PAD, 220 - PAD, C_PANEL);
+    fb_rect(PAD, py, (i32)fb_width() - 2 * PAD, 1, C_EDGE);
     draw_lens(nav.lens[0], focus(), PAD * 2, py + PAD,
               (i32)fb_width() - 4 * PAD, 220 - 3 * PAD, false);
 }
@@ -2331,8 +2369,10 @@ static void draw_tiles_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         bool last = (i + 1 == shown);
         i32 w = last ? wide : narrow;
 
-        fb_rect(x, top, w, bottom - top, last ? C_PANEL_HI : C_PANEL);
-        fb_rect(x, top, w, 2, last ? C_ACCENT : C_EDGE);
+        /* A rule along the top, the accent on the focused column, and
+         * a rule between neighbours; no filled boxes. */
+        fb_rect(x, top, w, 1, last ? C_ACCENT : C_EDGE);
+        if (i > 0) fb_rect(x - gap / 2 - 1, top, 1, bottom - top, C_EDGE);
 
         char what[48], r[4];
         label_of(idx ? nav.node[idx - 1] : NULL, idx ? nav.via[idx] : 0,
@@ -2426,9 +2466,7 @@ static void draw_pane(i32 px, i32 pw, i32 top, i32 bottom, bool primary)
     u32 depth = primary ? nav.depth : p2.depth;
     u32 sel   = primary ? nav.selected : p2.selected;
 
-    fb_rect(px, top, pw, bottom - top, C_PANEL);
-    if (primary)
-        fb_rect(px, top, pw, 2, C_ACCENT);
+    fb_rect(px, top, pw, 1, primary ? C_ACCENT : C_EDGE);
 
     /* The path as one line: every step a word, every word a way
      * back. */
@@ -2532,6 +2570,7 @@ static void draw_split_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     draw_pane(PAD, half - PAD - PAD / 2, top, bottom - PAD, true);
     draw_pane(half + PAD / 2, sw - half - PAD - PAD / 2, top,
               bottom - PAD, false);
+    fb_rect(half - 1, top, 1, bottom - PAD - top, C_EDGE);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2653,8 +2692,6 @@ static void draw_index_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     (void)sh;
     build_index();
 
-    fb_rect(PAD, top, sw - 2 * PAD, bottom - top, C_PANEL);
-
     i32 x = PAD * 2;
     i32 ty = top + PAD;
     char line[96];
@@ -2734,6 +2771,7 @@ static void draw_index_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         if (here || hot)
             fb_rect(PAD, ty - 3, sw - 2 * PAD, ROW,
                     here ? C_PANEL_HI : C_EDGE);
+        if (here) fb_rect(PAD, ty - 3, 2, ROW, C_ACCENT);
 
         at = 0;
         at = put_dec(line, at, obj_id(o));
@@ -2785,7 +2823,7 @@ static void draw_index_shell(i32 sw, i32 sh, i32 top, i32 bottom)
             bool alive = proc_is_running(o);
             text_at(sw - PAD * 2 - 8 * GLYPH_W, ty, sw - PAD,
                     alive ? "running" : "ended",
-                    alive ? C_WRITE : C_READONLY);
+                    alive ? C_TEXT : C_READONLY);
         }
 
         hot_add(PAD, ty - 3, sw - 2 * PAD, ROW, HOT_INDEX, i);
@@ -2868,8 +2906,10 @@ static void draw_term_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         }
         if (i < tlen) i++;
         line[n] = 0;
+        /* What was typed is set dim, what came back in full ink: the
+         * transcript's convention. */
         text_at(x, ty, x + w - 12, line,
-                line[0] == '>' ? C_ACCENT : C_TEXT);
+                line[0] == '>' ? C_DIM : C_TEXT);
         ty += ROW;
     }
 
@@ -2946,6 +2986,7 @@ static void draw_all(void)
      * not hidden in a dialogue somewhere -- they are the first thing on
      * the screen, because they are the first thing that matters. */
     fb_rect(0, 0, sw, top - 8, C_BAR);
+    fb_rect(0, top - 9, sw, 1, C_EDGE);
 
     char what[64], r[4];
     u32 d = nav.depth - 1;
@@ -2956,11 +2997,28 @@ static void draw_all(void)
     bool claimed = label_is_claim(holder, came_by, focus());
     rights_text(focus_rights(), r);
 
-    text_at(PAD * 2, 12, sw / 2, what, claimed ? C_READONLY : C_TEXT);
-    text_at(PAD * 2, 12 + ROW, sw / 2,
-            claimed ? "the object's own name"
-                    : "named by you",
-            C_FAINT);
+    /* The name at double height: the one line on the screen larger
+     * than the rest, as a terminal's double-height line was. The
+     * bitmap is doubled pixel for pixel, nothing is smoothed. The
+     * note on who named it follows on the same baseline when it
+     * fits, and drops to the second row when the name is long. */
+    {
+        i32 maxn = (sw / 2 - 4 * PAD) / (2 * GLYPH_W);
+        char big[64];
+        i32 n = 0;
+        while (what[n] && n < maxn && n < 63) { big[n] = what[n]; n++; }
+        big[n] = 0;
+        fb_text_scaled(PAD * 2, 9, big, claimed ? C_READONLY : C_TEXT, 2);
+
+        const char *sub = claimed ? "the object's own name" : "named by you";
+        i32 sl = 0;
+        while (sub[sl]) sl++;
+        i32 sx = PAD * 2 + (n + 2) * 2 * GLYPH_W;
+        if (sx + sl * GLYPH_W <= sw / 2 - PAD)
+            text_at(sx, 9 + GLYPH_H - 2, sw / 2, sub, C_FAINT);
+        else
+            text_at(PAD * 2, 12 + ROW, sw / 2, sub, C_FAINT);
+    }
 
     /* Room for the footer, which is the longest line anywhere on the
      * screen. It was 96 for a long time, and the footer was longer than
@@ -3023,7 +3081,7 @@ static void draw_all(void)
         if (can_run) {
             bool lit = is_hovered(HOT_RUN, 0);
             if (lit) fb_rect(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, C_EDGE);
-            text_at(chip_x, 14, sw - PAD, "run", lit ? C_TEXT : C_ACCENT);
+            text_at(chip_x, 14, sw - PAD, "run", lit ? C_ACCENT : C_TEXT);
             hot_add(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, HOT_RUN, 0);
             chip_x += 5 * GLYPH_W;
         }
@@ -3041,7 +3099,7 @@ static void draw_all(void)
         if (can_send) {
             bool lit = is_hovered(HOT_SEND, 0);
             if (lit) fb_rect(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, C_EDGE);
-            text_at(chip_x, 14, sw - PAD, "send", lit ? C_TEXT : C_ACCENT);
+            text_at(chip_x, 14, sw - PAD, "send", lit ? C_ACCENT : C_TEXT);
             hot_add(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, HOT_SEND, 0);
             sendto_x = chip_x;
             chip_x += 6 * GLYPH_W;
@@ -3056,7 +3114,7 @@ static void draw_all(void)
         if (can_send && ft == TYPE_TEXT) {
             bool lit = is_hovered(HOT_ASK, 0);
             if (lit) fb_rect(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, C_EDGE);
-            text_at(chip_x, 14, sw - PAD, "ask", lit ? C_TEXT : C_ACCENT);
+            text_at(chip_x, 14, sw - PAD, "ask", lit ? C_ACCENT : C_TEXT);
             hot_add(chip_x - 4, 11, 3 * GLYPH_W + 8, ROW, HOT_ASK, 0);
             chip_x += 5 * GLYPH_W;
         }
@@ -3082,7 +3140,7 @@ static void draw_all(void)
             nav.at_generation == 0) {
             bool lit = is_hovered(HOT_PACK, 0);
             if (lit) fb_rect(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, C_EDGE);
-            text_at(chip_x, 14, sw - PAD, "pack", lit ? C_TEXT : C_ACCENT);
+            text_at(chip_x, 14, sw - PAD, "pack", lit ? C_ACCENT : C_TEXT);
             hot_add(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, HOT_PACK, 0);
             chip_x += 6 * GLYPH_W;
         }
@@ -3091,7 +3149,7 @@ static void draw_all(void)
             bool lit = is_hovered(HOT_UNPACK, 0);
             if (lit) fb_rect(chip_x - 4, 11, 6 * GLYPH_W + 8, ROW, C_EDGE);
             text_at(chip_x, 14, sw - PAD, "unpack",
-                    lit ? C_TEXT : C_ACCENT);
+                    lit ? C_ACCENT : C_TEXT);
             hot_add(chip_x - 4, 11, 6 * GLYPH_W + 8, ROW, HOT_UNPACK, 0);
             chip_x += 8 * GLYPH_W;
         }
@@ -3104,7 +3162,7 @@ static void draw_all(void)
             (focus_rights() & CAP_READ) && nav.at_generation == 0) {
             bool lit = is_hovered(HOT_COPY, 0);
             if (lit) fb_rect(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, C_EDGE);
-            text_at(chip_x, 14, sw - PAD, "copy", lit ? C_TEXT : C_ACCENT);
+            text_at(chip_x, 14, sw - PAD, "copy", lit ? C_ACCENT : C_TEXT);
             hot_add(chip_x - 4, 11, 4 * GLYPH_W + 8, ROW, HOT_COPY, 0);
             chip_x += 6 * GLYPH_W;
         }
@@ -3114,13 +3172,13 @@ static void draw_all(void)
         if (can_asm) {
             bool lit = is_hovered(HOT_ASSEMBLE, 0);
             if (lit) fb_rect(chip_x - 4, 11, 8 * GLYPH_W + 8, ROW, C_EDGE);
-            text_at(chip_x, 14, sw - PAD, "assemble", lit ? C_TEXT : C_ACCENT);
+            text_at(chip_x, 14, sw - PAD, "assemble", lit ? C_ACCENT : C_TEXT);
             hot_add(chip_x - 4, 11, 8 * GLYPH_W + 8, ROW, HOT_ASSEMBLE, 0);
             chip_x += 10 * GLYPH_W;
 
             lit = is_hovered(HOT_COMPILE, 0);
             if (lit) fb_rect(chip_x - 4, 11, 7 * GLYPH_W + 8, ROW, C_EDGE);
-            text_at(chip_x, 14, sw - PAD, "compile", lit ? C_TEXT : C_ACCENT);
+            text_at(chip_x, 14, sw - PAD, "compile", lit ? C_ACCENT : C_TEXT);
             hot_add(chip_x - 4, 11, 7 * GLYPH_W + 8, ROW, HOT_COMPILE, 0);
             chip_x += 9 * GLYPH_W;
         }
@@ -3132,7 +3190,7 @@ static void draw_all(void)
             bool lit = is_hovered(HOT_FATIN, 0);
             if (lit) fb_rect(chip_x - 4, 11, 7 * GLYPH_W + 8, ROW, C_EDGE);
             text_at(chip_x, 14, sw - PAD, "take in",
-                    lit ? C_TEXT : C_ACCENT);
+                    lit ? C_ACCENT : C_TEXT);
             hot_add(chip_x - 4, 11, 7 * GLYPH_W + 8, ROW, HOT_FATIN, 0);
             chip_x += 9 * GLYPH_W;
 
@@ -3150,7 +3208,7 @@ static void draw_all(void)
             nav.at_generation == 0 && list_buildable(focus())) {
             bool lit = is_hovered(HOT_BUILD, 0);
             if (lit) fb_rect(chip_x - 4, 11, 5 * GLYPH_W + 8, ROW, C_EDGE);
-            text_at(chip_x, 14, sw - PAD, "build", lit ? C_TEXT : C_ACCENT);
+            text_at(chip_x, 14, sw - PAD, "build", lit ? C_ACCENT : C_TEXT);
             hot_add(chip_x - 4, 11, 5 * GLYPH_W + 8, ROW, HOT_BUILD, 0);
             chip_x += 7 * GLYPH_W;
         }
@@ -3194,7 +3252,7 @@ static void draw_all(void)
 
             bool lit = is_hovered(HOT_TAKE, 0);
             if (lit) fb_rect(hx - 4, hy - 3, 4 * GLYPH_W + 8, ROW, C_EDGE);
-            text_at(hx, hy, sw, "take", lit ? C_TEXT : C_ACCENT);
+            text_at(hx, hy, sw, "take", lit ? C_ACCENT : C_TEXT);
             hot_add(hx - 4, hy - 3, 4 * GLYPH_W + 8, ROW, HOT_TAKE, 0);
         } else if (held_len) {
             char ex[20];
@@ -3220,7 +3278,7 @@ static void draw_all(void)
                 bool lit = is_hovered(HOT_PUT, 0);
                 if (lit) fb_rect(hx - 4, hy - 3, 3 * GLYPH_W + 8, ROW,
                                  C_EDGE);
-                text_at(hx, hy, sw, "put", lit ? C_TEXT : C_ACCENT);
+                text_at(hx, hy, sw, "put", lit ? C_ACCENT : C_TEXT);
                 hot_add(hx - 4, hy - 3, 3 * GLYPH_W + 8, ROW, HOT_PUT, 0);
                 hx += 3 * GLYPH_W + 2 * GLYPH_W;
             }
@@ -3319,8 +3377,10 @@ static void draw_all(void)
     if (have_news) {
         i32 jy = sh - 28 - ROW - 6;
         bool lit = is_hovered(HOT_JOURNAL, 0);
-        if (lit) fb_rect(0, jy - 2, sw, ROW + 4, C_PANEL);
-        text_at(PAD * 2, jy, sw - PAD, newest, lit ? C_TEXT : C_FAINT);
+        if (lit) fb_rect(0, jy - 2, sw, ROW + 4, C_PANEL_HI);
+        /* A small square in the accent says: this just happened. */
+        fb_rect(PAD, jy + GLYPH_H / 2 - 2, 4, 4, C_ACCENT);
+        text_at(PAD * 2, jy, sw - PAD, newest, lit ? C_TEXT : C_DIM);
         hot_add(0, jy - 2, sw, ROW + 4, HOT_JOURNAL, 0);
     }
 
@@ -3330,10 +3390,11 @@ static void draw_all(void)
      * under it. Whoever knows their way around turns the hints off in
      * the settings, and the line keeps only the mode. */
     fb_rect(0, sh - 28, sw, 28, C_BAR);
+    fb_rect(0, sh - 29, sw, 1, C_EDGE);
 
     /* The four ways of looking, each its own word, each clickable --
      * tab cycles them, but a key alone would make them a secret. The
-     * one in use is lit. */
+     * one in use stands in inverse video, in the accent. */
     i32 mx = PAD * 2;
     for (u32 mi = 0; mi < SHELL_MODE_COUNT; mi++) {
         const char *mn = mode_name((shell_mode)mi);
@@ -3342,8 +3403,9 @@ static void draw_all(void)
 
         bool on = (nav.mode == (shell_mode)mi);
         bool lit = is_hovered(HOT_MODE, mi);
+        if (on) fb_rect(mx - 4, sh - 28 + 3, ml * GLYPH_W + 8, ROW, C_ACCENT);
         text_at(mx, sh - 28 + 6, sw, mn,
-                on ? C_ACCENT : (lit ? C_TEXT : C_FAINT));
+                on ? C_BACK : (lit ? C_TEXT : C_FAINT));
         hot_add(mx - 2, sh - 28, ml * GLYPH_W + 4, 28, HOT_MODE, mi);
         mx += (ml + 2) * GLYPH_W;
     }
@@ -3452,8 +3514,8 @@ static void draw_all(void)
         i32 py = 38;
         i32 ph = (i32)(1 + (nfound ? nfound : 1)) * ROW + 12;
 
-        fb_rect(px - 1, py - 1, pw2 + 2, ph + 2, C_EDGE);
-        fb_rect(px, py, pw2, ph, C_PANEL_HI);
+        fb_rect(px - 1, py - 1, pw2 + 2, ph + 2, C_DIM);
+        fb_rect(px, py, pw2, ph, C_BACK);
 
         i32 ty2 = py + 8;
         text_at(px + 8, ty2, px + pw2,
@@ -3463,7 +3525,7 @@ static void draw_all(void)
             i32 ax = px + pw2 - 10 * GLYPH_W - 8;
             if (alit) fb_rect(ax - 4, ty2 - 3, 10 * GLYPH_W + 8, ROW, C_EDGE);
             text_at(ax, ty2, px + pw2, "scan again",
-                    alit ? C_TEXT : C_ACCENT);
+                    alit ? C_ACCENT : C_TEXT);
             hot_add(ax - 4, ty2 - 3, 10 * GLYPH_W + 8, ROW, HOT_SCAN, 1);
         }
         ty2 += ROW;
@@ -3496,7 +3558,7 @@ static void draw_all(void)
 
             bool plit = is_hovered(HOT_SENDPICK, i);
             if (plit) fb_rect(px, ty2 - 3, pw2, ROW, C_EDGE);
-            text_at(px + 8, ty2, px + pw2, line, plit ? C_TEXT : C_ACCENT);
+            text_at(px + 8, ty2, px + pw2, line, plit ? C_ACCENT : C_TEXT);
             hot_add(px, ty2 - 3, pw2, ROW, HOT_SENDPICK, i);
             ty2 += ROW;
         }
