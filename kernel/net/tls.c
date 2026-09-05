@@ -491,15 +491,15 @@ bool tls_get(const u8 addr[4], const char *host, u32 hlen,
     epoch_from(s_ap, &s_app);
     epoch_from(c_ap, &c_app);
 
-    char req[420];
+    char req[1400];
     u32 at = 0;
     const char *a = "GET ";
     while (*a) req[at++] = *a++;
     if (plen == 0) req[at++] = '/';
-    for (u32 i = 0; i < plen && at < 300; i++) req[at++] = path[i];
+    for (u32 i = 0; i < plen && at < 1280; i++) req[at++] = path[i];
     a = " HTTP/1.0\r\nHost: ";
     while (*a) req[at++] = *a++;
-    for (u32 i = 0; i < hlen && at < 360; i++) req[at++] = (char)host[i];
+    for (u32 i = 0; i < hlen && at < 1340; i++) req[at++] = (char)host[i];
     a = "\r\nUser-Agent: erebus/0.1\r\nConnection: close\r\n\r\n";
     while (*a) req[at++] = *a++;
 

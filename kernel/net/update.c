@@ -187,9 +187,13 @@ void update_tick(void)
 {
     u64 now = time_ns();
 
-    if (restart_at_ns && now >= restart_at_ns) {
-        restart_at_ns = 0;
-        system_restart();
+    /* An install is pending: wait for the restart and do nothing else --
+     * no further check runs once a kernel is on its way in. */
+    if (restart_at_ns) {
+        if (now >= restart_at_ns) {
+            restart_at_ns = 0;
+            system_restart();
+        }
         return;
     }
 

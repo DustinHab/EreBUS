@@ -1422,15 +1422,15 @@ static bool http_fetch(const u8 *addr, const char *host, u32 hlen,
 {
     if (!tcp_open(addr, 80)) return false;
 
-    char req[420];
+    char req[1400];
     u32 at = 0;
     const char *a = "GET ";
     while (*a) req[at++] = *a++;
     if (plen == 0) req[at++] = '/';
-    for (u32 i = 0; i < plen && at < 300; i++) req[at++] = path[i];
+    for (u32 i = 0; i < plen && at < 1280; i++) req[at++] = path[i];
     a = " HTTP/1.0\r\nHost: ";
     while (*a) req[at++] = *a++;
-    for (u32 i = 0; i < hlen && at < 360; i++) req[at++] = host[i];
+    for (u32 i = 0; i < hlen && at < 1340; i++) req[at++] = host[i];
     a = "\r\nUser-Agent: erebus/0.1\r\nConnection: close\r\n\r\n";
     while (*a) req[at++] = *a++;
 
@@ -1495,7 +1495,7 @@ bool net_fetch(const char *url, u32 ulen, u8 *out, u32 max,
                u32 *body_off, u32 *body_len, bool *secure_out)
 {
     char host[128];
-    char path[256];
+    char path[1024];             /* signed redirect urls carry long query strings */
     u32 hlen = 0, plen = 0;
     bool secure = false;
     split_ask(url, ulen, host, sizeof(host), &hlen,
@@ -1539,7 +1539,7 @@ bool net_fetch(const char *url, u32 ulen, u8 *out, u32 max,
         }
 
         /* Location: ... somewhere in the headers. */
-        char where[256];
+        char where[1024];
         u32 wlen = 0;
         for (u32 i = 0; i + 9 < body; i++) {
             if ((out[i]=='l' || out[i]=='L') &&
