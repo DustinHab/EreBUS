@@ -10,6 +10,7 @@
 #include <eb/proc.h>
 #include <eb/journal.h>
 #include <eb/pipe.h>
+#include <eb/io.h>
 #include <eb/standard.h>
 #include <eb/settings.h>
 #include <eb/asm.h>
@@ -817,7 +818,7 @@ static void lay_made(term_session *s, const char *base, const u8 *bytes, u64 len
     t_say(s, "  'link' joins objects; 'build' compiles a list of texts.");
 }
 
-static void cmd_assemble(term_session *s, const char *what)
+static void assemble_run(term_session *s, const char *what)
 {
     if (!what[0]) { t_say(s, "assemble which text?"); return; }
     spot sp;
@@ -825,7 +826,6 @@ static void cmd_assemble(term_session *s, const char *what)
     if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "only a text can be assembled."); return; }
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
     if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "no write right on this list for the image."); return; }
-    if (term_building()) { t_say(s, "a build is running; wait for it to finish."); return; }
 
     u8 *out = lang_out_buffer();
     if (!out) { t_say(s, "out of memory for the tool tables."); return; }
@@ -837,6 +837,13 @@ static void cmd_assemble(term_session *s, const char *what)
                               out, LANG_OUT_MAX, &kind, err, sizeof(err));
     if (got < 0) { t_say(s, err); return; }
     lay_made(s, sp.nm, out, (u64)got, kind);
+}
+
+static void cmd_assemble(term_session *s, const char *what)
+{
+    if (!term_compile_claim()) { t_say(s, "the compiler is busy; try again."); return; }
+    assemble_run(s, what);
+    term_compile_release();
 }
 
 /* #include "name" reaches the texts lying beside the source: the
@@ -865,7 +872,7 @@ static bool find_beside(void *ctx, const char *name, const u8 **text, u64 *len)
 /* A text of c becomes a text of assembly beside it, and that becomes
  * an image beside it too. The assembly stays: what the compiler
  * made is there to be read. */
-static void cmd_compile(term_session *s, const char *what)
+static void compile_run(term_session *s, const char *what)
 {
     if (!what[0]) { t_say(s, "compile which text?"); return; }
     spot sp;
@@ -873,7 +880,6 @@ static void cmd_compile(term_session *s, const char *what)
     if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "only a text can be compiled."); return; }
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
     if (!(focus_rights(s) & CAP_WRITE)) { t_say(s, "no write right on this list for the output."); return; }
-    if (term_building()) { t_say(s, "a build is running; wait for it to finish."); return; }
 
     char base[NAME_SHOWN];
     u32 n = 0;
@@ -916,6 +922,13 @@ static void cmd_compile(term_session *s, const char *what)
         return;
     }
     lay_made(s, base, out, (u64)img, kind);
+}
+
+static void cmd_compile(term_session *s, const char *what)
+{
+    if (!term_compile_claim()) { t_say(s, "the compiler is busy; try again."); return; }
+    compile_run(s, what);
+    term_compile_release();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1122,6 +1135,20 @@ static void build_thread(void *arg)
 
 bool term_building(void) { return building; }
 
+/* The tools' shared tables, claimed for one compile at a time. Uses the
+ * same flag a background build sets, so a build and a compile -- local or
+ * for another machine -- never run the non-reentrant compiler at once. */
+bool term_compile_claim(void)
+{
+    u64 f = irq_save();
+    bool ok = !building;
+    if (ok) building = true;
+    irq_restore(f);
+    return ok;
+}
+
+void term_compile_release(void) { building = false; }
+
 bool term_build_start(object *list, const char *name)
 {
     if (building || !list) return false;
@@ -1149,8 +1176,9 @@ static void cmd_link(term_session *s, const char *what)
     if (obj_type(sp.o) != TYPE_LIST) { t_say(s, "link takes a list of objects."); return; }
     if (!(sp.r & CAP_READ)) { t_say(s, "you may not read that."); return; }
     if (!(sp.r & CAP_WRITE)) { t_say(s, "no write right on the list for the output."); return; }
-    if (building) { t_say(s, "a build is running; wait for it to finish."); return; }
+    if (!term_compile_claim()) { t_say(s, "the compiler is busy; try again."); return; }
     term_link_list(sp.o, sp.nm, say_to_session, s);
+    term_compile_release();
 }
 
 /* build <list>: every text in the list that is c or assembly becomes
@@ -1360,29 +1388,51 @@ static void cmd_send(term_session *s, const char *what)
  * of the work to every machine that gets a part. */
 static void cmd_ask(term_session *s, const char *what)
 {
-    if (!what[0]) { t_say(s, "ask with which task?  'ask <task>', or 'ask <task> with <object>' to send an input along."); return; }
+    if (!what[0]) { t_say(s, "ask with which task?  'ask <task>', 'ask <task> with <object>' to send an input, or 'ask <task> as code' to compile and run c there."); return; }
+
+    /* A trailing " as code" says the task is c source, to be compiled and
+     * run on the far machine rather than read by the interpreter. */
+    char buf[128];
+    u32 bl = 0;
+    while (what[bl] && bl < sizeof(buf) - 1) { buf[bl] = what[bl]; bl++; }
+    buf[bl] = 0;
+    bool compiled = false;
+    if (bl >= 8) {
+        const char *tail = buf + bl - 8;
+        if (tail[0]==' '&&tail[1]=='a'&&tail[2]=='s'&&tail[3]==' '&&
+            tail[4]=='c'&&tail[5]=='o'&&tail[6]=='d'&&tail[7]=='e') {
+            compiled = true; bl -= 8; buf[bl] = 0;
+        }
+    }
 
     char task[64];
     const char *with = NULL;
     u32 tl = 0;
-    for (u32 i = 0; what[i] && tl < sizeof(task) - 1; i++) {
-        if (what[i] == ' ' && what[i+1] == 'w' && what[i+2] == 'i' && what[i+3] == 't' &&
-            what[i+4] == 'h' && what[i+5] == ' ') {
-            with = what + i + 6;
+    for (u32 i = 0; buf[i] && tl < sizeof(task) - 1; i++) {
+        if (buf[i] == ' ' && buf[i+1] == 'w' && buf[i+2] == 'i' && buf[i+3] == 't' &&
+            buf[i+4] == 'h' && buf[i+5] == ' ') {
+            with = buf + i + 6;
             break;
         }
-        task[tl++] = what[i];
+        task[tl++] = buf[i];
     }
     while (tl > 0 && task[tl - 1] == ' ') tl--;
     task[tl] = 0;
     while (with && *with == ' ') with++;
+
+    if (compiled && with && *with) {
+        t_say(s, "a compiled task takes no input yet; ask it without 'with'.");
+        return;
+    }
 
     spot sp;
     if (!resolve(s, task, &sp)) return;
     if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "a task is a text."); return; }
 
     bool ok;
-    if (with && *with) {
+    if (compiled) {
+        ok = pipe_ask_code(sp.o, (sp.r & CAP_WRITE) != 0);
+    } else if (with && *with) {
         spot in;
         if (!resolve(s, with, &in)) return;
         if (!(in.r & CAP_READ)) { t_say(s, "no read right on the input."); return; }

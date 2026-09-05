@@ -241,12 +241,21 @@ bool settings_create(void)
     return true;
 }
 
+static bool settings_backfill(void);
+
 void settings_adopt(object *o)
 {
     if (!o || obj_type(o) != TYPE_TEXT) return;
     if (settings) obj_release(settings);
     obj_retain(o);
     settings = o;
+
+    /* A store from an older kernel has whatever settings table it was
+     * seeded with; the kernel never rewrites a saved object, so matters
+     * added since -- keys, peer, work, and the rest -- are simply not
+     * there. Add the seed's missing rows so an updated machine gains
+     * them, and mark the object changed so the addition is kept. */
+    if (settings_backfill()) obj_touch(settings);
 }
 
 /* ------------------------------------------------------------------ */
@@ -603,6 +612,78 @@ static void note_changes(const values *was, const values *now)
             journal_says("settings", line);
         }
     }
+}
+
+/* Whether any line's left column is exactly this matter. */
+static bool has_matter(const u8 *d, u64 size, const char *matter)
+{
+    u64 start = 0;
+    for (u64 i = 0; i <= size; i++) {
+        bool end = (i == size) || d[i] == 0 || d[i] == '\n';
+        if (!end) continue;
+        const char *line = (const char *)d + start;
+        u64 len = i - start;
+        u64 bar = 0;
+        while (bar < len && line[bar] != '|') bar++;
+        if (bar < len) {
+            u64 a = 0, b = bar;
+            while (a < b && line[a] == ' ') a++;
+            while (b > a && line[b - 1] == ' ') b--;
+            if (matter_is(line, a, b, matter)) return true;
+        }
+        if (i == size || d[i] == 0) break;
+        start = i + 1;
+    }
+    return false;
+}
+
+/* Append every seed row whose matter the current table lacks. Returns
+ * true if anything was added. Bounded by the object's own capacity. */
+static bool settings_backfill(void)
+{
+    if (!settings) return false;
+    u8 *d = (u8 *)obj_data(settings);
+    u64 cap = obj_size(settings);
+    if (!d || cap == 0) return false;
+
+    u64 len = 0;                              /* text up to the first NUL */
+    while (len < cap && d[len] != 0) len++;
+
+    bool added = false;
+    u64 s = 0;
+    for (u64 i = 0; i <= sizeof(seed); i++) {
+        bool end = (i == sizeof(seed)) || seed[i] == 0 || seed[i] == '\n';
+        if (!end) continue;
+        const char *line = seed + s;
+        u64 sl = i - s;
+        u64 bar = 0;
+        while (bar < sl && line[bar] != '|') bar++;
+        if (bar < sl) {
+            u64 a = 0, b = bar;
+            while (a < b && line[a] == ' ') a++;
+            while (b > a && line[b - 1] == ' ') b--;
+            char matter[24];
+            u64 ml = 0;
+            for (u64 k = a; k < b && ml < sizeof(matter) - 1; k++)
+                matter[ml++] = line[k];
+            matter[ml] = 0;
+
+            if (ml && !has_matter(d, len, matter)) {
+                /* newline (if the text does not end in one) + the line,
+                 * with a byte kept for the terminating NUL. */
+                u64 need = sl + (len && d[len - 1] != '\n' ? 1 : 0) + 1;
+                if (len + need <= cap) {
+                    if (len && d[len - 1] != '\n') d[len++] = '\n';
+                    for (u64 k = 0; k < sl; k++) d[len++] = (u8)line[k];
+                    d[len] = 0;
+                    added = true;
+                }
+            }
+        }
+        if (i == sizeof(seed) || seed[i] == 0) break;
+        s = i + 1;
+    }
+    return added;
 }
 
 void settings_apply(void)

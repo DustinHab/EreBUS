@@ -176,6 +176,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/pipe-identity.sh | the pipe refuses a changed key at a known address |
 | tools/pipe-update.sh | a kernel through the pipe: refused without the update right, installed and booted with it |
 | tools/pipe-input.sh | far work with an input object; the answer names the worker |
+| tools/pipe-code.sh | compiled far work: a c task built and run on the worker, signed answer, and a runaway task ended by the deadline |
 | tools/pipe-work.sh, pipe-desk.sh, pipe-foreman.sh | far work, split tasks over three machines, standing tasks |
 | tools/relaytest.sh, agenttest.sh, persisttest.sh | capability passing between programs, rights following the reference, snapshots (also `make relay`, `make agent`, `make persist`) |
 | tools/sticktest.sh | one disk carries loader, kernel and store |
@@ -189,9 +190,9 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/selfbuild.sh, cctrial.sh | kernel built by the machine's compiler on the host |
 | tools/fuzz/run.sh | fuzzing of the language tools |
 
-`build/battery.sh` builds once, then runs 21 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`; disk images on `/mnt/c` stall under parallel writes), then renew alone (it rebuilds the kernel twice). Logs, screenshots and QEMU stderr come back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (default 480); a failed or stopped test runs once more and is marked "2nd try". Every test sources `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps, `BUILD` points at the test's directory. The summary prints seconds per test. `build/kvm-battery.sh` adds selfkernel.
+`build/battery.sh` builds once, then runs 22 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`; disk images on `/mnt/c` stall under parallel writes), then renew alone (it rebuilds the kernel twice). Logs, screenshots and QEMU stderr come back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (default 480); a failed or stopped test runs once more and is marked "2nd try". Every test sources `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps, `BUILD` points at the test's directory. The summary prints seconds per test. `build/kvm-battery.sh` adds selfkernel.
 
-Measured on 32 cores under KVM: about 230 s for all 22 tests (before: 38 minutes sequential under KVM, 22 minutes under TCG). Longest single tests: pipe-input 72 s, pipe-update 65 s, wifi 59 s.
+Measured on 32 cores under KVM: about 250 s for all 23 tests (before: 38 minutes sequential under KVM, 22 minutes under TCG). The longest is pipe-code, which twice waits out a compiled task's deadline.
 
 ## Using the ISO
 
@@ -209,8 +210,9 @@ Measured on 32 cores under KVM: about 230 s for all 22 tests (before: 38 minutes
 - No USB mass storage: a stick boots the machine but cannot hold the store.
 - No wireless chip driver.
 - TLS: privacy only, no certificate verification.
-- Results from far work are not verified; the answer names the machine that produced it.
+- Far-work answers are signed by the node that produced them and checked against its key, but the computation itself is not otherwise verified; running the same task on several nodes and comparing is left for later.
 - Node identity is trust on first use; no third party verifies a key.
+- A compiled task must fit one datagram (1024 bytes), takes no input object yet, and answers through the raw system-call ABI; one compile runs at a time per machine.
 - One ssh visitor at a time; no rekeying.
 - RTL8168/8169 driver written from documentation, untested on silicon.
 - Two HID inputs on one device: implemented, not tested on a real device.
@@ -223,6 +225,7 @@ Measured on 32 cores under KVM: about 230 s for all 22 tests (before: 38 minutes
 - EreBUS 0.5.1: compiler fix (member lookup in structs with inner struct bodies); a self-built kernel can compile again; selfkernel test runs a second generation.
 - EreBUS 0.5.2: console messages of the assembler programs reworded to factual wording; test battery parallel and reliable under load, 22 tests in about four minutes. No change to what the machine does.
 - EreBUS 0.6.0: visual overhaul of the shell -- one warm ground, a single accent for agency and position, regions parted by rules, the focused name at double height. Structure, layout and behaviour unchanged.
+- EreBUS 0.7.0: serious far work -- answers signed with the node's door key and verified against its key; a kernel-enforced deadline that ends a runaway job with no system calls; compiled tasks (`ask <task> as code`) built and run on the worker under that deadline; a job ledger on the system shelf.
 
 ## License
 

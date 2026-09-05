@@ -25,6 +25,9 @@
 #include <eb/ssh.h>
 #include <eb/fat.h>
 #include <eb/version.h>
+#include <eb/cc.h>
+#include <eb/ld.h>
+#include <eb/term.h>
 
 #define MAGIC     0x58504245u        /* "EBPX", little-endian */
 #define K_OFFER   1
@@ -79,6 +82,7 @@
 /* Flags in an OFFER and in an ASK. */
 #define F_FOR_WORK 1                 /* offer: an input for work, held for the ask that follows */
 #define F_HAS_INPUT 1                /* ask: hand the held input to the script as its third gift */
+#define F_COMPILED  2                /* ask: the recipe is c source; compile it there and run the image */
 #define INPUTS_MAX 4                 /* inputs held, one per asking machine */
 
 /* Wire kinds, deliberately not the kernel's type ids. */
@@ -263,6 +267,59 @@ static void line_append(const char *who, const char *what)
     d[len + at] = 0;
     irq_restore(flags);
     obj_touch(line_obj);
+}
+
+/* ------------------------------------------------------------------ */
+/* The ledger                                                          */
+/* ------------------------------------------------------------------ */
+
+/* A durable record of far-work jobs: what was asked and what came back,
+ * one line each, kept in a read-only text on the system shelf. It
+ * outlives the desk (which holds only jobs in flight) and the journal's
+ * ring, so a machine can be asked later what work it gave out or did. */
+static object *ledger_obj;
+
+void pipe_ledger_set(object *t)
+{
+    if (ledger_obj) obj_release(ledger_obj);
+    ledger_obj = t;
+    if (ledger_obj) obj_retain(ledger_obj);
+}
+
+object *pipe_ledger(void) { return ledger_obj; }
+
+static void ledger_append(const char *what)
+{
+    if (!ledger_obj || !what) return;
+
+    char ln[160];
+    u64 at = 0;
+    for (u64 i = 0; what[i] && at < sizeof(ln) - 2; i++) {
+        char c = what[i];
+        ln[at++] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+    }
+    while (at > 0 && ln[at - 1] == ' ') at--;
+    ln[at++] = '\n';
+
+    u64 flags = irq_save();
+    u8 *d = (u8 *)obj_data(ledger_obj);
+    u64 size = obj_size(ledger_obj);
+    if (!d || size < sizeof(ln) + 2) { irq_restore(flags); return; }
+    u64 len = 0;
+    while (len < size && d[len]) len++;
+
+    if (len + at + 1 > size) {                 /* full: drop the older half */
+        u64 from = len / 2;
+        while (from < len && d[from] != '\n') from++;
+        if (from < len) from++;
+        memmove(d, d + from, len - from);
+        len -= from;
+        memset(d + len, 0, size - len);
+    }
+    memcpy(d + len, ln, at);
+    d[len + at] = 0;
+    irq_restore(flags);
+    obj_touch(ledger_obj);
 }
 
 /* ------------------------------------------------------------------ */
@@ -807,6 +864,7 @@ typedef struct {
     i64     presult[PART_MAX];
     char    ptext[PART_MAX][25];   /* each part's answer as said */
     u8      pby[PART_MAX][4];      /* who answered it */
+    bool    pverified[PART_MAX];   /* the answer carried a good signature over the door key */
     u8      raw[24];
 
     u8      cand[CAND_MAX][4];
@@ -819,6 +877,7 @@ typedef struct {
     object *input;                 /* an object every worker gets ahead of its part, or NULL */
     u8      input_kind;
     u32     input_len;
+    bool    compiled;              /* the recipe is c source, compiled and run on each worker */
 } desk_job;
 
 static desk_job desk[DESK_JOBS];
@@ -870,14 +929,40 @@ static void job_says(u32 no, const char *tail)
     journal_says("pipe", line);
 }
 
+/* An answer, signed with this machine's door key over the job id, the
+ * status and the answer bytes. The seal already keeps the wire private;
+ * the signature binds the answer to the node's lasting identity, so it
+ * is proof of who produced it and stays proof if it is stored or passed
+ * on. A machine without a door key sends the answer unsigned (40 bytes),
+ * and the asking side treats it as unverified. */
 static void answer_send(sealrec *s, u64 id, u8 status, const u8 text[24])
 {
-    u8 pkt[40];
+    u8 pkt[104];
     wr32(pkt, MAGIC);
     pkt[4] = K_ANSWER; pkt[5] = status; pkt[6] = pkt[7] = 0;
     wr64(pkt + 8, id);
     for (u32 i = 0; i < 24; i++) pkt[16 + i] = text[i];
-    seal_send(s, pkt, 40);
+
+    u8 msg[33];
+    wr64(msg, id);
+    msg[8] = status;
+    for (u32 i = 0; i < 24; i++) msg[9 + i] = text[i];
+    if (ssh_sign(msg, sizeof(msg), pkt + 40))
+        seal_send(s, pkt, 104);
+    else
+        seal_send(s, pkt, 40);
+}
+
+/* Whether a received answer packet carries a good signature from the
+ * key this session was proven with. */
+static bool answer_verified(const sealrec *s, u64 id, const u8 *p, u32 len)
+{
+    if (!s || !s->proven || len < 104) return false;
+    u8 msg[33];
+    wr64(msg, id);
+    msg[8] = p[5];
+    for (u32 i = 0; i < 24; i++) msg[9 + i] = p[16 + i];
+    return ed25519_verify(s->idkey, msg, sizeof(msg), p + 40);
 }
 
 static void part_range(const desk_job *j, u32 part, i64 *lo, i64 *hi)
@@ -899,7 +984,9 @@ static void fask_send(sealrec *s, u32 fi)
 
     u8 pkt[40 + RECIPE_MAX];
     wr32(pkt, MAGIC);
-    pkt[4] = K_ASK; pkt[5] = j->input ? F_HAS_INPUT : 0; pkt[6] = pkt[7] = 0;
+    pkt[4] = K_ASK;
+    pkt[5] = (j->input ? F_HAS_INPUT : 0) | (j->compiled ? F_COMPILED : 0);
+    pkt[6] = pkt[7] = 0;
     wr64(pkt + 8, fask[fi].id);
     wr32(pkt + 16, j->len);
     wr32(pkt + 20, ASK_BUDGET_S);
@@ -942,6 +1029,13 @@ static void desk_clear_fasks(u32 job)
 static void job_end(desk_job *j, bool ok, const char *text,
                     const char *why)
 {
+    /* A line for the ledger either way: the job's number, what it was
+     * (a compiled c task or a recipe), and its result or why it failed. */
+    char led[128];
+    u32 la = put(led, 0, "job ");
+    la = put_dec(led, la, j->no);
+    la = put(led, la, j->compiled ? " (code): " : ": ");
+
     if (ok) {
         char line[64];
         u32 at = put(line, 0, " answers: ");
@@ -949,6 +1043,10 @@ static void job_end(desk_job *j, bool ok, const char *text,
         line[at] = 0;
         job_says(j->no, line);
         kprintf("pipe: job %u answers: %s\n", j->no, text);
+
+        la = put(led, la, text);
+        led[la] = 0;
+        ledger_append(led);
 
         if (j->writable) task_append(j->task, text);
         else             lay_answer(j->no, (const u8 *)text);
@@ -959,6 +1057,11 @@ static void job_end(desk_job *j, bool ok, const char *text,
         line[at] = 0;
         job_says(j->no, line);
         kprintf("pipe: job %u failed: %s\n", j->no, why);
+
+        la = put(led, la, "failed, ");
+        la = put(led, la, why);
+        led[la] = 0;
+        ledger_append(led);
 
         char fb[64];
         u32 fat = put(fb, 0, "nothing (");
@@ -1000,18 +1103,32 @@ static u32 put_answerers(const desk_job *j, char *buf, u32 at, u32 max)
         if (seen) continue;
         char nm[24];
         name_of(j->pby[p], seal_by_ip(j->pby[p]), nm);
-        if (at + 26 >= max) break;
+
+        /* A name is followed by "(unverified)" when any part it answered
+         * did not carry a good signature -- so a reader is never left to
+         * assume a bare name was proven. */
+        bool ver = true;
+        for (u32 q = 0; q < j->parts; q++)
+            if (ip4_same(j->pby[q], j->pby[p]) && !j->pverified[q]) ver = false;
+
+        if (at + 40 >= max) break;
         if (named++) at = put(buf, at, ", ");
         at = put(buf, at, nm);
+        if (!ver) at = put(buf, at, " (unverified)");
     }
     return at;
 }
 
-static bool ask_take(object *o, bool writable, object *input);
+static bool ask_take(object *o, bool writable, object *input, bool compiled);
 
 bool pipe_ask(object *o, bool writable)
 {
-    return ask_take(o, writable, NULL);
+    return ask_take(o, writable, NULL, false);
+}
+
+bool pipe_ask_code(object *o, bool writable)
+{
+    return ask_take(o, writable, NULL, true);
 }
 
 bool pipe_ask_with(object *o, bool writable, object *input)
@@ -1024,10 +1141,10 @@ bool pipe_ask_with(object *o, bool writable, object *input)
         journal_says("pipe", "the input exceeds 8 MiB");
         return false;
     }
-    return ask_take(o, writable, input);
+    return ask_take(o, writable, input, false);
 }
 
-static bool ask_take(object *o, bool writable, object *input)
+static bool ask_take(object *o, bool writable, object *input, bool compiled)
 {
     if (!o) return false;
 
@@ -1120,6 +1237,7 @@ static bool ask_take(object *o, bool writable, object *input)
     j->lo = lo;
     j->hi = hi;
     j->writable = writable;
+    j->compiled = compiled;
     j->no = ++desk_no;
     j->state = DJ_FRESH;
     j->task = o;
@@ -1847,18 +1965,56 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
             }
         }
 
-        object *script = obj_create(TYPE_TEXT, rlen + 512, 0);
-        if (!script) return;
-        memcpy(obj_data(script), p + 40, rlen);
-        obj_set_name(script, "task text");
-
         object *reply = port_create(4);
-        if (!reply) { obj_release(script); return; }
+        if (!reply) return;
         cap_handle h = cap_insert(pipe_kdom, reply, CAP_READ);
-
         if (budget == 0 || budget > 60) budget = ASK_BUDGET_S;
-        object *prog = work_launch(script, reply, budget, wlo, whi, input);
-        obj_release(script);
+
+        object *prog = NULL;
+        if (p[5] & F_COMPILED) {
+            /* A compiled job: build the c source into an image with the
+             * in-kernel compiler, then run the image. The compiler's
+             * tables are shared and not reentrant, so claim them; a busy
+             * compiler answers "busy", and the asker retries. */
+            if (!term_compile_claim()) {
+                cap_revoke(pipe_kdom, h); obj_release(reply);
+                answer_send(s, id, A_BUSY, none);
+                return;
+            }
+            char *asmtext = lang_text_buffer();
+            u8   *outimg  = lang_out_buffer();
+            char cerr[128];
+            i64 al = (asmtext && outimg)
+                   ? cc_compile(p + 40, rlen, "task", NULL, NULL,
+                                asmtext, LANG_TEXT_MAX, cerr, sizeof(cerr))
+                   : -1;
+            u32 ikind = 0;
+            i64 imgn = (al >= 0)
+                     ? lang_build_text((const u8 *)asmtext, (u64)al, false,
+                                       outimg, LANG_OUT_MAX, &ikind, cerr, sizeof(cerr))
+                     : -1;
+            object *image = (imgn > 0 && ikind == LANG_IMAGE)
+                          ? obj_create(TYPE_BYTES, (u64)imgn, 0) : NULL;
+            if (image) memcpy(obj_data(image), outimg, (u64)imgn);
+            term_compile_release();
+
+            if (!image) {
+                cap_revoke(pipe_kdom, h); obj_release(reply);
+                answer_send(s, id, A_SILENT, none);
+                kprintf("pipe: a compiled job would not build\n");
+                return;
+            }
+            obj_set_name(image, "task code");
+            prog = work_code_launch(image, reply);
+            obj_release(image);
+        } else {
+            object *script = obj_create(TYPE_TEXT, rlen + 512, 0);
+            if (!script) { cap_revoke(pipe_kdom, h); obj_release(reply); return; }
+            memcpy(obj_data(script), p + 40, rlen);
+            obj_set_name(script, "task text");
+            prog = work_launch(script, reply, budget, wlo, whi, input);
+            obj_release(script);
+        }
         if (!prog) {
             cap_revoke(pipe_kdom, h);
             obj_release(reply);
@@ -1916,6 +2072,7 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
             j->presult[part] = num ? v : 0;
             memcpy(j->ptext[part], tz, 25);
             memcpy(j->pby[part], fask[fi].ip, 4);
+            j->pverified[part] = answer_verified(s, id, p, len);
             memcpy(j->raw, p + 16, 24);
 
             u32 done = 0;
@@ -2524,6 +2681,11 @@ void pipe_service(void)
         } else if (time_ns() - workj.started_ns >
                    (workj.budget_s + 5) * SECOND) {
             status = A_LATE;
+            /* Still running past its deadline: a compiled job can spin
+             * without ever reaching a syscall, so the interpreter's own
+             * budget does not reach it. End the process; the scheduler
+             * retires it at its next preemption. */
+            proc_end(workj.prog);
         }
 
         if (status != 0xFF) {

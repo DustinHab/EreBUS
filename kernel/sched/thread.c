@@ -253,6 +253,11 @@ thread *thread_create(const char *name, thread_entry entry, void *arg,
     return t;
 }
 
+/* Finished threads, waiting to be reaped. Declared here because a
+ * thread condemned but never reaching a syscall is retired straight
+ * from switch_to_next, onto this same list. */
+static thread *finished_list;
+
 /* Moves to the next runnable thread. Interrupts must be off. */
 static void switch_to_next(void)
 {
@@ -273,7 +278,23 @@ static void switch_to_next(void)
     from->ran_ns += now - switch_stamp;
     switch_stamp = now;
 
-    if (from->state == THREAD_RUNNING) from->state = THREAD_READY;
+    if (from->state == THREAD_RUNNING) {
+        if (from->condemned) {
+            /* Condemned but still running: it never reached a syscall to
+             * end itself -- a compute-bound ring-3 job with no system
+             * calls, for instance. End it here, on preemption, so it
+             * cannot outlive its deadline. This is the same retirement a
+             * voluntary exit takes; the kernel stack it is standing on is
+             * freed later by reap_finished, in a calm context. */
+            from->state = THREAD_FINISHED;
+            queue_remove(from);
+            thread_count--;
+            from->wait_next = finished_list;
+            finished_list = from;
+        } else {
+            from->state = THREAD_READY;
+        }
+    }
     to->state = THREAD_RUNNING;
     current = to;
     switches++;
@@ -366,11 +387,9 @@ void sched_preempt_if_due(void)
     switch_to_next();
 }
 
-/* Finished threads, waiting to be reaped. The exiting thread puts
- * itself here with interrupts off and switches away in the same breath,
- * so nothing can free the stack it is still standing on. */
-static thread *finished_list;
-
+/* The exiting thread puts itself on finished_list (declared above) with
+ * interrupts off and switches away in the same breath, so nothing can
+ * free the stack it is still standing on. */
 void thread_exit(void)
 {
     u64 flags = irq_save();

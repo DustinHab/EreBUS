@@ -315,6 +315,30 @@ object *work_launch(object *script, object *reply, u64 budget_seconds,
     return prog;
 }
 
+/* A compiled job for another machine: the image is loaded and the reply
+ * port is handed to it as its console, so a plain send of a "TEXT"
+ * message carries its answer home. No budget rides with it -- a compiled
+ * program does not police itself; the deadline is the kernel's, enforced
+ * by ending the process when it overruns. */
+object *work_code_launch(object *image, object *reply)
+{
+    if (!image || obj_type(image) != TYPE_BYTES || !reply) return NULL;
+    const u8 *d = (const u8 *)obj_data(image);
+    if (!code_image_ok(d, obj_size(image), NULL, NULL, NULL)) return NULL;
+
+    process *p = proc_create_code("work", d, obj_size(image), reply);
+    if (!p) return NULL;
+    object *prog = held(p);
+    if (!proc_start(p)) { obj_release(prog); return NULL; }
+
+    obj_set_slot(prog, 0, image, CAP_READ);
+    obj_set_slot_name(prog, 0, "its code");
+    proc_grant(prog, image, CAP_READ);
+
+    kprintf("proc: %llu (work) running a compiled image\n", proc_id(p));
+    return prog;
+}
+
 /* A kernel thread that serves the console port. Programs cannot print;
  * they can only ask this to, through a capability, and only if they
  * were given one. What they say also goes into the journal, attributed
@@ -1854,6 +1878,24 @@ void kmain(eb_boot_info *bi)
                 }
             }
             if (ln) pipe_line_set(ln);
+        }
+
+        /* The ledger: a durable record of far-work jobs and their
+         * results, one line each. Read-only; the kernel appends. */
+        {
+            object *lg = find_petnamed(root, "the ledger", TYPE_TEXT,
+                                       NULL, NULL);
+            if (!lg) {
+                object *made = obj_create(TYPE_TEXT, 8192, 0);
+                if (made) {
+                    obj_set_name(made, "the ledger");
+                    if (list_append(sys_shelf ? sys_shelf : root, made,
+                                    CAP_READ, "the ledger"))
+                        lg = made;
+                    obj_release(made);
+                }
+            }
+            if (lg) pipe_ledger_set(lg);
         }
 
         /* The nodes table: one row per machine met through the pipe;

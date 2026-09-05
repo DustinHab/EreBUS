@@ -1,6 +1,6 @@
 # EreBUS Manual
 
-For EreBUS 0.6.0. This manual is updated with every release; the version it describes is the one on the releases page.
+For EreBUS 0.7.0. This manual is updated with every release; the version it describes is the one on the releases page.
 
 Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions
 
@@ -309,6 +309,17 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 - Pointing a task at the foreman program hands it in without another click; `again N` in its first line repeats it every N seconds.
 - A far machine works only when its settings say `work | welcomed`, or its nodes table says this machine may `work` (chapter 13).
 
+### 9.3 Compiled tasks
+
+- `ask <task> as code` sends the task as C source. The far machine compiles it with its own compiler, loads the image, and runs it under a deadline the kernel enforces -- a compiled program that never returns is ended when the budget runs out, even a bare `for(;;){}` with no system calls.
+- The program is entered with its console capability in the first argument and its letter box in the second (`long main(long console, long inbox)`). It answers by sending one message: `syscall(2, console, 0x54584554, w0, w1, w2)` -- tag `"TEXT"`, up to 24 bytes across the three words. A run of ASCII digits is read as a number, anything else as text.
+- The source must fit one datagram (1024 bytes); a compiled task takes no input object or range yet; one compile runs at a time on a machine (the compiler's tables are shared), so a busy machine answers "busy" and the asker retries.
+
+### 9.4 Signed answers and the ledger
+
+- Every answer is signed with the answering machine's door key over the job and the result, and checked against that node's key. A verified answer names the node plainly (`7 (by alpha)`); an answer whose signature does not check is marked `(unverified)`.
+- `the ledger`, a read-only text on the system shelf, keeps one line per far-work job asked from this machine: its number, whether it was code, and the result or why it failed. It outlives the desk and the journal's ring.
+
 ---
 
 ## 10 Building programs and the kernel
@@ -427,7 +438,7 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 
 - See 9.2. A machine runs a task when its settings say `work | welcomed` (any authenticated node) or its row for the requesting node contains `work`.
 - Divided tasks are dealt round-robin to the machines that answered the scan with the work flag set; a busy machine is asked again after 2 s; a refusing machine is removed from the job.
-- Answers name the machines that produced them; results are not verified.
+- Answers are signed with the answering node's door key and checked against its key here, so a verified answer names the node plainly and an unverified one says so. A task sent `as code` is C the worker compiles and runs under a kernel-enforced deadline (9.3). Each asked job is recorded in `the ledger`.
 
 ### 13.7 Updating a node
 
@@ -438,8 +449,8 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 
 ### 13.8 Limits
 
-- Identity is trust on first use; no third party verifies a key.
-- Results of far work are not verified.
+- Identity is trust on first use; no third party verifies a key. Signing proves the answer came from the key in your nodes table, not that the key is really the machine you mean.
+- A far-work result is signed by the node that produced it, but not otherwise checked: the answer is that node's word, not a proof the computation is right. Running the same task on several nodes and comparing is left for a later version.
 - Broadcast discovery covers the local network only; across routers a node must be entered as peer once, after which gossip and heartbeat keep it known.
 - One transfer at a time per node; one job at a time per worker.
 
@@ -460,7 +471,7 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 
 - Requirements (Linux; WSL2 with Ubuntu works): `clang lld nasm make qemu-system-x86 ovmf mtools dosfstools xorriso gdb unifont python3-pil`.
 - `make` builds loader, kernel and `build/esp.img`; `make run` starts QEMU with the serial log on the terminal; `sh tools/mkiso.sh` builds `build/erebus.iso`; `sh tools/mkusb.sh` a stick image.
-- `sh build/battery.sh` runs the regression tests: one build, 21 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`), then renew alone because it rebuilds the kernel. Logs, screenshots and QEMU stderr are copied back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (480); a failed or stopped test runs once more, marked "2nd try" in the summary. KVM is used when `/dev/kvm` is writable (`NOKVM=1` forces TCG). The summary lists seconds per test; the full output is in `build/battery.log`. About 4 minutes on 32 cores. `sh build/kvm-battery.sh` adds the kernel built on the machine itself.
+- `sh build/battery.sh` runs the regression tests: one build, 22 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`), then renew alone because it rebuilds the kernel. Logs, screenshots and QEMU stderr are copied back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (480); a failed or stopped test runs once more, marked "2nd try" in the summary. KVM is used when `/dev/kvm` is writable (`NOKVM=1` forces TCG). The summary lists seconds per test; the full output is in `build/battery.log`. About 4 minutes on 32 cores. `sh build/kvm-battery.sh` adds the kernel built on the machine itself.
 - `sh build/battery.sh --one <test>` runs a single test that way; `BUILD=<dir> sh tools/<test>.sh` does the same by hand.
 - The tests drive the real screen through QEMU's monitor and wait on serial log lines (`tools/testlib.sh`: `waitlog`, `waitcount`, `waitfile`, `bootwait`); see the table in README.md.
 - The kernel's version comes from `git describe`; a tag `X.Y.Z` on the commit makes the boot line `EreBUS X.Y.Z (x86_64)`.
@@ -476,3 +487,4 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 | 0.5.1 | 2026-09-05 | compiler fix: members of a struct that contains an inner struct body were resolved against the inner body's members; a self-built kernel's compiler could not compile anything. selfkernel test extended to a second generation. Runtime messages reworded. Test battery parallel and under KVM. |
 | 0.5.2 | 2026-09-05 | console messages of the assembler programs reworded to factual wording. Test battery: relay, agent and persist as scripts in the parallel lanes, per-test directories and time limit, pipe tests driven through the terminal; 22 tests in about 4 minutes. No change to what the machine does. |
 | 0.6.0 | 2026-09-05 | visual overhaul of the shell: one warm ground with a single accent used only for agency and position (the caret, the write right, the picked row, the mode in use), regions parted by rules rather than filled boxes, the focused object's name at double height, region labels as spaced capitals, marked text in inverse video. The structure, the layout and what the machine does are unchanged. |
+| 0.7.0 | 2026-09-05 | serious far work: answers signed with the node's door key and checked against its key (a verified answer names the node, an unverified one says so); a kernel-enforced deadline that ends a runaway job even with no system calls; compiled tasks (`ask <task> as code`) the worker compiles and runs under that deadline; a ledger of asked jobs on the system shelf. Also: an old store's settings table gains matters added since it was seeded. |

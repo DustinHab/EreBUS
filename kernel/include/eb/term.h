@@ -52,6 +52,16 @@ bool term_link_list(object *list, const char *name, term_say_fn say, void *ctx);
  * wait while a build runs -- term_building says so. */
 bool term_build_start(object *list, const char *name);
 bool term_building(void);
+
+/* The compiler and assembler keep one shared, non-reentrant set of
+ * tables, so only one may run at a time -- across the shell, the
+ * terminal words and a job compiled for another machine. A caller
+ * claims the tools before compiling and releases them after; claim
+ * answers false when they are already in use (a build, another
+ * compile), and the caller should try again later. term_building
+ * reports the same state, so the two interlock. */
+bool term_compile_claim(void);
+void term_compile_release(void);
 bool term_secret(term_session *s);        /* the line being gathered is a passphrase: show dots */
 
 /* Bytes coming in whole, after 'receive <n> bytes as <name>': while

@@ -4696,7 +4696,12 @@ static void act_on(const hot_region *r)
         label_of(holder, nav.via[nav.depth - 1], f, base, sizeof(base));
         base[19] = 0;
 
-        if (term_building()) { journal_says("compile", "a build is running; wait for it to finish"); break; }
+        /* The compiler's tables are shared and not reentrant, so claim
+         * them for the length of this compile; a build or a job compiled
+         * for another machine holds them the same way. The breaks below
+         * leave the do-block, which releases them once. */
+        if (!term_compile_claim()) { journal_says("compile", "the compiler is busy; try again"); break; }
+        do {
         static char *text;
         if (!text) text = (char *)lang_big_alloc(4u << 20);
         u8 *image = lang_out_buffer();
@@ -4755,6 +4760,8 @@ static void act_on(const hot_region *r)
                                         : "an object was created beside the text; it has undefined names; 'link' resolves them");
         nav.changes++;
         nav.redraw = true;
+        } while (0);
+        term_compile_release();
         break;
     }
 

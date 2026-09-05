@@ -42,6 +42,11 @@ object *code_launch(object *image);
 object *work_launch(object *script, object *reply, u64 budget_seconds,
                     i64 lo, i64 hi, object *input);
 
+/* Starts a compiled image on a visiting job, for the pipe: the reply
+ * port is its console, so a "TEXT" message it sends is its answer. No
+ * self-policed budget -- the deadline is enforced by ending it. */
+object *work_code_launch(object *image, object *reply);
+
 /* Saves the graph and asks the machine to sleep. Comes back only on
  * hardware that ignored the asking. */
 void system_off(void);

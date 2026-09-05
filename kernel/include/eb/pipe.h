@@ -30,10 +30,20 @@ bool pipe_post(object *o);
  * "work | welcomed" or their nodes table lets this machine work. */
 bool pipe_ask(object *o, bool writable);
 
+/* The same, but the task is c source: each worker compiles it with its
+ * own compiler and runs the image under a kernel-enforced deadline. The
+ * program answers by sending one "TEXT" message home. */
+bool pipe_ask_code(object *o, bool writable);
+
 /* The same, with an object every worker gets ahead of its part: the
  * script's third gift, after its words and the way home, read-only.
  * A text, bytes or a picture, up to 8 MiB. */
 bool pipe_ask_with(object *o, bool writable, object *input);
+
+/* The ledger, a read-only text on the system shelf: the kernel appends
+ * one line per far-work job, asked or done. Adopted or created by main. */
+void pipe_ledger_set(object *t);
+object *pipe_ledger(void);
 
 /* The list arrivals are laid in, adopted or created by main. */
 void pipe_arrivals_set(object *list);
