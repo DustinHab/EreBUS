@@ -19,6 +19,7 @@
 #include <eb/lang.h>
 
 void *lang_big_alloc(u64 size) { return calloc(1, (size_t)size); }
+void  kprintf(const char *fmt, ...) { (void)fmt; }
 
 static bool no_find(void *ctx, const char *name, const u8 **text, u64 *len)
 {

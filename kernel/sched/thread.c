@@ -258,6 +258,11 @@ thread *thread_create(const char *name, thread_entry entry, void *arg,
  * from switch_to_next, onto this same list. */
 static thread *finished_list;
 
+/* Whether the boot thread has finished starting up and only halts now. */
+static bool boot_idle;
+
+void sched_idle_from_here(void) { boot_idle = true; }
+
 /* Moves to the next runnable thread. Interrupts must be off. */
 static void switch_to_next(void)
 {
@@ -271,6 +276,14 @@ static void switch_to_next(void)
     } else {
         to = run_queue;
     }
+    /* The idle thread only when nobody else is ready: a yield should
+     * reach the next thread with work, not a halt that lasts until
+     * the next tick. It is still taken when the yielding thread is the
+     * only other one, so that one sleeps between its turns. Until the
+     * boot thread has said it is idle it is an ordinary thread with
+     * the start-up still to finish, and is not passed over. */
+    if (boot_idle && to == boot_thread && to->next && to->next != to && to->next != from)
+        to = to->next;
     if (to == from) { slice_left = slice_ticks; return; }
 
     /* Book the interval to whoever is leaving. */

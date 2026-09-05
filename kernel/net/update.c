@@ -165,7 +165,7 @@ static void do_check(bool manual)
     if (li == 0 || ver_cmp(latest, erebus_version) <= 0) {
         if (manual) {
             journal_says("update", "already current");
-            char m[80];
+            char m[96];
             u32 a = 0; const char *s = "already current, at ";
             while (*s) m[a++] = *s++;
             for (u32 i = 0; erebus_version[i] && a < sizeof(m) - 1; i++) m[a++] = erebus_version[i];
@@ -207,20 +207,22 @@ static void do_check(bool manual)
     obj_release(k);
 
     {
-        char line[64];
+        char line[64];                            /* "updated to " (11) + 24 + "; restarting" (12) + 1 */
         u32 at = 0; const char *s = "updated to ";
         while (*s) line[at++] = *s++;
-        for (u32 i = 0; latest[i] && at < sizeof(line) - 16; i++) line[at++] = latest[i];
+        for (u32 i = 0; latest[i] && i < 24; i++) line[at++] = latest[i];
         const char *t = "; restarting";
         while (*t) line[at++] = *t++;
         line[at] = 0;
         attention_note("update", line);
     }
     if (manual) {
-        char m[80];
+        /* "a newer version " (16) + the version (up to 24) + the tail (47)
+         * + the terminator: the buffer holds the longest case whole. */
+        char m[96];
         u32 a = 0; const char *s = "a newer version ";
         while (*s) m[a++] = *s++;
-        for (u32 i = 0; latest[i] && a < sizeof(m) - 40; i++) m[a++] = latest[i];
+        for (u32 i = 0; latest[i] && i < 24; i++) m[a++] = latest[i];
         const char *t = " is verified; installing, the machine restarts.";
         while (*t) m[a++] = *t++;
         m[a] = 0;

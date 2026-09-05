@@ -484,7 +484,6 @@ bool igb_init(bool need_link)
     return false;
 }
 
-bool igb_knows(u16 device_id) { return look_up(device_id) != NULL; }
 
 static bool igb_send(const void *frame, u32 len)
 {

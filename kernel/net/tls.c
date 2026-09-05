@@ -645,13 +645,15 @@ bool tls_get(const u8 addr[4], const char *host, u32 hlen,
     }
 
     u32 total = 0;
-    for (u32 guard = 0; guard < 4096; guard++) {
+    http_progress pr = { 0, 0, 0, false };
+    for (u32 guard = 0; guard < 8192; guard++) {
         u8 ct;
         i32 n = read_open(&s_app, rec, sizeof(rec), &ct);
         if (n < 0) break;                    /* end, reset, or stall */
         if (ct == REC_APPDATA) {
             for (i32 i = 0; i < n && total < max; i++) out[total++] = rec[i];
             if (total >= max) break;
+            if (http_response_complete(&pr, out, total)) break;   /* whole: no need to wait for the close */
         } else if (ct == REC_ALERT) {
             break;                           /* close_notify or a gripe */
         }

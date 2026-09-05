@@ -80,15 +80,23 @@ static bool vol_open(fat_vol *v, u64 base)
     u32 total = (u32)sec[32] | ((u32)sec[33] << 8) |
                 ((u32)sec[34] << 16) | ((u32)sec[35] << 24);
 
+    /* The numbers are the disk's word. A volume whose tables lie past
+     * its own end, or with no data area, is not mounted: the cluster
+     * count below would wrap, and every walk would run on it. */
+    u64 tables = (u64)reserved + (u64)sec[16] * fatsz;
+    if (sec[16] == 0 || fatsz == 0 || tables >= total) return false;
+
     v->base = base;
     v->spc = sec[13];
     v->nfats = sec[16];
     v->fat_start = (u32)base + reserved;
     v->fat_sectors = fatsz;
-    v->data_start = v->fat_start + v->nfats * fatsz;
+    v->data_start = (u32)(base + tables);
     v->root_cluster = (u32)sec[44] | ((u32)sec[45] << 8) |
                       ((u32)sec[46] << 16) | ((u32)sec[47] << 24);
-    v->clusters = (total - (v->data_start - (u32)base)) / v->spc;
+    v->clusters = (u32)((total - tables) / v->spc);
+    if (v->clusters > 0x0FFFFFF5) v->clusters = 0x0FFFFFF5;   /* fat32 cannot number more */
+    if (v->root_cluster < 2 || v->root_cluster >= v->clusters + 2) return false;
     v->fatsec_valid = false;
     v->fatsec_dirty = false;
     v->ready = true;
@@ -129,7 +137,7 @@ static bool mount_on(fat_vol *v, i32 disk, const char *what)
                      ((u32)sec[456] << 16) | ((u32)sec[457] << 24);
         if (pstart && vol_open(v, pstart)) goto up;
     }
-    kprintf("fat:  the %s is not fat32\n", what);
+    kprintf("fat:  no fat32 volume on the %s\n", what);
     return false;
 
 up:
@@ -154,7 +162,7 @@ bool fat_boot_present(void)
          * a store that is a bare disk beside a boot disk, as the test
          * rig has it -- the first port after all. */
         i32 d = blk_store_disk();
-        if (d >= 0) mount_on(&bootv, d, "boot disk");
+        if (d >= 0) mount_on(&bootv, d, "store's disk");
         if (!bootv.ready && blk_boot_disk() >= 0 && blk_boot_disk() != d)
             mount_on(&bootv, blk_boot_disk(), "boot disk");
     }
@@ -186,6 +194,7 @@ static bool fat_load(fat_vol *v, u64 lba)
 
 static u32 fat_get(fat_vol *v, u32 cluster)
 {
+    if (cluster >= v->clusters + 2) return END_CHAIN;   /* a number the disk cannot have */
     u32 off = cluster * 4;
     if (!fat_load(v, v->fat_start + off / 512)) return END_CHAIN;
     u32 r = (u32)v->fatsec[off % 512] | ((u32)v->fatsec[off % 512 + 1] << 8) |
@@ -196,6 +205,7 @@ static u32 fat_get(fat_vol *v, u32 cluster)
 
 static bool fat_set(fat_vol *v, u32 cluster, u32 value)
 {
+    if (cluster >= v->clusters + 2) return false;
     u32 off = cluster * 4;
     if (!fat_load(v, v->fat_start + off / 512)) return false;
     v->fatsec[off % 512]     = (u8)value;

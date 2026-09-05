@@ -87,6 +87,14 @@ void tcp_close(void);
  * loops in tls.c call this between records. */
 void net_breathe(void);
 
+/* Whether an http response gathered in buf is complete: its headers
+ * have ended and, when they name a Content-Length, that many bytes of
+ * body have come. Without a length only the peer's close says so. The
+ * progress record remembers what was scanned, so a growing buffer is
+ * not read again from the start each time. */
+typedef struct { u32 scanned, header_end; u64 want; bool have_length; } http_progress;
+bool http_response_complete(http_progress *p, const u8 *buf, u32 len);
+
 /* The door: server-side streams on port 22 for ssh to speak through.
  * Several visitors at once, one connection per slot, 0 .. door_count-1;
  * a knock takes a free slot, or the longest-idle one when all are busy.

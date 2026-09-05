@@ -130,7 +130,7 @@ void time_read_rtc(void)
 {
     /* Wait out an update in progress, then read twice until both reads
      * agree -- the clock ticks on its own schedule, not ours. */
-    u8 s1, m1, h1, s2, m2, h2, day, mon, yr;
+    u8 s1 = 0, m1 = 0, h1 = 0, s2, m2, h2, day = 0, mon = 0, yr = 0;
     bool bcd;
 
     for (u32 tries = 0; tries < 8; tries++) {

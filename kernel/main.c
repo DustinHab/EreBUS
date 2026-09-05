@@ -2135,6 +2135,8 @@ void kmain(eb_boot_info *bi)
     kprintf("kern: idle\n");
 
     /* hlt rather than a busy loop, so the processor does not heat up
-     * for nothing. Interrupts wake it, the loop puts it back. */
-    for (;;) cpu_halt();
+     * for nothing. Interrupts wake it; whoever became ready meanwhile
+     * gets the processor at once, and the loop halts again after. */
+    sched_idle_from_here();
+    for (;;) { cpu_halt(); sched_yield(); }
 }

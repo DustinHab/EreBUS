@@ -97,7 +97,7 @@ static bool parse_extensions(x509_cert *c, const asn1_tlv *wrap)
         u8 tag;
         if (asn1_peek(&ext, &tag) && tag == ASN1_BOOLEAN) {
             asn1_tlv b;
-            asn1_next(&ext, &b);
+            if (!asn1_next(&ext, &b)) return false;
             critical = b.len == 1 && b.p[0] != 0;
         }
         if (!asn1_expect(&ext, ASN1_OCTETSTRING, &val) || !asn1_done(&ext)) return false;
@@ -115,7 +115,7 @@ static bool parse_extensions(x509_cert *c, const asn1_tlv *wrap)
             asn1_inside(&in, &bs);
             if (asn1_peek(&bs, &tag) && tag == ASN1_BOOLEAN) {
                 asn1_tlv b;
-                asn1_next(&bs, &b);
+                if (!asn1_next(&bs, &b)) return false;
                 c->is_ca = b.len == 1 && b.p[0] != 0;
             }
         } else if (OID(&oid, OID_KEY_USAGE)) {

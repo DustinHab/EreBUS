@@ -34,6 +34,11 @@ void thread_exit(void);
 /* Hands the processor on voluntarily. */
 void sched_yield(void);
 
+/* Said by the boot thread once its start-up is done and it only halts
+ * from here on: from then on a yield passes it over while any other
+ * thread is ready. */
+void sched_idle_from_here(void);
+
 /* Takes the calling thread off the run queue until somebody wakes it.
  * Interrupts must already be off; the caller has put the thread on
  * whatever wait list will wake it, and losing the race between those

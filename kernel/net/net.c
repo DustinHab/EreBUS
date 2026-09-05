@@ -195,7 +195,7 @@ static void dhcp_input(const u8 *p, u32 len)
  * the reader drains; this is what lets a stream be pulled at whatever
  * pace suits, which plain http did not need but tls does -- records
  * arrive and must be handed up a few at a time. */
-#define TCP_RING 49152
+#define TCP_RING 131072                 /* twice the largest window it will ever offer */
 static struct {
     bool active;
     u8   remote_ip[4];
@@ -209,6 +209,10 @@ static struct {
 
     u8   ring[TCP_RING];
     u32  head, tail;                /* tail - head bytes are waiting */
+    u32  out_of_order;              /* data segments dropped for not being the next */
+    u32  ring_full;                 /* segments cut short for want of room */
+    u32  segments;                  /* data segments taken */
+    u32  advertised;                /* the window last told to the peer */
 } tcb;
 
 static u32 ring_used(void) { return tcb.tail - tcb.head; }
@@ -232,7 +236,7 @@ static void tcp_input(const u8 *seg, u32 len)
               ((u32)seg[10] << 8) | seg[11];
     u8  off = (u8)(seg[12] >> 4) * 4;
     u8  fl  = seg[13];
-    if (off > len) return;
+    if (off < 20 || off > len) return;               /* the header is 20 bytes at least */
 
     if (fl & 0x04) { tcb.reset = true; return; }        /* rst */
 
@@ -251,9 +255,16 @@ static void tcp_input(const u8 *seg, u32 len)
     u32 dlen = len - off;
 
     /* Only the next expected bytes are taken; anything out of order
-     * is dropped and asked for again by the duplicate ack. Simple,
-     * and on a link this short, sufficient. */
+     * is dropped and asked for again by the duplicate ack. A segment
+     * that starts before the expected byte -- a retransmission that
+     * reaches into new ground -- is taken from that byte on. */
     if (dlen > 0) {
+        i32 ahead = (i32)(tcb.rcv_nxt - seq);           /* bytes of it already here */
+        if (ahead > 0 && (u32)ahead < dlen) {
+            data += ahead;
+            dlen -= (u32)ahead;
+            seq += (u32)ahead;
+        }
         if (seq == tcb.rcv_nxt) {
             u32 room = TCP_RING - ring_used();
             u32 take = dlen < room ? dlen : room;
@@ -261,18 +272,21 @@ static void tcp_input(const u8 *seg, u32 len)
                 tcb.ring[(tcb.tail + i) % TCP_RING] = data[i];
             tcb.tail += take;
             tcb.rcv_nxt += take;      /* only what we kept is acknowledged */
+            tcb.segments++;
+            if (take < dlen) tcb.ring_full++;
+        } else if ((i32)(seq - tcb.rcv_nxt) > 0) {
+            tcb.out_of_order++;
         }
         tcp_emit(0x10, NULL, 0);
     }
 
-    if (fl & 0x01) {                                    /* fin */
-        if (seq + dlen == tcb.rcv_nxt || dlen == 0) {
-            if (!tcb.peer_done) {
-                tcb.rcv_nxt = seq + dlen + 1;
-                tcb.peer_done = true;
-                tcp_emit(0x11, NULL, 0);                /* fin+ack back */
-            }
-        }
+    /* Their fin counts only in sequence: one that arrives ahead of
+     * lost data would otherwise end the stream short, and the data
+     * that then comes late would be dropped as out of order. */
+    if ((fl & 0x01) && seq + dlen == tcb.rcv_nxt && !tcb.peer_done) {
+        tcb.rcv_nxt = seq + dlen + 1;
+        tcb.peer_done = true;
+        tcp_emit(0x11, NULL, 0);                        /* fin+ack back */
     }
 }
 
@@ -286,13 +300,21 @@ static void dns_input(const u8 *p, u32 len)
     u16 an = ((u16)p[6] << 8) | p[7];
     u32 at = 12;
 
+    /* A name is labels up to a zero, or up to a two-byte pointer back
+     * into the packet -- which may also end a run of labels. */
     for (u16 q = 0; q < qd; q++) {                 /* skip the question */
-        while (at < len && p[at]) at += p[at] + 1;
+        while (at < len && p[at]) {
+            if ((p[at] & 0xC0) == 0xC0) { at++; break; }
+            at += p[at] + 1;
+        }
         at += 5;
     }
     for (u16 a = 0; a < an && at + 12 <= len; a++) {
-        if ((p[at] & 0xC0) == 0xC0) at += 2;       /* compressed name */
-        else { while (at < len && p[at]) at += p[at] + 1; at++; }
+        while (at < len && p[at]) {
+            if ((p[at] & 0xC0) == 0xC0) { at++; break; }
+            at += p[at] + 1;
+        }
+        at++;
 
         if (at + 10 > len) return;
         u16 type = ((u16)p[at] << 8) | p[at + 1];
@@ -547,10 +569,14 @@ static void tcp_emit(u8 flags, const void *payload, u32 len)
     t[10] = (u8)(ack >> 8); t[11] = (u8)ack;
     t[12] = (u8)((hlen / 4) << 4);
     t[13] = flags;
-    t[14] = 0x80; t[15] = 0x00;     /* a 32 KiB window: enough in flight to
-                                     * pull a multi-megabyte kernel without a
-                                     * round trip every few packets, and well
-                                     * under the 48 KiB receive ring */
+    /* The window is the room actually left in the ring, so the peer never
+     * sends what could not be kept. A fixed window let it send a second
+     * window's worth past bytes still waiting in the ring; those were
+     * cut short, and every one cost the peer's retransmit timeout. */
+    u32 room = TCP_RING - ring_used();
+    if (room > 65535) room = 65535;
+    t[14] = (u8)(room >> 8); t[15] = (u8)room;
+    tcb.advertised = room;
     t[16] = 0; t[17] = 0;
     t[18] = 0; t[19] = 0;
     if (syn) {                       /* say our segment size once */
@@ -1034,7 +1060,7 @@ static void web_input(const u8 src[4], const u8 *seg, u32 len)
               ((u32)seg[10] << 8) | seg[11];
     u8  off = (u8)(seg[12] >> 4) * 4;
     u8  fl  = seg[13];
-    if (off > len) return;
+    if (off < 20 || off > len) return;               /* the header is 20 bytes at least */
     (void)ack;
 
     if (fl & 0x04) { web.active = false; return; }
@@ -1122,6 +1148,7 @@ typedef struct {
     u64  born_ns;
     u32  tries;
     u64  visits;
+    u32  advertised;                 /* the window last told to the visitor */
 } doorconn;
 
 static doorconn doors[DOORS];
@@ -1144,6 +1171,7 @@ static void door_emit(doorconn *d, u8 flags, u32 seq, const u8 *data, u32 len)
     u32 room = DOOR_RX - door_waiting(d);
     if (room > 65535) room = 65535;
     t[14] = (u8)(room >> 8); t[15] = (u8)room;
+    d->advertised = room;
     t[16] = 0; t[17] = 0;
     t[18] = 0; t[19] = 0;
     for (u32 i = 0; i < len; i++) t[20 + i] = data[i];
@@ -1172,7 +1200,7 @@ static void door_input(const u8 src[4], const u8 *seg, u32 len)
               ((u32)seg[10] << 8) | seg[11];
     u8  off = (u8)(seg[12] >> 4) * 4;
     u8  fl  = seg[13];
-    if (off > len) return;
+    if (off < 20 || off > len) return;               /* the header is 20 bytes at least */
 
     /* A knock: give it a free slot, its own slot again if it is a
      * repeated SYN, or the longest-idle slot when all are busy -- a
@@ -1297,6 +1325,11 @@ u32 door_read(u32 c, u8 *buf, u32 max)
     if (n > max) n = max;
     for (u32 i = 0; i < n; i++) buf[i] = d->rx[(d->rx_head + i) % DOOR_RX];
     d->rx_head += n;
+
+    /* Room opened up after a small window was told: say so, or the
+     * visitor waits for its probe timer before sending on. */
+    if (n && !d->dead && d->advertised < DOOR_RX / 4 && DOOR_RX - door_waiting(d) >= DOOR_RX / 2)
+        door_emit(d, 0x10, d->snd_nxt, NULL, 0);
     return n;
 }
 
@@ -1400,6 +1433,12 @@ i32 tcp_read(u8 *buf, u32 max)
     if (n > max) n = max;
     for (u32 i = 0; i < n; i++) buf[i] = tcb.ring[(tcb.head + i) % TCP_RING];
     tcb.head += n;
+
+    /* Room opened up after a small window was told: say so, or the peer
+     * waits for its probe timer before it sends again. */
+    if (tcb.established && !tcb.peer_done && !tcb.reset &&
+        tcb.advertised < 16384 && TCP_RING - ring_used() >= 32768)
+        tcp_emit(0x10, NULL, 0);
     return (i32)n;
 }
 
@@ -1415,7 +1454,45 @@ void tcp_close(void)
         if (tcb.peer_done) tcp_emit(0x11, NULL, 0);   /* fin+ack */
         else               tcp_emit(0x14, NULL, 0);   /* rst+ack */
     }
+    if (tcb.out_of_order || tcb.ring_full)
+        kprintf("tcp:  %u segments taken, %u arrived out of order, %u cut short by the ring\n",
+                tcb.segments, tcb.out_of_order, tcb.ring_full);
     tcb.active = false;
+}
+
+bool http_response_complete(http_progress *p, const u8 *buf, u32 len)
+{
+    if (!p->header_end) {
+        u32 i = p->scanned > 3 ? p->scanned - 3 : 0;
+        for (; i + 3 < len; i++)
+            if (buf[i] == '\r' && buf[i+1] == '\n' && buf[i+2] == '\r' && buf[i+3] == '\n') {
+                p->header_end = i + 4;
+                break;
+            }
+        p->scanned = len;
+        if (!p->header_end) return false;
+
+        /* Content-Length, in any case of letters. */
+        static const char name[] = "content-length:";
+        for (u32 at = 0; at + 15 <= p->header_end; at++) {
+            u32 k = 0;
+            while (k < 15) {
+                u8 c = buf[at + k];
+                if (c >= 'A' && c <= 'Z') c = (u8)(c + 32);
+                if (c != (u8)name[k]) break;
+                k++;
+            }
+            if (k < 15) continue;
+            u32 j = at + 15;
+            while (j < p->header_end && buf[j] == ' ') j++;
+            u64 n = 0;
+            while (j < p->header_end && buf[j] >= '0' && buf[j] <= '9') n = n * 10 + (u64)(buf[j++] - '0');
+            p->want = n;
+            p->have_length = true;
+            break;
+        }
+    }
+    return p->have_length && (u64)len >= (u64)p->header_end + p->want;
 }
 
 static bool http_fetch(const u8 *addr, const char *host, u32 hlen,
@@ -1438,12 +1515,14 @@ static bool http_fetch(const u8 *addr, const char *host, u32 hlen,
 
     if (!tcp_write((const u8 *)req, at)) { tcp_close(); return false; }
 
-    /* Their answer, until they finish or the well runs dry. */
+    /* Their answer, until it is whole, they finish, or the well runs dry. */
     u32 len = 0;
+    http_progress pr = { 0, 0, 0, false };
     while (len < body_max) {
         i32 got = tcp_read(body + len, body_max - len);
         if (got <= 0) break;
         len += (u32)got;
+        if (http_response_complete(&pr, body, len)) break;
     }
 
     *body_len = len;

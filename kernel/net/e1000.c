@@ -377,7 +377,6 @@ bool e1000_init(bool need_link)
 
 /* What was seen but not driven, so a machine with a card this driver
  * does not know says which card that was rather than nothing at all. */
-bool e1000_knows(u16 device_id) { return look_up(device_id) != NULL; }
 
 static bool e1000_send(const void *frame, u32 len)
 {

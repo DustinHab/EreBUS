@@ -163,7 +163,7 @@ static bool unpack_walk(object *into, const u8 *d, u32 *at, u32 len,
         if (et == E_END) return true;
         if (*at >= len) return false;
         u8 nl = d[(*at)++];
-        if (*at + nl > len) return false;
+        if (nl > len - *at) return false;
         const char *nm = (const char *)d + *at;
         *at += nl;
 
@@ -187,7 +187,7 @@ static bool unpack_walk(object *into, const u8 *d, u32 *at, u32 len,
         u32 plen;
         memcpy(&plen, d + *at, 4);
         *at += 4;
-        if (*at + plen > len) return false;
+        if (plen > len - *at) return false;        /* written so that a huge count cannot wrap */
 
         type_id t = et == E_TEXT ? TYPE_TEXT
                   : et == E_PIC  ? TYPE_PICTURE : TYPE_BYTES;

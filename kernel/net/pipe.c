@@ -674,7 +674,12 @@ static void seal_send(sealrec *s, const u8 *inner, u32 ilen)
 
 static void knock_begin(const u8 *ip, u16 port, i32 expect)
 {
-    if (knock.active && ip4_same(knock.ip, ip)) return;
+    /* One handshake at a time, to its end or its timeout. Starting
+     * another for a second address threw the first away, and a loop
+     * asking for two machines in turn restarted them against each
+     * other every round: every welcome arrived for a knock already
+     * dropped, and neither seal was ever made. */
+    if (knock.active) return;
     knock.active = true;
     for (u32 i = 0; i < 4; i++) knock.ip[i] = ip[i];
     knock.port = port;
@@ -2052,6 +2057,7 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
             char *asmtext = lang_text_buffer();
             u8   *outimg  = lang_out_buffer();
             char cerr[128];
+            cerr[0] = 0;                          /* read below even when no compile ran */
             i64 al = (asmtext && outimg)
                    ? cc_compile(p + 40, rlen, "task", NULL, NULL,
                                 asmtext, LANG_TEXT_MAX, cerr, sizeof(cerr))
