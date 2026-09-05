@@ -1102,8 +1102,9 @@ static void web_input(const u8 src[4], const u8 *seg, u32 len)
  * machine is the honest behaviour rather than a queue. */
 #define DOOR_RX 32768
 #define DOOR_TX 16384
+#define DOORS   4                    /* how many visitors may stand at once */
 
-static struct {
+typedef struct {
     bool active, established, peer_done, dead;
     u8   ip[4];
     u16  port;
@@ -1112,33 +1113,47 @@ static struct {
     u32  rx_head, rx_tail;           /* tail - head bytes are waiting */
     u8   tx[DOOR_TX];                /* byte for seq S lives at S % DOOR_TX */
     u64  sent_ns;
+    u64  born_ns;
     u32  tries;
     u64  visits;
-} door;
+} doorconn;
 
-static u32 door_waiting(void) { return door.rx_tail - door.rx_head; }
+static doorconn doors[DOORS];
 
-static void door_emit(u8 flags, u32 seq, const u8 *data, u32 len)
+u32 door_count(void) { return DOORS; }
+
+static u32 door_waiting(const doorconn *d) { return d->rx_tail - d->rx_head; }
+
+static void door_emit(doorconn *d, u8 flags, u32 seq, const u8 *data, u32 len)
 {
     static u8 t[1500];
     t[0] = 0; t[1] = 22;
-    t[2] = (u8)(door.port >> 8); t[3] = (u8)door.port;
+    t[2] = (u8)(d->port >> 8); t[3] = (u8)d->port;
     t[4] = (u8)(seq >> 24); t[5] = (u8)(seq >> 16);
     t[6] = (u8)(seq >> 8);  t[7] = (u8)seq;
-    t[8] = (u8)(door.rcv_nxt >> 24); t[9] = (u8)(door.rcv_nxt >> 16);
-    t[10] = (u8)(door.rcv_nxt >> 8); t[11] = (u8)door.rcv_nxt;
+    t[8] = (u8)(d->rcv_nxt >> 24); t[9] = (u8)(d->rcv_nxt >> 16);
+    t[10] = (u8)(d->rcv_nxt >> 8); t[11] = (u8)d->rcv_nxt;
     t[12] = 0x50;
     t[13] = flags;
-    u32 room = DOOR_RX - door_waiting();
+    u32 room = DOOR_RX - door_waiting(d);
     if (room > 65535) room = 65535;
     t[14] = (u8)(room >> 8); t[15] = (u8)room;
     t[16] = 0; t[17] = 0;
     t[18] = 0; t[19] = 0;
     for (u32 i = 0; i < len; i++) t[20 + i] = data[i];
 
-    u16 c = csum(t, 20 + len, pseudo_seed(door.ip, 6, 20 + len));
+    u16 c = csum(t, 20 + len, pseudo_seed(d->ip, 6, 20 + len));
     t[16] = (u8)(c >> 8); t[17] = (u8)c;
-    ip_send(6, door.ip, t, 20 + len);
+    ip_send(6, d->ip, t, 20 + len);
+}
+
+/* The connection this segment belongs to, by (address, port). */
+static doorconn *door_by_peer(const u8 src[4], u16 sport)
+{
+    for (u32 i = 0; i < DOORS; i++)
+        if (doors[i].active && ip4_eq(doors[i].ip, src) && doors[i].port == sport)
+            return &doors[i];
+    return NULL;
 }
 
 static void door_input(const u8 src[4], const u8 *seg, u32 len)
@@ -1153,137 +1168,159 @@ static void door_input(const u8 src[4], const u8 *seg, u32 len)
     u8  fl  = seg[13];
     if (off > len) return;
 
-    /* A knock: answer it, taking over from any older visit. */
+    /* A knock: give it a free slot, its own slot again if it is a
+     * repeated SYN, or the longest-idle slot when all are busy -- a
+     * knock always gets in, and the one displaced is the stalest. */
     if ((fl & 0x02) && !(fl & 0x10)) {
-        for (u32 i = 0; i < 4; i++) door.ip[i] = src[i];
-        door.port = sport;
+        doorconn *d = door_by_peer(src, sport);
+        if (!d) for (u32 i = 0; i < DOORS; i++)
+            if (!doors[i].active) { d = &doors[i]; break; }
+        if (!d) {
+            d = &doors[0];
+            for (u32 i = 1; i < DOORS; i++)
+                if (doors[i].sent_ns < d->sent_ns) d = &doors[i];
+        }
+        for (u32 i = 0; i < 4; i++) d->ip[i] = src[i];
+        d->port = sport;
         u32 iss;
         rand_bytes((u8 *)&iss, 4);
-        door.rcv_nxt = seq + 1;
-        door.snd_nxt = iss + 1;
-        door.snd_una = iss;
-        door.rx_head = door.rx_tail = 0;
-        door.active = true;
-        door.established = false;
-        door.peer_done = false;
-        door.dead = false;
-        door.tries = 0;
-        door.visits++;
-        door_emit(0x12, iss, NULL, 0);           /* syn+ack */
+        d->rcv_nxt = seq + 1;
+        d->snd_nxt = iss + 1;
+        d->snd_una = iss;
+        d->rx_head = d->rx_tail = 0;
+        d->active = true;
+        d->established = false;
+        d->peer_done = false;
+        d->dead = false;
+        d->tries = 0;
+        d->born_ns = time_ns();
+        d->visits++;
+        door_emit(d, 0x12, iss, NULL, 0);        /* syn+ack */
         return;
     }
 
-    if (!door.active || !ip4_eq(src, door.ip) || sport != door.port)
-        return;
+    doorconn *d = door_by_peer(src, sport);
+    if (!d) return;
 
-    if (fl & 0x04) { door.dead = true; door.active = false; return; }
+    if (fl & 0x04) { d->dead = true; d->active = false; return; }
 
     if (fl & 0x10) {
-        if ((i32)(ack - door.snd_una) > 0 &&
-            (i32)(door.snd_nxt - ack) >= 0) {
-            door.snd_una = ack;
-            door.sent_ns = time_ns();
-            door.tries = 0;
+        if ((i32)(ack - d->snd_una) > 0 &&
+            (i32)(d->snd_nxt - ack) >= 0) {
+            d->snd_una = ack;
+            d->sent_ns = time_ns();
+            d->tries = 0;
         }
-        door.established = true;
+        d->established = true;
     }
 
     const u8 *data = seg + off;
     u32 dlen = len - off;
     bool spoke = false;
 
-    if (dlen && seq == door.rcv_nxt) {
-        u32 room = DOOR_RX - door_waiting();
+    if (dlen && seq == d->rcv_nxt) {
+        u32 room = DOOR_RX - door_waiting(d);
         u32 take = dlen < room ? dlen : room;
         for (u32 i = 0; i < take; i++)
-            door.rx[(door.rx_tail + i) % DOOR_RX] = data[i];
-        door.rx_tail += take;
-        door.rcv_nxt += take;
+            d->rx[(d->rx_tail + i) % DOOR_RX] = data[i];
+        d->rx_tail += take;
+        d->rcv_nxt += take;
         spoke = true;
     } else if (dlen) {
         spoke = true;                /* out of place: say where we are */
     }
 
-    if ((fl & 0x01) && seq + dlen == door.rcv_nxt) {
-        door.rcv_nxt += 1;
-        door.peer_done = true;
+    if ((fl & 0x01) && seq + dlen == d->rcv_nxt) {
+        d->rcv_nxt += 1;
+        d->peer_done = true;
         spoke = true;
     }
 
-    if (spoke) door_emit(0x10, door.snd_nxt, NULL, 0);
+    if (spoke) door_emit(d, 0x10, d->snd_nxt, NULL, 0);
 }
 
 /* Says unacknowledged bytes again when they have gone quiet too
- * long, and gives the visit up when saying them does no good. */
+ * long, and gives a visit up when saying them does no good. */
 static void door_service(void)
 {
-    if (!door.active || door.dead) return;
-    if (door.snd_nxt == door.snd_una) return;
-    if (time_ns() - door.sent_ns < 600000000ULL) return;
+    for (u32 i = 0; i < DOORS; i++) {
+        doorconn *d = &doors[i];
+        if (!d->active || d->dead) continue;
+        if (d->snd_nxt == d->snd_una) continue;
+        if (time_ns() - d->sent_ns < 600000000ULL) continue;
 
-    if (door.tries >= 8) {
-        door.dead = true;
-        door.active = false;
-        kprintf("door: the client timed out; session closed\n");
-        return;
+        if (d->tries >= 8) {
+            d->dead = true;
+            d->active = false;
+            kprintf("door: a client timed out; session closed\n");
+            continue;
+        }
+        u32 n = d->snd_nxt - d->snd_una;
+        if (n > 1200) n = 1200;
+        u8 buf[1200];
+        for (u32 k = 0; k < n; k++) buf[k] = d->tx[(d->snd_una + k) % DOOR_TX];
+        door_emit(d, 0x18, d->snd_una, buf, n);
+        d->sent_ns = time_ns();
+        d->tries++;
     }
-    u32 n = door.snd_nxt - door.snd_una;
-    if (n > 1200) n = 1200;
-    u8 buf[1200];
-    for (u32 i = 0; i < n; i++) buf[i] = door.tx[(door.snd_una + i) % DOOR_TX];
-    door_emit(0x18, door.snd_una, buf, n);
-    door.sent_ns = time_ns();
-    door.tries++;
 }
 
-bool door_alive(void)    { return door.active && !door.dead; }
-bool door_finished(void) { return door.peer_done; }
-u64  door_visit(void)    { return door.visits; }
+bool door_alive(u32 c)    { return c < DOORS && doors[c].active && !doors[c].dead; }
+bool door_finished(u32 c) { return c < DOORS && doors[c].peer_done; }
+u64  door_visit(u32 c)    { return c < DOORS ? doors[c].visits : 0; }
 
-void door_peer(u8 ip[4])
+void door_peer(u32 c, u8 ip[4])
 {
-    for (u32 i = 0; i < 4; i++) ip[i] = door.ip[i];
+    if (c >= DOORS) { for (u32 i = 0; i < 4; i++) ip[i] = 0; return; }
+    for (u32 i = 0; i < 4; i++) ip[i] = doors[c].ip[i];
 }
 
-u32 door_room(void)
+u32 door_room(u32 c)
 {
-    if (!door.active || door.dead || !door.established) return 0;
-    return DOOR_TX - (door.snd_nxt - door.snd_una);
+    if (c >= DOORS) return 0;
+    doorconn *d = &doors[c];
+    if (!d->active || d->dead || !d->established) return 0;
+    return DOOR_TX - (d->snd_nxt - d->snd_una);
 }
 
-u32 door_read(u8 *buf, u32 max)
+u32 door_read(u32 c, u8 *buf, u32 max)
 {
-    u32 n = door_waiting();
+    if (c >= DOORS) return 0;
+    doorconn *d = &doors[c];
+    u32 n = door_waiting(d);
     if (n > max) n = max;
-    for (u32 i = 0; i < n; i++) buf[i] = door.rx[(door.rx_head + i) % DOOR_RX];
-    door.rx_head += n;
+    for (u32 i = 0; i < n; i++) buf[i] = d->rx[(d->rx_head + i) % DOOR_RX];
+    d->rx_head += n;
     return n;
 }
 
-bool door_write(const u8 *buf, u32 len)
+bool door_write(u32 c, const u8 *buf, u32 len)
 {
-    if (len > door_room()) return false;
-    for (u32 i = 0; i < len; i++) door.tx[(door.snd_nxt + i) % DOOR_TX] = buf[i];
+    if (c >= DOORS || len > door_room(c)) return false;
+    doorconn *d = &doors[c];
+    for (u32 i = 0; i < len; i++) d->tx[(d->snd_nxt + i) % DOOR_TX] = buf[i];
     u32 at = 0;
     while (at < len) {
         u32 seg = len - at;
         if (seg > 1200) seg = 1200;
-        door_emit(0x18, door.snd_nxt + at, buf + at, seg);
+        door_emit(d, 0x18, d->snd_nxt + at, buf + at, seg);
         at += seg;
     }
-    if (door.snd_nxt == door.snd_una) { door.sent_ns = time_ns(); door.tries = 0; }
-    door.snd_nxt += len;
+    if (d->snd_nxt == d->snd_una) { d->sent_ns = time_ns(); d->tries = 0; }
+    d->snd_nxt += len;
     return true;
 }
 
-void door_close(void)
+void door_close(u32 c)
 {
-    if (!door.active) return;
-    if (door.established && !door.dead)
-        door_emit(0x11, door.snd_nxt, NULL, 0);  /* fin+ack */
-    else if (!door.dead)
-        door_emit(0x14, door.snd_nxt, NULL, 0);  /* rst+ack */
-    door.active = false;
+    if (c >= DOORS) return;
+    doorconn *d = &doors[c];
+    if (!d->active) return;
+    if (d->established && !d->dead)
+        door_emit(d, 0x11, d->snd_nxt, NULL, 0);  /* fin+ack */
+    else if (!d->dead)
+        door_emit(d, 0x14, d->snd_nxt, NULL, 0);  /* rst+ack */
+    d->active = false;
 }
 
 static u16 tcp_port_next = 49200;

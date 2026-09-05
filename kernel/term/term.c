@@ -28,7 +28,9 @@
 #include <eb/thread.h>
 #include <eb/string.h>
 
-#define TERM_SESSIONS 3
+/* One for the screen, and one for each door slot ssh may fill at once,
+ * so every simultaneous visitor gets a terminal of their own. */
+#define TERM_SESSIONS 5
 #define TERM_DEPTH    16
 #define TERM_OUT      16384
 #define TERM_LINE     200
@@ -1390,19 +1392,37 @@ static void cmd_ask(term_session *s, const char *what)
 {
     if (!what[0]) { t_say(s, "ask with which task?  'ask <task>', 'ask <task> with <object>' to send an input, or 'ask <task> as code' to compile and run c there."); return; }
 
-    /* A trailing " as code" says the task is c source, to be compiled and
-     * run on the far machine rather than read by the interpreter. */
+    /* Trailing " as code" says the task is c source, compiled and run on
+     * the far machine; trailing " across N" runs it on N machines and
+     * takes the answer a verified majority agree on. Either order. */
     char buf[128];
     u32 bl = 0;
     while (what[bl] && bl < sizeof(buf) - 1) { buf[bl] = what[bl]; bl++; }
     buf[bl] = 0;
     bool compiled = false;
-    if (bl >= 8) {
-        const char *tail = buf + bl - 8;
-        if (tail[0]==' '&&tail[1]=='a'&&tail[2]=='s'&&tail[3]==' '&&
-            tail[4]=='c'&&tail[5]=='o'&&tail[6]=='d'&&tail[7]=='e') {
-            compiled = true; bl -= 8; buf[bl] = 0;
+    u32 quorum = 0;
+    for (;;) {
+        while (bl > 0 && buf[bl - 1] == ' ') { bl--; buf[bl] = 0; }
+        if (bl >= 8) {
+            const char *t = buf + bl - 8;
+            if (t[0]==' '&&t[1]=='a'&&t[2]=='s'&&t[3]==' '&&
+                t[4]=='c'&&t[5]=='o'&&t[6]=='d'&&t[7]=='e') {
+                compiled = true; bl -= 8; buf[bl] = 0; continue;
+            }
         }
+        /* " across N": find the last " across " and read the number after. */
+        u32 sp = bl;
+        while (sp > 0 && buf[sp - 1] >= '0' && buf[sp - 1] <= '9') sp--;
+        if (sp < bl && sp >= 8) {
+            const char *a = buf + sp - 8;
+            if (a[0]==' '&&a[1]=='a'&&a[2]=='c'&&a[3]=='r'&&
+                a[4]=='o'&&a[5]=='s'&&a[6]=='s'&&a[7]==' ') {
+                u32 n = 0;
+                for (u32 i = sp; i < bl; i++) n = n * 10 + (u32)(buf[i] - '0');
+                if (n >= 1) { quorum = n; bl = sp - 8; buf[bl] = 0; continue; }
+            }
+        }
+        break;
     }
 
     char task[64];
@@ -1420,8 +1440,8 @@ static void cmd_ask(term_session *s, const char *what)
     task[tl] = 0;
     while (with && *with == ' ') with++;
 
-    if (compiled && with && *with) {
-        t_say(s, "a compiled task takes no input yet; ask it without 'with'.");
+    if ((compiled || quorum) && with && *with) {
+        t_say(s, "a compiled or quorum task takes no input yet; ask it without 'with'.");
         return;
     }
 
@@ -1430,8 +1450,8 @@ static void cmd_ask(term_session *s, const char *what)
     if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "a task is a text."); return; }
 
     bool ok;
-    if (compiled) {
-        ok = pipe_ask_code(sp.o, (sp.r & CAP_WRITE) != 0);
+    if (compiled || quorum) {
+        ok = pipe_ask_ex(sp.o, (sp.r & CAP_WRITE) != 0, compiled, quorum);
     } else if (with && *with) {
         spot in;
         if (!resolve(s, with, &in)) return;
@@ -1589,6 +1609,28 @@ static void cmd_allow(term_session *s, const char *rest)
     t_puts(s, name);
     t_puts(s, " may now: ");
     t_say(s, may ? words : "nothing");
+}
+
+static void cmd_forget(term_session *s, const char *rest)
+{
+    if (!rest[0]) { t_say(s, "forget which node?  'forget <node>'.  'nodes' lists them."); return; }
+    char name[64];
+    u32 nl = 0;
+    while (rest[nl] && nl < sizeof(name) - 1) { name[nl] = rest[nl]; nl++; }
+    while (nl > 0 && name[nl - 1] == ' ') nl--;
+    name[nl] = 0;
+
+    nodes_apply();
+    i32 i = nodes_by_name(name);
+    if (i < 0) {
+        t_puts(s, "no node called '");
+        t_puts(s, name);
+        t_say(s, "' in nodes.  'nodes' lists them.");
+        return;
+    }
+    nodes_forget((u32)i);
+    t_puts(s, name);
+    t_say(s, " is forgotten; its next handshake is met fresh.");
 }
 
 /* "update <node>", "update <node> with <kernel.elf>", "update all". */
@@ -1898,6 +1940,7 @@ static void cmd_help(term_session *s)
     t_say(s, "  version          the version of the running kernel");
     t_say(s, "  nodes            the nodes table: machines met through the pipe and their rights here");
     t_say(s, "  allow <node> work|update|all|nothing   rights of that node on this machine");
+    t_say(s, "  forget <node>    drop its row; the next handshake meets it fresh");
     t_say(s, "  update <node>    send this kernel to that node; it installs and restarts.  'update all'; '... with <kernel.elf>'");
     t_say(s, "  receive <n> bytes as <name>   a new text filled with the next n raw bytes");
     t_say(s, "                   of this session (file transfer through the door)");
@@ -1909,7 +1952,7 @@ static void cmd_help(term_session *s)
     t_say(s, "  found            who answered");
     t_say(s, "  point at <name or address>   choose the peer");
     t_say(s, "  send <name>      transfer an object to the peer");
-    t_say(s, "  ask <name>       run a task text on other machines");
+    t_say(s, "  ask <name>       run a task text on other machines; '... as code' compiles c there, '... across N' takes a majority of N");
     t_say(s, "  say <words>      append a line to the shared line");
     t_end(s);
     t_say(s, "the machine");
@@ -2127,6 +2170,7 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "version", NULL))  cmd_version(s);
     else if (word_starts(line, "nodes", NULL))    cmd_nodes(s);
     else if (word_starts(line, "allow", &rest))   cmd_allow(s, rest);
+    else if (word_starts(line, "forget", &rest))  cmd_forget(s, rest);
     else if (word_starts(line, "update", &rest))  cmd_update(s, rest);
     else {
         t_puts(s, "unknown word '");

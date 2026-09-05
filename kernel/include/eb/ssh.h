@@ -2,6 +2,7 @@
  * ssh.h -- the door: ssh version 2 into a terminal session of the visitor's own.
  * - one profile: curve25519-sha256, ssh-ed25519, aes128-gcm@openssh.com
  * - who may come in: "door |" lines in the settings, one public key each
+ * - several visitors at once (one per door slot); a client-driven rekey is honoured
  */
 #ifndef EB_SSH_H
 #define EB_SSH_H

@@ -3,7 +3,8 @@
  * - curve25519-sha256, ssh-ed25519 (host and visitor), aes128-gcm@openssh.com, publickey only
  * - allowed keys: "door |" lines in the settings; the client's user name is only recorded
  * - stream from net.c; words go to a terminal session of the visitor's own
- * - limits: one visitor at a time, no rekeying, no compression, no forwarding; shell or one command
+ * - several visitors at once, one session per door slot; client-driven rekeying is honoured
+ * - limits: no compression, no forwarding; shell or one command; the door is for people, not for distributed work (that is the pipe)
  * - while the session takes bytes ("receive"), channel data goes to it unread and the window is refilled per chunk
  */
 #include <eb/ssh.h>
@@ -64,6 +65,12 @@ enum {
 static u8   host_seed[32], host_pub[32];
 static bool host_ready;
 
+/* One visitor per session, bound to the door slot of the same index.
+ * cur is the session being serviced; every reference below goes through
+ * it, so the machinery reads as if there were one visitor while serving
+ * several. Must not exceed the door's slot count. */
+#define SSH_SESSIONS 4
+
 static struct {
     u8   stage;
     u64  visit;
@@ -83,6 +90,9 @@ static struct {
     u8   key_in[16], key_out[16];
     u8   iv_in[12], iv_out[12];
     u8   session_id[32];
+    bool have_sid;                   /* the session id is set once, at the first exchange */
+    bool rekeying;                   /* a second exchange, mid-session, keeping the channel */
+    u8   nkey_in[16], niv_in[12];    /* the next incoming key, applied on their NEWKEYS */
 
     char user[32];
 
@@ -101,7 +111,10 @@ static struct {
 
     u8   pend[32768];                /* wire bytes waiting for room */
     u32  pend_len;
-} ssh;
+} sess[SSH_SESSIONS];
+
+static u32 cur;                      /* the session being serviced */
+#define ssh sess[cur]
 
 /* ------------------------------------------------------------------ */
 /* Bytes in order                                                      */
@@ -193,7 +206,7 @@ static void pend_bytes(const u8 *d, u32 n)
         /* More than the visitor can take before answering: the honest
          * end is a dropped visit, not silently dropped words. */
         kprintf("ssh:  the client is too far behind; closing\n");
-        door_close();
+        door_close(cur);
         return;
     }
     memcpy(ssh.pend + ssh.pend_len, d, n);
@@ -372,7 +385,7 @@ static void send_kexinit(void)
 static void visit_begin(void)
 {
     visit_end(NULL);
-    ssh.visit = door_visit();
+    ssh.visit = door_visit(cur);
     ssh.born_ns = time_ns();
     ssh.stage = ST_VERSION;
     static const char line[] = V_S "\r\n";
@@ -481,7 +494,10 @@ static bool on_ecdh_init(const u8 *p, u32 n)
     h_str(&c, kmp, klen);
     u8 H[32];
     sha256_final(&c, H);
-    memcpy(ssh.session_id, H, 32);
+    /* The session id is the first exchange hash and never changes; a
+     * rekey computes a new H for the new keys but keeps the old id, so
+     * derive() below mixes the new H with the lasting id. */
+    if (!ssh.have_sid) { memcpy(ssh.session_id, H, 32); ssh.have_sid = true; }
 
     u8 sig[64];
     ed25519_sign(sig, host_seed, host_pub, H, 32);
@@ -502,12 +518,15 @@ static bool on_ecdh_init(const u8 *p, u32 n)
     pw_byte(MSG_NEWKEYS);
     send_packet();
 
-    /* From here everything we say is sealed; everything they say is
-     * sealed from their NEWKEYS on. */
-    derive(kmp, klen, H, 'A', ssh.iv_in, 12);
+    /* Our side switches to the new keys right after this NEWKEYS (sent
+     * just above under the old ones). Their side keeps sending under the
+     * old incoming key until their own NEWKEYS, so the new incoming key
+     * waits in a stash and is put in place then -- during a rekey the
+     * old key is still needed to open their NEWKEYS itself. */
     derive(kmp, klen, H, 'B', ssh.iv_out, 12);
-    derive(kmp, klen, H, 'C', ssh.key_in, 16);
     derive(kmp, klen, H, 'D', ssh.key_out, 16);
+    derive(kmp, klen, H, 'A', ssh.niv_in, 12);
+    derive(kmp, klen, H, 'C', ssh.nkey_in, 16);
     memset(k, 0, 32);
     memset(kmp, 0, sizeof(kmp));
     ssh.enc_out = true;
@@ -624,7 +643,7 @@ static bool on_userauth(const u8 *p, u32 n)
     ssh.stage = ST_OPEN;
 
     u8 ip[4];
-    door_peer(ip);
+    door_peer(cur, ip);
     kprintf("ssh:  %s logged in from %u.%u.%u.%u\n",
             ssh.user, ip[0], ip[1], ip[2], ip[3]);
     char note[64];
@@ -919,6 +938,16 @@ static bool on_channel_data(const u8 *p, u32 n)
     return true;
 }
 
+/* A rekey the client asked for, mid-session: answer its KEXINIT with
+ * ours and run the exchange again. The channel and the session id stand;
+ * only the keys change. */
+static bool begin_rekey(const u8 *p, u32 n)
+{
+    ssh.rekeying = true;
+    send_kexinit();              /* our KEXINIT, kept as I_S for the new hash */
+    return on_kexinit(p, n);     /* theirs; moves to ST_ECDH */
+}
+
 /* ------------------------------------------------------------------ */
 /* One payload in                                                      */
 /* ------------------------------------------------------------------ */
@@ -929,7 +958,7 @@ static bool on_payload(const u8 *p, u32 n)
     u8 t = p[0];
 
     if (t == MSG_IGNORE || t == MSG_DEBUG || t == MSG_UNIMPLEMENTED) return true;
-    if (t == MSG_DISCONNECT) { door_close(); visit_end("client disconnected"); return true; }
+    if (t == MSG_DISCONNECT) { door_close(cur); visit_end("client disconnected"); return true; }
 
     switch (ssh.stage) {
     case ST_KEXINIT:
@@ -940,7 +969,19 @@ static bool on_payload(const u8 *p, u32 n)
         if (t == MSG_KEXINIT) return true;        /* theirs, arriving late */
         return false;
     case ST_NEWKEYS:
-        if (t == MSG_NEWKEYS) { ssh.enc_in = true; ssh.stage = ST_AUTH; return true; }
+        if (t == MSG_NEWKEYS) {
+            /* Their NEWKEYS: from the next packet on, the incoming key is
+             * the new one. */
+            memcpy(ssh.key_in, ssh.nkey_in, 16);
+            memcpy(ssh.iv_in, ssh.niv_in, 12);
+            ssh.enc_in = true;
+            /* After the first exchange the login follows; after a rekey
+             * the session simply carries on where it left off. */
+            if (ssh.rekeying) kprintf("ssh:  rekeyed with %s\n", ssh.user);
+            ssh.stage = ssh.rekeying ? ST_LIVE : ST_AUTH;
+            ssh.rekeying = false;
+            return true;
+        }
         return false;
     case ST_AUTH:
         if (t == MSG_SERVICE_REQUEST) {
@@ -976,7 +1017,7 @@ static bool on_payload(const u8 *p, u32 n)
         }
         if (t == MSG_CHANNEL_CLOSE) {
             if (!ssh.closing_sent) session_close();
-            door_close();
+            door_close(cur);
             visit_end("session ended");
             return true;
         }
@@ -992,7 +1033,11 @@ static bool on_payload(const u8 *p, u32 n)
             }
             return true;
         }
-        if (t == MSG_KEXINIT) { say_disconnect(2, "rekeying is not supported"); return false; }
+        if (t == MSG_KEXINIT) {
+            if (ssh.stage == ST_LIVE) return begin_rekey(p, n);
+            say_disconnect(2, "rekey only in an open session");
+            return false;
+        }
         return true;                              /* anything else: let it pass */
     default:
         return false;
@@ -1007,7 +1052,7 @@ static bool take_packet(void)
         u32 i = 0;
         while (i < ssh.in_len && ssh.in[i] != '\n') i++;
         if (i >= ssh.in_len) {
-            if (ssh.in_len >= 255) { door_close(); visit_end("no version line came"); }
+            if (ssh.in_len >= 255) { door_close(cur); visit_end("no version line came"); }
             return false;
         }
         u32 l = i;
@@ -1018,7 +1063,7 @@ static bool take_packet(void)
         memmove(ssh.in, ssh.in + i + 1, ssh.in_len - i - 1);
         ssh.in_len -= i + 1;
         if (l < 8 || memcmp(ssh.vc, "SSH-2.0-", 8) != 0) {
-            door_close();
+            door_close(cur);
             visit_end("not ssh 2");
             return false;
         }
@@ -1028,7 +1073,7 @@ static bool take_packet(void)
 
     if (ssh.in_len < 4) return false;
     u32 L = be32(ssh.in);
-    if (L < 8 || L > 18000) { door_close(); visit_end("invalid packet length"); return false; }
+    if (L < 8 || L > 18000) { door_close(cur); visit_end("invalid packet length"); return false; }
 
     static u8 plain[18100];
     const u8 *payload;
@@ -1040,20 +1085,20 @@ static bool take_packet(void)
         if (ssh.in_len < whole) return false;
         if (!aes128_gcm_open(ssh.key_in, ssh.iv_in, ssh.in, 4, ssh.in + 4, L,
                              ssh.in + 4 + L, plain)) {
-            door_close();
+            door_close(cur);
             visit_end("packet authentication failed");
             return false;
         }
         iv_step(ssh.iv_in);
         u8 pad = plain[0];
-        if ((u32)pad + 1 > L) { door_close(); visit_end("invalid padding"); return false; }
+        if ((u32)pad + 1 > L) { door_close(cur); visit_end("invalid padding"); return false; }
         payload = plain + 1;
         plen = L - 1 - pad;
     } else {
         whole = 4 + L;
         if (ssh.in_len < whole) return false;
         u8 pad = ssh.in[4];
-        if ((u32)pad + 1 > L) { door_close(); visit_end("invalid padding"); return false; }
+        if ((u32)pad + 1 > L) { door_close(cur); visit_end("invalid padding"); return false; }
         memcpy(plain, ssh.in + 5, L - 1 - pad);
         payload = plain;
         plen = L - 1 - pad;
@@ -1064,7 +1109,7 @@ static bool take_packet(void)
 
     if (!on_payload(payload, plen) && ssh.stage != ST_IDLE) {
         say_disconnect(2, "unexpected message");
-        door_close();
+        door_close(cur);
         visit_end("message out of order");
     }
     return ssh.stage != ST_IDLE;
@@ -1072,40 +1117,39 @@ static bool take_packet(void)
 
 /* ------------------------------------------------------------------ */
 
-void ssh_service(void)
+/* One session's turn, on the door slot of the same index. */
+static void ssh_service_one(void)
 {
-    if (!host_ready) return;
-
     /* A knock, or a new knock over an old visit: begin again. */
-    if (door_alive() && (ssh.stage == ST_IDLE || ssh.visit != door_visit()))
+    if (door_alive(cur) && (ssh.stage == ST_IDLE || ssh.visit != door_visit(cur)))
         visit_begin();
 
     if (ssh.stage == ST_IDLE) return;
 
-    if (!door_alive()) {
+    if (!door_alive(cur)) {
         visit_end("connection lost");
         return;
     }
 
     /* Words waiting for room on the wire. */
     while (ssh.pend_len) {
-        u32 room = door_room();
+        u32 room = door_room(cur);
         if (room == 0) break;
         u32 n = ssh.pend_len < room ? ssh.pend_len : room;
         if (n > 4096) n = 4096;
-        if (!door_write(ssh.pend, n)) break;
+        if (!door_write(cur, ssh.pend, n)) break;
         memmove(ssh.pend, ssh.pend + n, ssh.pend_len - n);
         ssh.pend_len -= n;
     }
 
     /* Words from the wire. */
-    u32 got = door_read(ssh.in + ssh.in_len, sizeof(ssh.in) - ssh.in_len);
+    u32 got = door_read(cur, ssh.in + ssh.in_len, sizeof(ssh.in) - ssh.in_len);
     ssh.in_len += got;
     while (take_packet()) { }
     if (ssh.stage == ST_IDLE) return;
 
     if (ssh.in_len >= sizeof(ssh.in)) {
-        door_close();
+        door_close(cur);
         visit_end("packet too large");
         return;
     }
@@ -1115,18 +1159,27 @@ void ssh_service(void)
     u64 now = time_ns();
     if (ssh.stage < ST_LIVE && now - ssh.born_ns > 40 * SECOND) {
         say_disconnect(2, "too slow");
-        door_close();
+        door_close(cur);
         visit_end("login timeout");
         return;
     }
     if (ssh.stage == ST_CLOSING && ssh.pend_len == 0 &&
         now - ssh.close_ns > 2 * SECOND) {
-        door_close();
+        door_close(cur);
         visit_end("session ended");
         return;
     }
-    if (door_finished() && ssh.pend_len == 0) {
-        door_close();
+    if (door_finished(cur) && ssh.pend_len == 0) {
+        door_close(cur);
         visit_end("connection closed");
     }
+}
+
+void ssh_service(void)
+{
+    if (!host_ready) return;
+    u32 n = door_count();
+    if (n > SSH_SESSIONS) n = SSH_SESSIONS;
+    for (cur = 0; cur < n; cur++) ssh_service_one();
+    cur = 0;
 }

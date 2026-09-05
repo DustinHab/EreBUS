@@ -427,3 +427,23 @@ bool nodes_allow(u32 i, u32 may)
     node_says(rows[i].name, tail);
     return true;
 }
+
+/* Forgets a node: its row is dropped, so the next handshake from that
+ * key -- or from its address with a new key -- is met fresh, trust on
+ * first use again. This is how a changed key is deliberately accepted
+ * (first forget the node, then let it knock) and how a wrong trust is
+ * undone. */
+bool nodes_forget(u32 i)
+{
+    if (i >= count) return false;
+    char name[24];
+    u32 n = 0;
+    while (rows[i].name[n] && n < 23) { name[n] = rows[i].name[n]; n++; }
+    name[n] = 0;
+
+    for (u32 k = i; k + 1 < count; k++) rows[k] = rows[k + 1];
+    count--;
+    nodes_write();
+    node_says(name, " is forgotten; the next handshake meets it fresh");
+    return true;
+}

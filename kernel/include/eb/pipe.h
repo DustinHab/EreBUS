@@ -35,6 +35,11 @@ bool pipe_ask(object *o, bool writable);
  * program answers by sending one "TEXT" message home. */
 bool pipe_ask_code(object *o, bool writable);
 
+/* The flexible form: compiled says the task is c, quorum (0 = off, else
+ * N) runs the whole task on N distinct machines and takes the answer a
+ * verified majority agree on. */
+bool pipe_ask_ex(object *o, bool writable, bool compiled, u32 quorum);
+
 /* The same, with an object every worker gets ahead of its part: the
  * script's third gift, after its words and the way home, read-only.
  * A text, bytes or a picture, up to 8 MiB. */

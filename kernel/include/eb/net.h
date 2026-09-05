@@ -87,19 +87,21 @@ void tcp_close(void);
  * loops in tls.c call this between records. */
 void net_breathe(void);
 
-/* The door: a server-side stream on port 22 for ssh to speak
- * through. One visitor at a time; a new knock takes it over, and
- * door_visit counts the knocks so the protocol above notices. Reads
- * and writes never block -- door_room says how much a write may
- * carry right now. */
-bool door_alive(void);
-bool door_finished(void);            /* the visitor sent their fin */
-u64  door_visit(void);
-void door_peer(u8 ip[4]);
-u32  door_room(void);
-u32  door_read(u8 *buf, u32 max);
-bool door_write(const u8 *buf, u32 len);
-void door_close(void);
+/* The door: server-side streams on port 22 for ssh to speak through.
+ * Several visitors at once, one connection per slot, 0 .. door_count-1;
+ * a knock takes a free slot, or the longest-idle one when all are busy.
+ * door_visit counts the knocks on a slot so the protocol above notices a
+ * new connection there. Reads and writes never block -- door_room says
+ * how much a write may carry right now. */
+u32  door_count(void);
+bool door_alive(u32 c);
+bool door_finished(u32 c);           /* the visitor sent their fin */
+u64  door_visit(u32 c);
+void door_peer(u32 c, u8 ip[4]);
+u32  door_room(u32 c);
+u32  door_read(u32 c, u8 *buf, u32 max);
+bool door_write(u32 c, const u8 *buf, u32 len);
+void door_close(u32 c);
 
 /* One udp datagram to dst. The pipe rides on this. */
 bool net_udp_send(const u8 dst[4], u16 sport, u16 dport,

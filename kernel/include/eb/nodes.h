@@ -44,4 +44,8 @@ i32  nodes_meet(const char *claim, const u8 key[32], const u8 ip[4], u16 port,
 /* The person's column, written for them by a word in the terminal. */
 bool nodes_allow(u32 i, u32 may);
 
+/* Drops a node's row: it is met fresh next time (trust on first use
+ * again). Used to accept a changed key deliberately, or undo a trust. */
+bool nodes_forget(u32 i);
+
 #endif /* EB_NODES_H */

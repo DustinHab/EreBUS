@@ -878,6 +878,7 @@ typedef struct {
     u8      input_kind;
     u32     input_len;
     bool    compiled;              /* the recipe is c source, compiled and run on each worker */
+    u32     quorum;                /* 0: an ordinary job; N: the same task on N distinct machines, answers compared */
 } desk_job;
 
 static desk_job desk[DESK_JOBS];
@@ -967,6 +968,9 @@ static bool answer_verified(const sealrec *s, u64 id, const u8 *p, u32 len)
 
 static void part_range(const desk_job *j, u32 part, i64 *lo, i64 *hi)
 {
+    /* A quorum is not a division: every machine runs the whole task, so
+     * every part carries the whole range (none, in practice). */
+    if (j->quorum) { *lo = j->lo; *hi = j->hi; return; }
     if (j->parts <= 1 || j->hi < j->lo) { *lo = j->lo; *hi = j->hi; return; }
     u64 n = (u64)(j->hi - j->lo + 1);
     u64 base = n / j->parts, rem = n % j->parts;
@@ -1119,16 +1123,22 @@ static u32 put_answerers(const desk_job *j, char *buf, u32 at, u32 max)
     return at;
 }
 
-static bool ask_take(object *o, bool writable, object *input, bool compiled);
+static bool ask_take(object *o, bool writable, object *input,
+                     bool compiled, u32 quorum);
 
 bool pipe_ask(object *o, bool writable)
 {
-    return ask_take(o, writable, NULL, false);
+    return ask_take(o, writable, NULL, false, 0);
 }
 
 bool pipe_ask_code(object *o, bool writable)
 {
-    return ask_take(o, writable, NULL, true);
+    return ask_take(o, writable, NULL, true, 0);
+}
+
+bool pipe_ask_ex(object *o, bool writable, bool compiled, u32 quorum)
+{
+    return ask_take(o, writable, NULL, compiled, quorum);
 }
 
 bool pipe_ask_with(object *o, bool writable, object *input)
@@ -1141,10 +1151,11 @@ bool pipe_ask_with(object *o, bool writable, object *input)
         journal_says("pipe", "the input exceeds 8 MiB");
         return false;
     }
-    return ask_take(o, writable, input, false);
+    return ask_take(o, writable, input, false, 0);
 }
 
-static bool ask_take(object *o, bool writable, object *input, bool compiled)
+static bool ask_take(object *o, bool writable, object *input,
+                     bool compiled, u32 quorum)
 {
     if (!o) return false;
 
@@ -1194,8 +1205,14 @@ static bool ask_take(object *o, bool writable, object *input, bool compiled)
     u32 parts = 1;
     i64 lo = 0, hi = 0;
     u64 recipe_at = 0;
-    bool split = (eol >= 5 && d[0]=='s' && d[1]=='p' && d[2]=='l' &&
+    /* A quorum runs the whole task on N machines and compares; it is not
+     * divided, so a split line is not read and the recipe is the whole
+     * text. */
+    if (quorum > PART_MAX) quorum = PART_MAX;
+    bool split = !quorum &&
+                 (eol >= 5 && d[0]=='s' && d[1]=='p' && d[2]=='l' &&
                   d[3]=='i' && d[4]=='t');
+    if (quorum) parts = quorum;
     if (split) {
         i64 nums[3];
         u32 got = 0;
@@ -1238,6 +1255,7 @@ static bool ask_take(object *o, bool writable, object *input, bool compiled)
     j->hi = hi;
     j->writable = writable;
     j->compiled = compiled;
+    j->quorum = quorum;
     j->no = ++desk_no;
     j->state = DJ_FRESH;
     j->task = o;
@@ -1257,7 +1275,14 @@ static bool ask_take(object *o, bool writable, object *input, bool compiled)
     }
     j->used = true;
 
-    if (parts > 1) {
+    if (quorum) {
+        char line[48];
+        u32 at = put(line, 0, ": a quorum of ");
+        at = put_dec(line, at, quorum);
+        at = put(line, at, j->compiled ? " machines (code)" : " machines");
+        line[at] = 0;
+        job_says(j->no, line);
+    } else if (parts > 1) {
         char line[48];
         u32 at = put(line, 0, ": divided into ");
         at = put_dec(line, at, parts);
@@ -1268,8 +1293,9 @@ static bool ask_take(object *o, bool writable, object *input, bool compiled)
     } else {
         job_says(j->no, input ? " asked of the peer, with an input" : " asked of the peer");
     }
-    kprintf("pipe: job %u queued, %u bytes, %u part%s%s\n",
-            j->no, j->len, parts, parts == 1 ? "" : "s",
+    kprintf("pipe: job %u queued, %u bytes, %s %u%s\n",
+            j->no, j->len, quorum ? "quorum" : "parts",
+            quorum ? quorum : parts,
             input ? ", with an input" : "");
     return true;
 }
@@ -2085,6 +2111,55 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
              * named. */
             static char text[400];
             u32 at = 0;
+            if (j->quorum) {
+                /* Every machine ran the whole task. The result is what a
+                 * strict majority answered the same; only verified
+                 * answers count toward the majority. */
+                u32 best = 0, bestcnt = 0;
+                for (u32 i = 0; i < j->parts; i++) {
+                    if (!j->pverified[i]) continue;
+                    u32 c = 0;
+                    for (u32 k = 0; k < j->parts; k++)
+                        if (j->pverified[k] &&
+                            strcmp(j->ptext[i], j->ptext[k]) == 0) c++;
+                    if (c > bestcnt) { bestcnt = c; best = i; }
+                }
+                if (bestcnt * 2 > j->parts) {
+                    at = put(text, at, j->ptext[best][0] ? j->ptext[best]
+                                                         : "nothing");
+                    at = put(text, at, "  (agreed by ");
+                    at = put_dec(text, at, bestcnt);
+                    at = put(text, at, " of ");
+                    at = put_dec(text, at, j->parts);
+                    at = put(text, at, ")");
+                    text[at] = 0;
+                    job_end(j, true, text, NULL);
+                } else {
+                    /* No verified majority: name the distinct answers, so
+                     * the disagreement is visible, not hidden. */
+                    at = put(text, at, "no agreement -- ");
+                    u32 named = 0;
+                    for (u32 i = 0; i < j->parts &&
+                                    at < sizeof(text) - 48; i++) {
+                        bool seen = false;
+                        for (u32 k = 0; k < i; k++)
+                            if (strcmp(j->ptext[i], j->ptext[k]) == 0)
+                                seen = true;
+                        if (seen) continue;
+                        if (named++) at = put(text, at, ", ");
+                        char nm[24];
+                        name_of(j->pby[i], seal_by_ip(j->pby[i]), nm);
+                        at = put(text, at, nm);
+                        at = put(text, at, j->pverified[i] ? " said "
+                                                           : " said (unverified) ");
+                        at = put(text, at, j->ptext[i][0] ? j->ptext[i]
+                                                          : "nothing");
+                    }
+                    text[at] = 0;
+                    job_end(j, false, NULL, text);
+                }
+                return;
+            }
             if (j->parts == 1) {
                 at = put(text, at, tz);
                 at = put(text, at, " (by ");
@@ -2764,6 +2839,16 @@ void pipe_service(void)
             if (j->cand_count == 0) {
                 job_end(j, false, NULL, "no machine accepts work");
                 j = NULL;
+            } else if (j->quorum && j->cand_count < j->quorum) {
+                char line[64];
+                u32 at = put(line, 0, "not enough machines for a quorum of ");
+                at = put_dec(line, at, j->quorum);
+                at = put(line, at, " (");
+                at = put_dec(line, at, j->cand_count);
+                at = put(line, at, " answered)");
+                line[at] = 0;
+                job_end(j, false, NULL, line);
+                j = NULL;
             } else {
                 char line[48];
                 u32 at = put(line, 0, "the desk deals to ");
@@ -2791,7 +2876,11 @@ void pipe_service(void)
                         if (!fask[i].active) { fi = i; break; }
                     if (fi == FASK_MAX) break;
 
-                    u32 c = j->next_cand % j->cand_count;
+                    /* A quorum wants each part on a distinct machine, so
+                     * part i goes to candidate i; an ordinary job deals
+                     * round-robin. */
+                    u32 c = j->quorum ? pi : (j->next_cand % j->cand_count);
+                    if (c >= j->cand_count) break;
 
                     /* The input is transferred before a machine's first
                      * part; a machine the input cannot reach gets no

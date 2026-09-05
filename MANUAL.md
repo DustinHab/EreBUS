@@ -1,6 +1,6 @@
 # EreBUS Manual
 
-For EreBUS 0.7.0. This manual is updated with every release; the version it describes is the one on the releases page.
+For EreBUS 0.8.0. This manual is updated with every release; the version it describes is the one on the releases page.
 
 Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions
 
@@ -183,7 +183,7 @@ The terminal walks like the shell does: it stands on an object and can go only w
 
 ### 5.6 Nodes and the other machines (chapter 13)
 
-`scan`, `found`, `point at <name or address>`, `send <name>`, `ask <name> [with <object>]`, `say <words>`, `nodes`, `allow <node> work|update|all|nothing`, `update <node> [with <kernel.elf>]`, `update all`.
+`scan`, `found`, `point at <name or address>`, `send <name>`, `ask <name> [with <object>] [as code] [across N]`, `say <words>`, `nodes`, `allow <node> work|update|all|nothing`, `forget <node>`, `update <node> [with <kernel.elf>]`, `update all`.
 
 ### 5.7 The machine
 
@@ -315,6 +315,12 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 - The program is entered with its console capability in the first argument and its letter box in the second (`long main(long console, long inbox)`). It answers by sending one message: `syscall(2, console, 0x54584554, w0, w1, w2)` -- tag `"TEXT"`, up to 24 bytes across the three words. A run of ASCII digits is read as a number, anything else as text.
 - The source must fit one datagram (1024 bytes); a compiled task takes no input object or range yet; one compile runs at a time on a machine (the compiler's tables are shared), so a busy machine answers "busy" and the asker retries.
 
+### 9.5 Quorum
+
+- `ask <task> across N` runs the whole task on N distinct machines and takes the answer a verified majority agree on: `42  (agreed by 2 of 2)`. Only signed, verified answers count toward the majority.
+- When no majority agrees, the disagreement is named rather than hidden: `no agreement -- alpha said 42, gamma said 41`. When fewer than N machines answer the scan willing, the job says so.
+- Combine with code: `ask <task> as code across N`. A quorum takes no input object yet.
+
 ### 9.4 Signed answers and the ledger
 
 - Every answer is signed with the answering machine's door key over the job and the result, and checked against that node's key. A verified answer names the node plainly (`7 (by alpha)`); an answer whose signature does not check is marked `(unverified)`.
@@ -380,7 +386,8 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 
 - Put a public key into the settings: `door | ssh-ed25519 AAAA...` (the line of an `id_ed25519.pub`). Up to four keys.
 - The machine's own key is `the door key`; its fingerprint is printed at boot and written into the journal (`the door's key is SHA256:...`).
-- Connect with any client: `ssh someone@<address>` (the user name is only recorded). One visitor at a time.
+- Connect with any client: `ssh someone@<address>` (the user name is only recorded). Several visitors at once, each with a terminal of their own; a fifth knock displaces the longest-idle visit.
+- A long session renegotiates its keys on the client's schedule (`RekeyLimit`); the door completes the rekey and the session carries on. The door is for people reaching the machine, not for distributed work -- that is the object pipe's job (chapter 13).
 - An exec command runs one line (`ssh host look`); a shell session takes lines from stdin (`printf 'look\naddress\n' | ssh -T host`).
 - `receive <n> bytes as <name>` in a shell session takes the next n raw bytes of the session into a new text: how a file comes in.
 
@@ -413,6 +420,7 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 
 - The kernel writes key, address and version; it rewrites the table when a node appears, moves or changes version.
 - The person edits `name` (a petname) and `may`: `work`, `update`, `all`, or nothing. `allow <node> work update`, `allow <node> all`, `allow <node> nothing` write the column from the terminal.
+- `forget <node>` drops the row: the node is met fresh next time, trust on first use again. This is how a changed key is accepted on purpose (forget the node, then let it knock) and how a wrong trust is undone.
 - Removing a row forgets the node. Adding a row by hand (name, key) trusts a node before it is met.
 - `nodes` in the terminal lists the rows with when each was last heard.
 
@@ -471,7 +479,7 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 
 - Requirements (Linux; WSL2 with Ubuntu works): `clang lld nasm make qemu-system-x86 ovmf mtools dosfstools xorriso gdb unifont python3-pil`.
 - `make` builds loader, kernel and `build/esp.img`; `make run` starts QEMU with the serial log on the terminal; `sh tools/mkiso.sh` builds `build/erebus.iso`; `sh tools/mkusb.sh` a stick image.
-- `sh build/battery.sh` runs the regression tests: one build, 22 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`), then renew alone because it rebuilds the kernel. Logs, screenshots and QEMU stderr are copied back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (480); a failed or stopped test runs once more, marked "2nd try" in the summary. KVM is used when `/dev/kvm` is writable (`NOKVM=1` forces TCG). The summary lists seconds per test; the full output is in `build/battery.log`. About 4 minutes on 32 cores. `sh build/kvm-battery.sh` adds the kernel built on the machine itself.
+- `sh build/battery.sh` runs the regression tests: one build, 25 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`), then renew alone because it rebuilds the kernel. Logs, screenshots and QEMU stderr are copied back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (480); a failed or stopped test runs once more, marked "2nd try" in the summary. KVM is used when `/dev/kvm` is writable (`NOKVM=1` forces TCG). The summary lists seconds per test; the full output is in `build/battery.log`. About 4 minutes on 32 cores. `sh build/kvm-battery.sh` adds the kernel built on the machine itself.
 - `sh build/battery.sh --one <test>` runs a single test that way; `BUILD=<dir> sh tools/<test>.sh` does the same by hand.
 - The tests drive the real screen through QEMU's monitor and wait on serial log lines (`tools/testlib.sh`: `waitlog`, `waitcount`, `waitfile`, `bootwait`); see the table in README.md.
 - The kernel's version comes from `git describe`; a tag `X.Y.Z` on the commit makes the boot line `EreBUS X.Y.Z (x86_64)`.
@@ -488,3 +496,4 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 | 0.5.2 | 2026-09-05 | console messages of the assembler programs reworded to factual wording. Test battery: relay, agent and persist as scripts in the parallel lanes, per-test directories and time limit, pipe tests driven through the terminal; 22 tests in about 4 minutes. No change to what the machine does. |
 | 0.6.0 | 2026-09-05 | visual overhaul of the shell: one warm ground with a single accent used only for agency and position (the caret, the write right, the picked row, the mode in use), regions parted by rules rather than filled boxes, the focused object's name at double height, region labels as spaced capitals, marked text in inverse video. The structure, the layout and what the machine does are unchanged. |
 | 0.7.0 | 2026-09-05 | serious far work: answers signed with the node's door key and checked against its key (a verified answer names the node, an unverified one says so); a kernel-enforced deadline that ends a runaway job even with no system calls; compiled tasks (`ask <task> as code`) the worker compiles and runs under that deadline; a ledger of asked jobs on the system shelf. Also: an old store's settings table gains matters added since it was seeded. |
+| 0.8.0 | 2026-09-05 | quorum far work (`ask <task> across N`): the whole task on N distinct machines, the result a verified majority agree on, disagreement named. `forget <node>` drops a node's row so a changed key can be re-pinned. The ssh door serves several visitors at once and survives a mid-session rekey. |
