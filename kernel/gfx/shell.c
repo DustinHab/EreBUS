@@ -15,6 +15,9 @@
 #include <eb/standard.h>
 #include <eb/net.h>
 #include <eb/pipe.h>
+#include <eb/nodes.h>
+#include <eb/pmm.h>
+#include <eb/kheap.h>
 #include <eb/bundle.h>
 #include <eb/fat.h>
 #include <eb/term.h>
@@ -1803,6 +1806,9 @@ static lens_kind default_lens(object *o)
     }
 }
 
+/* The overview drawn in home's middle pane; defined with the vitals. */
+static void draw_overview(i32 x, i32 y, i32 w, i32 h);
+
 /* ------------------------------------------------------------------ */
 /* Shell one: focus and path                                           */
 /* ------------------------------------------------------------------ */
@@ -1906,12 +1912,22 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     i32 ch = bottom - cy - PAD;
     i32 each = nav.lens_count ? (mid_w - 2 * PAD) / (i32)nav.lens_count : 0;
 
-    for (u32 i = 0; i < nav.lens_count; i++) {
-        i32 lx = mid_x + PAD + (i32)i * each;
-        if (i > 0) fb_rect(lx - PAD / 2, cy, 1, ch, C_EDGE);
-        draw_lens(nav.lens[i], f, lx, cy, each - PAD, ch,
-                  nav.lens[i] == LENS_TEXT || nav.lens[i] == LENS_PAINT ||
-                  nav.lens[i] == LENS_HTML);
+    /* Home's own view is an overview of the machine, not its bare
+     * structure: the middle would otherwise be empty here, and this is
+     * the one place that is always the starting point. The lens tabs
+     * still switch to the raw views. */
+    bool is_home = (f == nav.node[0] && nav.depth == 1 &&
+                    nav.at_generation == 0);
+    if (is_home && nav.lens_count == 1 && nav.lens[0] == default_lens(f)) {
+        draw_overview(mid_x + PAD, cy, mid_w - 2 * PAD, ch);
+    } else {
+        for (u32 i = 0; i < nav.lens_count; i++) {
+            i32 lx = mid_x + PAD + (i32)i * each;
+            if (i > 0) fb_rect(lx - PAD / 2, cy, 1, ch, C_EDGE);
+            draw_lens(nav.lens[i], f, lx, cy, each - PAD, ch,
+                      nav.lens[i] == LENS_TEXT || nav.lens[i] == LENS_PAINT ||
+                      nav.lens[i] == LENS_HTML);
+        }
     }
 
     /* --- where it leads ------------------------------------------ */
@@ -1936,9 +1952,26 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     i32 col_name   = rx + PAD + 7 * GLYPH_W;
     i32 col_clear  = rx + right_w - PAD - 2 * GLYPH_W;
 
+    /* A reference is always picked. When its target exists, the lower
+     * part of this column -- otherwise empty -- shows that target
+     * through its own default lens: the first lines of a text, the
+     * picture, a program's slots. The room is taken from the bottom, so
+     * the list scrolls above it; it is not drawn while the add palette
+     * is open, which needs the space itself. */
+    object *sel = obj_get_slot(f, nav.selected);
+    bool show_preview = sel && edit.kind != EDIT_PICK;
+    i32 pv_h = 0;
+    if (show_preview) {
+        pv_h = (bottom - top) * 2 / 5;
+        if (pv_h < 96)  pv_h = 96;
+        if (pv_h > 260) pv_h = 260;
+        if (pv_h > (bottom - top) / 2) pv_h = (bottom - top) / 2;
+    }
+    i32 list_bottom = bottom - 4 - (pv_h ? pv_h + PAD : 0);
+
 /* Rows advance whether drawn or not; only the visible get ink and
  * click regions. The same rule as every other scrolling area. */
-#define CROW_ON (ty >= list_top && ty + GLYPH_H <= bottom - 4)
+#define CROW_ON (ty >= list_top && ty + GLYPH_H <= list_bottom)
 
     for (u64 i = 0; i < slots; i++) {
         object *t = obj_get_slot(f, i);
@@ -2122,8 +2155,34 @@ static void draw_focus_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     u32 ctotal = (u32)((ty - (list_top - (i32)scrolls[SCR_CONTENTS] * ROW)
                         + ROW - 1) / ROW);
     scroll_area(SCR_CONTENTS, rx, list_top, right_w,
-                bottom - 4 - list_top, ctotal,
-                (u32)((bottom - 4 - list_top) / ROW));
+                list_bottom - list_top, ctotal,
+                (u32)((list_bottom - list_top) / ROW));
+
+    /* The preview of the picked reference's target, anchored to the
+     * bottom so a growing list never pushes it off. */
+    if (show_preview) {
+        i32 pv_top = bottom - pv_h;
+        fb_rect(rx + PAD, pv_top, right_w - 2 * PAD, 1, C_EDGE);
+        label_caps(rx + PAD, pv_top + PAD, sw - PAD, "preview");
+
+        char head[64];
+        u32 ha = put(head, 0, type_name(obj_type(sel)));
+        ha = put(head, ha, "  ");
+        char nm[40];
+        label_of(f, nav.selected, sel, nm, sizeof(nm));
+        ha = put(head, ha, nm);
+        head[ha] = 0;
+        i32 hy = pv_top + PAD + ROW;
+        text_at(rx + PAD, hy, rx + right_w - PAD, head, C_DIM);
+
+        i32 body_y = hy + ROW + 2;
+        i32 body_h = bottom - PAD - body_y;
+        if (body_h > GLYPH_H) {
+            lens_kind lk = default_lens(sel);
+            draw_lens(lk, sel, rx + PAD, body_y,
+                      right_w - 2 * PAD, body_h, false);
+        }
+    }
 #undef CROW_ON
 }
 
@@ -2943,6 +3002,225 @@ static const char *mode_name(shell_mode m)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Vitals: what the machine is doing, sampled once a second            */
+/* ------------------------------------------------------------------ */
+
+#define HIST 72                       /* seconds of history kept */
+static u8  hist_cpu[HIST], hist_mem[HIST];
+static u32 hist_n;                    /* samples held, up to HIST */
+static u64 vit_last_idle, vit_last_ns;
+static u32 vit_cpu, vit_mem;          /* the latest reading, in percent */
+
+/* Called once a second from shell_run. cpu is the busy share since the
+ * last sample; mem is what the frame allocator has handed out. */
+static void shell_sample(void)
+{
+    u64 now = time_ns();
+    u64 idle = sched_idle_ns();
+    if (vit_last_ns && now > vit_last_ns) {
+        u64 wd = now - vit_last_ns;
+        u64 id = idle - vit_last_idle;
+        u64 busy = (id * 100 / wd >= 100) ? 0 : 100 - id * 100 / wd;
+        vit_cpu = (u32)busy;
+    }
+    vit_last_ns = now;
+    vit_last_idle = idle;
+
+    u64 total = pmm_total_frames();
+    if (!total) total = 1;
+    vit_mem = (u32)(pmm_used_frames() * 100 / total);
+
+    if (hist_n < HIST) {
+        hist_cpu[hist_n] = (u8)vit_cpu;
+        hist_mem[hist_n] = (u8)vit_mem;
+        hist_n++;
+    } else {
+        for (u32 i = 1; i < HIST; i++) {
+            hist_cpu[i - 1] = hist_cpu[i];
+            hist_mem[i - 1] = hist_mem[i];
+        }
+        hist_cpu[HIST - 1] = (u8)vit_cpu;
+        hist_mem[HIST - 1] = (u8)vit_mem;
+    }
+}
+
+/* A sparkline in [x,x+w) x [y,y+h): memory as faint bars, cpu as an
+ * accent line over them -- the shape of the last minute, not a number. */
+static void draw_spark(i32 x, i32 y, i32 w, i32 h)
+{
+    fb_rect(x, y + h, w, 1, C_EDGE);
+    if (hist_n == 0) return;
+    u32 show = hist_n < (u32)w ? hist_n : (u32)w;
+    for (u32 i = 0; i < show; i++) {
+        u32 s = hist_n - show + i;
+        i32 bx = x + (i32)i;
+        i32 mh = (i32)hist_mem[s] * h / 100;
+        if (mh > 0) fb_rect(bx, y + h - mh, 1, mh, C_EDGE);
+        i32 cy = y + h - 1 - (i32)hist_cpu[s] * (h - 1) / 100;
+        fb_rect(bx, cy, 1, 2, C_ACCENT);
+    }
+}
+
+/* A left-to-right meter: a filled part in the accent, the rest faint. */
+static i32 draw_meter(i32 x, i32 y, i32 w, u32 pct)
+{
+    if (pct > 100) pct = 100;
+    fb_rect(x, y + 3, w, GLYPH_H - 4, C_PANEL_HI);
+    fb_rect(x, y + 3, (i32)((u32)w * pct / 100), GLYPH_H - 4, C_ACCENT);
+    return x + w;
+}
+
+/* The persistent status strip, just above the footer. Uptime, cpu,
+ * memory, threads, objects, nodes, this machine's address, and the
+ * last minute as a sparkline -- always in view, on every mode. */
+static void draw_vitals(i32 sw, i32 sh, i32 vy)
+{
+    (void)sh;
+    fb_rect(0, vy, sw, 1, C_EDGE);
+    char line[96];
+    u32 at;
+    i32 x = PAD * 2;
+    i32 ty = vy + 5;
+
+    u64 up = time_ns() / 1000000000ULL;
+    at = put(line, 0, "up ");
+    if (up >= 3600) { at = put_dec(line, at, up / 3600); at = put(line, at, "h "); }
+    at = put_dec(line, at, (up / 60) % 60); at = put(line, at, "m ");
+    at = put_dec(line, at, up % 60); at = put(line, at, "s");
+    line[at] = 0;
+    text_at(x, ty, sw, line, C_DIM);
+    x += 15 * GLYPH_W;
+
+    at = put(line, 0, "cpu "); at = put_dec(line, at, vit_cpu); at = put(line, at, "%");
+    line[at] = 0;
+    text_at(x, ty, sw, line, C_DIM);
+    x += 9 * GLYPH_W;
+
+    text_at(x, ty, sw, "mem", C_DIM); x += 4 * GLYPH_W;
+    x = draw_meter(x, ty, 8 * GLYPH_W, vit_mem) + GLYPH_W;
+    u64 used = pmm_used_frames() * 4096 / (1024 * 1024);
+    u64 tot  = pmm_total_frames() * 4096 / (1024 * 1024);
+    at = put_dec(line, 0, used); at = put(line, at, "/");
+    at = put_dec(line, at, tot); at = put(line, at, "M");
+    line[at] = 0;
+    text_at(x, ty, sw, line, C_DIM);
+    x += 11 * GLYPH_W;
+
+    at = put(line, 0, "threads "); at = put_dec(line, at, sched_threads());
+    line[at] = 0;
+    text_at(x, ty, sw, line, C_DIM);
+    x += 14 * GLYPH_W;
+
+    at = put(line, 0, "objects "); at = put_dec(line, at, obj_live_count());
+    line[at] = 0;
+    text_at(x, ty, sw, line, C_DIM);
+    x += 14 * GLYPH_W;
+
+    nodes_apply();
+    at = put(line, 0, "nodes "); at = put_dec(line, at, nodes_count());
+    line[at] = 0;
+    text_at(x, ty, sw, line, C_DIM);
+    x += 11 * GLYPH_W;
+
+    u8 ip[4];
+    if (net_up() && net_own_address(ip)) {
+        at = 0;
+        for (u32 i = 0; i < 4; i++) { at = put_dec(line, at, ip[i]); if (i < 3) line[at++] = '.'; }
+        line[at] = 0;
+        text_at(x, ty, sw, line, C_DIM);
+    } else {
+        text_at(x, ty, sw, "offline", C_FAINT);
+    }
+
+    /* The sparkline sits at the right end of the strip. */
+    i32 spw = 90;
+    draw_spark(sw - PAD * 2 - spw, vy + 4, spw, GLYPH_H - 2);
+}
+
+/* Home's overview: the load over the last minute, what is running, what
+ * has just happened, and what has arrived -- the machine at a glance,
+ * where the middle pane would otherwise be empty. All of it is a view of
+ * objects already in the graph. */
+static void draw_overview(i32 x, i32 y, i32 w, i32 h)
+{
+    char line[120];
+    u32 at;
+
+    /* --- the load, last minute --------------------------------- */
+    label_caps(x, y, x + w, "load  the last minute");
+    at = put(line, 0, "cpu "); at = put_dec(line, at, vit_cpu);
+    at = put(line, at, "%   memory "); at = put_dec(line, at, vit_mem);
+    at = put(line, at, "%"); line[at] = 0;
+    text_at(x + w - (i32)at * GLYPH_W, y, x + w, line, C_DIM);
+
+    i32 gy = y + ROW + 6;
+    i32 gh = h / 4; if (gh < 60) gh = 60; if (gh > 150) gh = 150;
+    fb_rect(x, gy, w, 1, C_PANEL_HI);
+    fb_rect(x, gy + gh / 2, w, 1, C_PANEL_HI);
+    draw_spark(x, gy, w, gh);
+
+    /* One line of round numbers under the graph. */
+    i32 sy = gy + gh + 8;
+    at = put(line, 0, "generation "); at = put_dec(line, at, snap_generation());
+    at = put(line, at, "    objects "); at = put_dec(line, at, obj_live_count());
+    nodes_apply();
+    at = put(line, at, "    nodes "); at = put_dec(line, at, nodes_count());
+    object *arr = pipe_arrivals();
+    u32 na = 0;
+    if (arr) for (u64 i = 0; i < obj_slots(arr); i++) if (obj_get_slot(arr, i)) na++;
+    at = put(line, at, "    arrivals "); at = put_dec(line, at, na);
+    line[at] = 0;
+    text_at(x, sy, x + w, line, C_FAINT);
+
+    /* --- two columns: what runs, and what just happened --------- */
+    i32 cy = sy + ROW + PAD;
+    i32 colw = (w - PAD) / 2;
+    fb_rect(x + colw, cy, 1, y + h - cy, C_EDGE);
+
+    /* Running programs, by the memory each holds. */
+    label_caps(x, cy, x + colw, "running");
+    i32 ly = cy + ROW + 2;
+    u32 pc = proc_live_count();
+    for (u32 i = 0; i < pc && ly + GLYPH_H <= y + h; i++) {
+        const char *nm = NULL; u64 id = 0, holds = 0, ran = 0, mem = 0;
+        if (!proc_live_at(i, &nm, &id, &holds, &ran, &mem)) continue;
+        at = 0;
+        for (u32 k = 0; nm && nm[k] && at < 16; k++) line[at++] = nm[k];
+        while (at < 16) line[at++] = ' ';
+        at = put_dec(line, at, mem); at = put(line, at, " KiB");
+        line[at] = 0;
+        text_at(x, ly, x + colw - PAD, line, C_DIM);
+        ly += ROW;
+    }
+    if (pc == 0) text_at(x, ly, x + colw, "nothing running", C_FAINT);
+
+    /* The journal's tail: the last lines, newest at the foot. */
+    i32 rx = x + colw + PAD;
+    label_caps(rx, cy, rx + colw, "recently");
+    object *j = journal_object();
+    const u8 *jd = j ? (const u8 *)obj_data(j) : NULL;
+    if (jd) {
+        u64 jl = 0; while (jl < obj_size(j) && jd[jl]) jl++;
+        i32 rows = (y + h - (cy + ROW + 2)) / ROW;
+        if (rows < 1) rows = 1;
+        /* Walk back over `rows` newlines from the end. */
+        u64 start = jl;
+        i32 seen = 0;
+        while (start > 0 && seen <= rows) { if (jd[start - 1] == '\n') seen++; if (seen > rows) break; start--; }
+        i32 ry = cy + ROW + 2;
+        u64 p = start;
+        while (p < jl && ry + GLYPH_H <= y + h) {
+            u32 n = 0;
+            while (p < jl && jd[p] != '\n' && n < sizeof(line) - 1) line[n++] = (char)jd[p++];
+            if (p < jl && jd[p] == '\n') p++;
+            line[n] = 0;
+            if (n) text_at(rx, ry, rx + colw - PAD, line, C_DIM);
+            ry += ROW;
+        }
+    }
+}
+
 static void draw_cursor(void)
 {
     for (i32 i = 0; i < 17; i++) {
@@ -2956,6 +3234,12 @@ static void draw_all(void)
 {
     i32 sw = (i32)fb_width(), sh = (i32)fb_height();
     i32 top = 66, bottom = sh - 34;
+
+    /* The status strip sits just above the footer, always. Everything
+     * else stacks above it. */
+    i32 vitals_h = ROW + 8;
+    i32 vitals_y = sh - 28 - vitals_h;
+    bottom -= vitals_h;
 
     /* The newest journal line gets a quiet row above the footer -- and
      * only while it is news. What programs and the system do would
@@ -3372,10 +3656,13 @@ static void draw_all(void)
                 nav.at_generation ? C_READONLY : C_DIM);
     }
 
+    /* The status strip, and the newest line just above it. */
+    draw_vitals(sw, sh, vitals_y);
+
     /* The newest thing that happened, clickable: it leads to the whole
      * record. Dim on purpose -- it should be findable, not insistent. */
     if (have_news) {
-        i32 jy = sh - 28 - ROW - 6;
+        i32 jy = vitals_y - ROW - 6;
         bool lit = is_hovered(HOT_JOURNAL, 0);
         if (lit) fb_rect(0, jy - 2, sw, ROW + 4, C_PANEL_HI);
         /* A small square in the accent says: this just happened. */
@@ -5379,6 +5666,7 @@ void shell_run(void *arg)
         u64 now = time_ns();
         if (now - last_tick >= 1000000000ULL) {
             last_tick = now;
+            shell_sample();
             nav.redraw = true;
         }
 

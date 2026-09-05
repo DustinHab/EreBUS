@@ -1,6 +1,6 @@
 # EreBUS Manual
 
-For EreBUS 0.8.1. This manual is updated with every release; the version it describes is the one on the releases page.
+For EreBUS 0.8.2. This manual is updated with every release; the version it describes is the one on the releases page.
 
 Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions
 
@@ -65,8 +65,9 @@ There are no windows, no task bar and no menus. Every visible control is clickab
 ### 3.1 Layout
 
 - **Top:** the trail (the references followed so far, each clickable to go back there), then the name of the focus (click to rename), then a row of chips that fit the focus (see 3.4).
-- **Middle:** the focus through the current lens. Lens tabs stand above it; click one, or hold control and press its digit.
-- **Below the middle:** the newest journal line (click it to open the journal).
+- **Middle:** the focus through the current lens. Lens tabs stand above it; click one, or hold control and press its digit. On home the middle instead shows an overview of the machine -- load over the last minute, the running programs, the recent journal; the lens tabs still switch to the raw views.
+- **Right of the middle:** the focus's outgoing references, under "contents". The picked reference shows a preview of its target below the list, through the target's own lens (the first lines of a text, the picture, a program's slots).
+- **Below the middle:** the machine's vitals on one line -- uptime, load, memory, threads, objects, nodes, address -- then the newest journal line (click it to open the journal).
 - **Bottom:** the views as words (click one, or press tab to cycle), a hint about what typing does here, and far right `turn off`.
 - Generation ticks stand in the header: click one to read that generation; page up / page down step through them; escape returns to now.
 
@@ -499,3 +500,4 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 | 0.7.0 | 2026-09-05 | serious far work: answers signed with the node's door key and checked against its key (a verified answer names the node, an unverified one says so); a kernel-enforced deadline that ends a runaway job even with no system calls; compiled tasks (`ask <task> as code`) the worker compiles and runs under that deadline; a ledger of asked jobs on the system shelf. Also: an old store's settings table gains matters added since it was seeded. |
 | 0.8.0 | 2026-09-05 | quorum far work (`ask <task> across N`): the whole task on N distinct machines, the result a verified majority agree on, disagreement named. `forget <node>` drops a node's row so a changed key can be re-pinned. The ssh door serves several visitors at once and survives a mid-session rekey. |
 | 0.8.1 | 2026-09-05 | identity beyond trust-on-first-use: `trust <name> ssh-ed25519 ...` writes a node's key before it is met; `renew key` rotates this machine's door key and announces it to known nodes, each announcement signed with the old key and the new, so their rows move without meeting afresh. The network page shows each node's uptime, and a known node going quiet or coming back is said in the journal. |
+| 0.8.2 | 2026-09-05 | the shell fills its own space: home opens on an overview of the machine -- load over the last minute, the running programs, the recent journal -- instead of its bare structure; a status line under the middle carries uptime, load, memory, threads, objects, nodes and address; the picked reference shows a preview of its target below the contents list, through the target's own lens. Structure and behaviour unchanged. |

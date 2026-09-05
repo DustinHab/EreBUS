@@ -234,6 +234,7 @@ Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes
 - EreBUS 0.7.0: serious far work -- answers signed with the node's door key and verified against its key; a kernel-enforced deadline that ends a runaway job with no system calls; compiled tasks (`ask <task> as code`) built and run on the worker under that deadline; a job ledger on the system shelf.
 - EreBUS 0.8.0: quorum far work (`ask <task> across N`), the result a verified majority agree on; `forget <node>` to re-pin a changed key; the ssh door serves several visitors at once and survives a mid-session rekey.
 - EreBUS 0.8.1: identity beyond trust-on-first-use -- `trust <name> <key>` pins a node before it is met, `renew key` rotates the door key and tells known nodes (signed old and new); the network page shows uptime and the journal notes a node going quiet or coming back.
+- EreBUS 0.8.2: the shell fills its own space -- home opens on a machine overview (load over the last minute, running programs, recent journal); a status line carries uptime, load, memory, threads, objects, nodes and address; the picked reference shows a preview of its target through the target's own lens. Structure and behaviour unchanged.
 
 ## License
 
