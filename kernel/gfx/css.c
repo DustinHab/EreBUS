@@ -249,6 +249,39 @@ static void set_prop(css_decl *d, u8 bit, bool imp)
     if (imp) d->important |= bit; else d->important &= (u8)~bit;
 }
 
+/* A whole-factor size from a font-size value against a 16 px base:
+ * 1 up to 20 px, 2 up to 34 px, 3 beyond; 0 when it does not read. The
+ * relative units are taken against the base, not a resolved parent --
+ * good enough for a reader, and bounded. */
+static u8 fontsize_scale(const u8 *v, u32 n)
+{
+    while (n && ws(v[0])) { v++; n--; }
+    while (n && ws(v[n - 1])) n--;
+    if (n == 0) return 0;
+    u32 wl = ident_len(v, n);
+    if (wl == n) {
+        if (word_is(v, n, "xx-large")) return 3;
+        if (word_is(v, n, "x-large") || word_is(v, n, "large") || word_is(v, n, "larger")) return 2;
+        if (word_is(v, n, "medium") || word_is(v, n, "small") || word_is(v, n, "x-small") ||
+            word_is(v, n, "xx-small") || word_is(v, n, "smaller")) return 1;
+        return 0;
+    }
+    u32 at = 0; i64 val; bool pc;
+    if (!number(v, n, &at, &val, &pc)) return 0;      /* val is the number times 100 */
+    if (pc) val = val * 16 / 100;                     /* a percentage of the base */
+    else {
+        u32 ul = ident_len(v + at, n - at);
+        if (word_is(v + at, ul, "em") || word_is(v + at, ul, "rem")) val *= 16;
+        else if (word_is(v + at, ul, "pt")) val = val * 4 / 3;
+        else if (word_is(v + at, ul, "px") || ul == 0) { /* px as written */ }
+        else return 0;                                /* vw, ex and the rest: left alone */
+    }
+    i64 px = val / 100;
+    if (px >= 34) return 3;
+    if (px >= 20) return 2;
+    return 1;
+}
+
 static void declaration(css_decl *d, const u8 *name, u32 nl, const u8 *v, u32 vl, bool imp)
 {
     if (value_unknown(v, vl)) return;
@@ -287,13 +320,19 @@ static void declaration(css_decl *d, const u8 *name, u32 nl, const u8 *v, u32 vl
             u32 l = 0;
             while (at + l < vl && !ws(v[at + l]) && v[at + l] != ',' && v[at + l] != '/') l++;
             if (!l) { at++; continue; }
-            if (word_is(v + at, l, "bold") || word_is(v + at, l, "bolder")) { d->bold = 1; set_prop(d, CSS_SET_WEIGHT, imp); return; }
-            if (v[at] >= '1' && v[at] <= '9') {
+            if (word_is(v + at, l, "bold") || word_is(v + at, l, "bolder")) { d->bold = 1; set_prop(d, CSS_SET_WEIGHT, imp); }
+            else if (v[at] >= '1' && v[at] <= '9') {
                 u32 k = 0; i64 num; bool pc;
-                if (number(v + at, l, &k, &num, &pc) && k == l && num >= 60000 && num <= 90000) {
-                    d->bold = 1; set_prop(d, CSS_SET_WEIGHT, imp); return;
+                if (number(v + at, l, &k, &num, &pc) && k == l && num >= 10000 && num <= 90000) {
+                    d->bold = 1; set_prop(d, CSS_SET_WEIGHT, imp);   /* a weight of 100..900 */
+                } else {
+                    /* the size, with a unit or a /line-height: font ends at the family */
+                    u32 sl = l;
+                    while (at + sl < vl && v[at + sl] != ' ' && v[at + sl] != ',') sl++;
+                    u8 sc = fontsize_scale(v + at, sl);
+                    if (sc) { d->fontscale = sc; set_prop(d, CSS_SET_FONTSIZE, imp); }
+                    return;                               /* the size: the family follows */
                 }
-                return;                                   /* the size: past the weight */
             }
             at += l;
         }
@@ -302,6 +341,11 @@ static void declaration(css_decl *d, const u8 *name, u32 nl, const u8 *v, u32 vl
         if (!parse_color(v, vl, &rgb)) return;
         d->color = rgb;
         set_prop(d, CSS_SET_COLOR, imp);
+    } else if (word_is(name, nl, "font-size")) {
+        u8 sc = fontsize_scale(v, vl);
+        if (!sc) return;
+        d->fontscale = sc;
+        set_prop(d, CSS_SET_FONTSIZE, imp);
     } else if (word_is(name, nl, "text-align")) {
         if (word_is(w, wl, "center")) d->align = CSS_ALIGN_CENTER;
         else if (word_is(w, wl, "right") || word_is(w, wl, "end")) d->align = CSS_ALIGN_RIGHT;
@@ -323,7 +367,7 @@ static void declaration(css_decl *d, const u8 *name, u32 nl, const u8 *v, u32 vl
 void css_declarations(const u8 *t, u64 n, css_decl *d)
 {
     d->set = d->important = 0;
-    d->display = d->hidden = d->bold = d->align = d->list_none = d->pad = 0;
+    d->display = d->hidden = d->bold = d->align = d->list_none = d->fontscale = 0;
     d->color = 0;
     u64 at = 0;
     while (at < n) {
@@ -834,6 +878,7 @@ static void take(css_decl *out, const css_decl *d, u8 bit)
     case CSS_SET_COLOR:      out->color = d->color; break;
     case CSS_SET_ALIGN:      out->align = d->align; break;
     case CSS_SET_LIST:       out->list_none = d->list_none; break;
+    case CSS_SET_FONTSIZE:   out->fontscale = d->fontscale; break;
     default: break;
     }
 }
@@ -841,7 +886,7 @@ static void take(css_decl *out, const css_decl *d, u8 bit)
 void css_match(const css_sheet *s, const css_elem *chain, u32 depth, css_decl *out)
 {
     out->set = out->important = 0;
-    out->display = out->hidden = out->bold = out->align = out->list_none = out->pad = 0;
+    out->display = out->hidden = out->bold = out->align = out->list_none = out->fontscale = 0;
     out->color = 0;
     if (!depth) return;
     const css_elem *e = &chain[depth - 1];

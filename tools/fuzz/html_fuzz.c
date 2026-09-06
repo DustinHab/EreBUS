@@ -18,6 +18,8 @@ void fb_glyph(i32 x, i32 y, u8 ch, color fg, color bg, bool opaque)
 { (void)x; (void)y; (void)ch; (void)fg; (void)bg; (void)opaque; }
 void fb_glyph_cp(i32 x, i32 y, u32 cp, color fg, color bg, bool opaque)
 { (void)x; (void)y; (void)fg; (void)bg; (void)opaque; if (cp > 0x10FFFF) abort(); }
+void fb_glyph_cp_scaled(i32 x, i32 y, u32 cp, color fg, i32 scale)
+{ (void)x; (void)y; (void)fg; if (cp > 0x10FFFF || scale < 1 || scale > 3) abort(); }
 void fb_image(i32 x, i32 y, i32 dw, i32 dh, const u32 *px, u32 iw, u32 ih, i32 c0, i32 c1)
 { (void)x; (void)y; (void)px; (void)c0; (void)c1; if (dw <= 0 || dh <= 0 || !iw || !ih) abort(); }
 

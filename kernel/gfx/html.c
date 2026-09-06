@@ -29,7 +29,7 @@ typedef struct {
     u32 color;
     i16 link;                       /* -1 for none */
     u8  found;
-    u8  under;
+    u8  scale;                      /* 1, 2 or 3: the glyph's whole-factor size */
 } cell;
 
 typedef struct {
@@ -46,6 +46,7 @@ typedef struct {
     u8  bold, align, list_none, vis_hidden;
     u8  has_color;
     u8  fold;                       /* this element started a fold */
+    u8  scale;                      /* 1, 2 or 3: the text size here */
     u32 color;
 } frame;
 
@@ -78,6 +79,7 @@ typedef struct {
 
     u32  word[WORD_MAX];            /* code points */
     u32  wlen;
+    u8   wsc;                       /* the word's size, fixed when its first letter came */
 
     /* The line being gathered. */
     cell   line[LINE_MAX];
@@ -86,6 +88,7 @@ typedef struct {
     u32    nlf;
     u8     line_align;
     bool   align_set;
+    u32    line_rows;               /* how tall the last painted line was, in glyph rows */
 
     /* The open elements. */
     css_elem chain[STACK_MAX];
@@ -217,26 +220,34 @@ static void spot_add(html_spot *spots, u32 *count, i32 x, i32 y, i32 w, i32 h, u
 }
 
 /* Paints the gathered line where it falls, shifted for its alignment,
- * and notes the links and fields in it. */
+ * scaled to its tallest glyph, and notes the links and fields in it.
+ * Leaves the line's height in rows in f->line_rows. */
 static void line_paint(flow *f)
 {
     html_sink *s = f->sink;
+    u32 tall = 1;
+    for (i32 c = 0; c < f->line_end; c++)
+        if (f->line[c].cp && f->line[c].scale > tall) tall = f->line[c].scale;
+    f->line_rows = tall;
+
     if (f->line_dirty) {
         i32 shift = 0;
         if (f->line_align == CSS_ALIGN_CENTER) shift = (f->cols - f->line_end) / 2;
         else if (f->line_align == CSS_ALIGN_RIGHT) shift = f->cols - f->line_end;
         if (shift < 0) shift = 0;
-        bool vis = visible(f, f->row);
-        i32 y = vis ? pixel_y(f, f->row) : 0;
+        /* the whole line, however tall, must fall inside the window */
+        bool vis = f->row >= f->v->scroll && f->row + tall <= f->v->scroll + (u32)f->rows;
+        i32 top = vis ? pixel_y(f, f->row) : 0;
 
         if (vis) {
             for (i32 c = 0; c < f->line_end; c++) {
                 cell *k = &f->line[c];
                 if (!k->cp) continue;
                 i32 x = f->v->x + (c + shift) * GLYPH_W;
-                if (k->found) fb_rect(x, y, GLYPH_W, GLYPH_H, f->v->col.accent);
-                fb_glyph_cp(x, y, k->cp, k->color, 0, false);
-                if (k->under) fb_rect(x, y + GLYPH_H - 2, GLYPH_W, 1, k->color);
+                u32 sc = k->scale ? k->scale : 1;
+                i32 y = top + (i32)(tall - sc) * GLYPH_H;   /* sit on the line's floor */
+                if (k->found) fb_rect(x, y, (i32)sc * GLYPH_W, (i32)sc * GLYPH_H, f->v->col.accent);
+                fb_glyph_cp_scaled(x, y, k->cp, k->color, (i32)sc);
             }
             if (s && s->link_spots && s->link_spot_count) {
                 i32 run = -1, start = 0, end = 0;
@@ -246,8 +257,8 @@ static void line_paint(flow *f)
                     i32 l = k ? k->link : -1;
                     if (run >= 0 && l == run && c - end <= 1) { end = c + 1; continue; }
                     if (run >= 0)
-                        spot_add(s->link_spots, s->link_spot_count, f->v->x + (start + shift) * GLYPH_W, y,
-                                 (end - start) * GLYPH_W, GLYPH_H, (u32)run);
+                        spot_add(s->link_spots, s->link_spot_count, f->v->x + (start + shift) * GLYPH_W, top,
+                                 (end - start) * GLYPH_W, (i32)tall * GLYPH_H, (u32)run);
                     if (l >= 0) { run = l; start = c; end = c + 1; } else run = -1;
                 }
             }
@@ -257,6 +268,7 @@ static void line_paint(flow *f)
             const lfield *lf = &f->lf[i];
             i32 x = f->v->x + (lf->col + shift) * GLYPH_W;
             i32 w = (i32)lf->w * GLYPH_W;
+            i32 y = top + (i32)(tall - 1) * GLYPH_H;
             if (!vis) continue;
             if (lf->kind == FIELD_SUBMIT) {
                 const char *label = (s && s->field_init) ? s->field_init[lf->idx] : "";
@@ -289,7 +301,7 @@ static void line_break(flow *f)
 {
     line_paint(f);
     f->col = f->indent;
-    f->row++;
+    f->row += f->line_rows;
     f->line_dirty = false;
 }
 
@@ -349,19 +361,29 @@ static color word_color(flow *f)
     return f->v->col.dim;
 }
 
+static u32 word_scale(flow *f)
+{
+    frame *t = top(f);
+    u32 sc = t ? t->scale : 1;
+    return sc >= 1 && sc <= 3 ? sc : 1;
+}
+
 static void word_flush(flow *f)
 {
     if (f->wlen == 0) return;
     settle_blanks(f);
 
-    if (f->col + (i32)f->wlen > f->cols && f->col > f->indent) line_break(f);
+    u32 sc = f->wsc >= 1 && f->wsc <= 3 ? f->wsc : 1;
+    /* how many columns a glyph of this size takes; the word is that wide. */
+    if (f->col + (i32)(f->wlen * sc) > f->cols && f->col > f->indent) line_break(f);
 
     color c = word_color(f);
     u32 shown = f->wlen;
-    i32 room = f->cols - f->col;
+    i32 room = (f->cols - f->col) / (i32)sc;
     if (room < 1) room = 1;
     if ((i32)shown > room) shown = (u32)room;
-    if (f->col + (i32)shown > LINE_MAX) shown = (u32)(LINE_MAX - f->col);
+    while (shown && f->col + (i32)(shown * sc) > LINE_MAX) shown--;
+    if (shown == 0) { f->wlen = 0; return; }
 
     /* A word that is being looked for is drawn marked, and its row
      * is answered when it is the first at or past the row asked from. */
@@ -371,27 +393,30 @@ static void word_flush(flow *f)
         *f->sink->find_row = f->row;
 
     line_take_align(f);
-    for (u32 i = 0; i < shown && f->col + (i32)i < LINE_MAX; i++) {
-        cell *k = &f->line[f->col + (i32)i];
+    for (u32 i = 0; i < shown; i++) {
+        i32 at = f->col + (i32)(i * sc);
+        if (at >= LINE_MAX) break;
+        cell *k = &f->line[at];
         k->cp = f->word[i];
         k->color = found ? f->v->col.text : c;
         k->link = (i16)(f->link >= 0 && f->link < 32000 ? f->link : -1);
         k->found = found;
-        k->under = f->link >= 0 && !found;
+        k->scale = (u8)sc;
     }
-    f->col += (i32)shown;
+    f->col += (i32)(shown * sc);
     if (f->col > f->line_end) f->line_end = f->col;
     f->line_dirty = true;
     f->wlen = 0;
 
-    if (f->col < f->cols) f->col++;          /* the space after */
+    if (f->col + (i32)sc <= f->cols) f->col += (i32)sc;   /* the space after */
     else line_break(f);
 }
 
 static void word_add(flow *f, u32 c)
 {
+    if (f->wlen == 0) f->wsc = (u8)word_scale(f);      /* the size the word keeps to its end */
     if (f->wlen < WORD_MAX - 1) f->word[f->wlen++] = c;
-    if (f->col + (i32)f->wlen >= f->cols) word_flush(f);
+    if (f->col + (i32)(f->wlen * f->wsc) >= f->cols) word_flush(f);
 }
 
 /* One code point from the utf-8 at s, and how many bytes it took. A
@@ -825,6 +850,7 @@ static frame *elem_open(flow *f, const parsed_tag *t)
     fr->vis_hidden = parent ? parent->vis_hidden : 0;
     fr->has_color = parent ? parent->has_color : 0;
     fr->color = parent ? parent->color : 0;
+    fr->scale = parent ? parent->scale : 1;
     fr->fold = 0;
 
     /* the sheet, then the style attribute */
@@ -868,6 +894,10 @@ static frame *elem_open(flow *f, const parsed_tag *t)
         else if (al && (al[0] == 'l' || al[0] == 'L')) fr->align = CSS_ALIGN_LEFT;
     }
     if (d.set & CSS_SET_LIST) fr->list_none = d.list_none;
+    if (d.set & CSS_SET_FONTSIZE) fr->scale = d.fontscale;
+    else if (is_heading(name)) fr->scale = name[1] == '1' ? 3 : name[1] == '2' ? 2 : fr->scale;
+    if (fr->scale < 1) fr->scale = 1;
+    if (fr->scale > 3) fr->scale = 3;
 
     if (is_void(name)) return fr;
 
@@ -1400,8 +1430,9 @@ u32 html_render(const html_view *v, html_sink *sink)
     f->head_depth = 0; f->list_depth = 0;
     f->cur_form = -1;
     f->wlen = 0;
+    f->wsc = 1;
     for (i32 c = 0; c < f->line_end; c++) f->line[c].cp = 0;
-    f->line_end = 0; f->nlf = 0; f->line_align = CSS_ALIGN_LEFT; f->align_set = false;
+    f->line_end = 0; f->nlf = 0; f->line_align = CSS_ALIGN_LEFT; f->align_set = false; f->line_rows = 1;
     f->depth = 0; f->overflow = 0;
     f->hide_at = -1; f->fold_at = -1; f->fold_open = false; f->fold_kind = 0; f->fold_n = 0;
     f->fold_links = f->fold_words = f->fold_fields = 0; f->in_word = false;
@@ -1467,7 +1498,7 @@ u32 html_render(const html_view *v, html_sink *sink)
     if (dirty) line_paint(f);
     if (sink && sink->hidden_count) *sink->hidden_count = f->hidden_count;
 
-    return f->row + (dirty ? 1 : 0);
+    return f->row + (dirty ? f->line_rows : 0);
 }
 
 /* ------------------------------------------------------------------ */

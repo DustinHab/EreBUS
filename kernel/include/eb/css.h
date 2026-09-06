@@ -35,7 +35,8 @@
 #define CSS_SET_COLOR      (1u << 3)
 #define CSS_SET_ALIGN      (1u << 4)
 #define CSS_SET_LIST       (1u << 5)
-#define CSS_PROPS          6
+#define CSS_SET_FONTSIZE   (1u << 6)
+#define CSS_PROPS          7
 
 #define CSS_DISPLAY_INLINE 0
 #define CSS_DISPLAY_BLOCK  1
@@ -53,7 +54,7 @@ typedef struct {
     u8  bold;                       /* font-weight bold or 600 and up */
     u8  align;                      /* CSS_ALIGN_* */
     u8  list_none;                  /* list-style(-type): none */
-    u8  pad;
+    u8  fontscale;                  /* 1, 2 or 3: whole-factor text size from font-size */
     u32 color;                      /* 0x00RRGGBB */
 } css_decl;
 

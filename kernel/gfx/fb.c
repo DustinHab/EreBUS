@@ -319,6 +319,11 @@ void fb_glyph_cp(i32 x, i32 y, u32 cp, color fg, color bg, bool opaque)
     draw_glyph_cp(x, y, cp, fg, bg, opaque, 1);
 }
 
+void fb_glyph_cp_scaled(i32 x, i32 y, u32 cp, color fg, i32 scale)
+{
+    draw_glyph_cp(x, y, cp, fg, 0, false, scale);
+}
+
 void fb_image(i32 x, i32 y, i32 dw, i32 dh, const u32 *px, u32 iw, u32 ih,
               i32 clip_y0, i32 clip_y1)
 {

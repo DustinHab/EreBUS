@@ -2082,18 +2082,29 @@ static void draw_web_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         .sheets = web_sheet_urls, .sheet_count = &web_sheet_count,
         .sheet_text = web_sheet_text, .sheet_ctx = NULL,
     };
+    /* The flow is held to a readable measure and centred: a line of a
+     * hundred-odd glyphs reads far better than one across the whole
+     * screen. The media queries still see the true window width, so a
+     * page lays itself out for a desktop, not for the column. */
+    i32 avail = w - 2 * GLYPH_W;
+    i32 usew = avail;
+    i32 maxw = 112 * GLYPH_W;
+    if (usew > maxw) usew = maxw;
+    i32 vx = x + (avail - usew) / 2;
     html_view v = {
         .src = src, .len = len,
-        .x = x, .y = by, .w = w - 2 * GLYPH_W, .h = bh,
+        .x = vx, .y = by, .w = avail, .h = bh,
         .scroll = scrolls[SCR_WEB],
         .col = { C_TEXT, C_DIM, C_FAINT, C_ACCENT, C_EDGE },
     };
-    /* The rule table is read again when the page or its sheets changed. */
+    /* The rule table is read again when the page or its sheets changed;
+     * html_styles wants the true width for its media queries. */
     if (!web.styled && !web.plain) {
         web.nrules = html_styles(&v, &sink, web.rules);
         web.styled = true;
         web.style_report = web.have && web.url[0];
     }
+    v.w = usew;
     web.rows = html_render(&v, &sink);
     web.vis = (u32)(bh / GLYPH_H);
     if (web.style_report) {

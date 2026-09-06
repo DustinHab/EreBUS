@@ -45,6 +45,7 @@ void fb_gradient(i32 x, i32 y, i32 w, i32 h, color top, color bottom);
 
 void fb_glyph(i32 x, i32 y, u8 ch, color fg, color bg, bool opaque);
 void fb_glyph_cp(i32 x, i32 y, u32 cp, color fg, color bg, bool opaque);   /* any code point the font has */
+void fb_glyph_cp_scaled(i32 x, i32 y, u32 cp, color fg, i32 scale);        /* enlarged by a whole factor */
 void fb_text(i32 x, i32 y, const char *s, color fg, color bg, bool opaque);
 
 /* A picture of iw x ih pixels (0x00RRGGBB) drawn at x, y as dw x dh,
