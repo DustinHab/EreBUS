@@ -79,6 +79,7 @@ KERN_C   := kernel/main.c \
             kernel/gfx/fb.c \
             kernel/gfx/shell.c \
             kernel/gfx/html.c \
+            kernel/gfx/css.c \
             kernel/gfx/png.c \
             kernel/gfx/jpeg.c \
             kernel/lib/inflate.c \

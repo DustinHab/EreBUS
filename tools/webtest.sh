@@ -1,9 +1,12 @@
 #!/bin/sh
 # webtest.sh -- the browser against a server of its own on the host.
-# - the page: a title, utf-8 prose, links, two pictures (png, jpeg), a form that posts
-# - boot 1: the page fetched and rendered (pictures decoded), a link followed by keyboard and back again,
-#   the form filled and posted -> a cookie set and a redirect followed with the cookie sent, the page kept
-#   as a bookmark, a gzip page and a chunked page fetched
+# - the page: a title, utf-8 prose, links, two pictures (png, jpeg), a slow third one, a form that posts,
+#   a stylesheet of its own and an inline one, a link hidden by a rule, a navigation that folds
+# - boot 1: the page fetched and rendered (pictures decoded, the sheet read), the first link followed by keyboard
+#   while the slow picture is still coming (it is not the hidden one, nor one of the folded navigation's) and back
+#   again, the navigation opened and its first link followed, the styles turned off (the hidden link is back)
+#   and on, the form filled and posted -> a cookie set and a redirect followed with the cookie sent, the page
+#   kept as a bookmark, a gzip page and a chunked page fetched
 # - boot 2: the bookmark and the cookie are back; the cookie rides on the next request
 # - the server reaches the guest through qemu's guestfwd, a netcat per connection (like update-test)
 cd "$(dirname "$0")/.."
@@ -13,7 +16,7 @@ PORT=${WEBPORT:-8480}
 rm -rf $W; mkdir -p $W
 
 cat > $W/serve.py <<'PY'
-import sys, zlib, struct, gzip, io
+import sys, zlib, struct, gzip, io, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 port = int(sys.argv[1])
 
@@ -35,11 +38,20 @@ def jpeg24():
     except Exception as e:
         sys.stderr.write("server: no pil: %s\n" % e); return b""
 
-PAGE = """<html><head><title>Erebus test page</title></head><body>
-<h1>Hello from the host</h1>
-<p>Some prose with umlauts: &auml;&ouml;&uuml; and Ω and &#x2014; and a link to <a href="/second">the second page</a>.</p>
-<p><a href="gz">a packed page</a> and <a href="/chunk">a page in chunks</a></p>
-<img src="/i.png" alt="a png"> <img src="p.jpg" alt="a jpeg">
+SHEET = b""".gone { display: none }
+.warm { color: #a00000; font-weight: bold }
+.mid { text-align: center }
+@media (max-width: 600px) { h1 { display: none } }
+"""
+
+PAGE = """<html><head><title>Erebus test page</title>
+<link rel="stylesheet" href="/s.css"><style>#trap { display: none }</style></head><body>
+<nav><a href="/n1">one</a> <a href="/n2">two</a> <a href="/n3">three</a></nav>
+<div id="trap"><a href="/trap">a link a rule hides</a></div>
+<h1 class="warm">Hello from the host</h1>
+<p class="mid">Some prose with umlauts: &auml;&ouml;&uuml; and Î© and &#x2014; and a link to <a href="/second">the second page</a>.</p>
+<p><a href="gz">a packed page</a> and <a href="/chunk">a page in chunks</a> <span class="gone">and words a class hides</span></p>
+<img src="/i.png" alt="a png"> <img src="p.jpg" alt="a jpeg"> <img src="/slow.png" alt="a slow one">
 <form action="/login" method="post">name <input name="user" value=""> word <input type="password" name="pass" value="x"> <input type="submit" value="sign in"></form>
 </body></html>""".encode("utf-8")
 
@@ -62,7 +74,9 @@ class H(BaseHTTPRequestHandler):
         self.note()
         p = self.path
         if p == "/": self.send(200, "text/html; charset=utf-8", PAGE)
+        elif p == "/s.css": self.send(200, "text/css", SHEET)
         elif p == "/second": self.send(200, "text/html", b"<html><head><title>Second</title></head><body><h2>the second page</h2><p><a href='/'>home</a></p></body></html>")
+        elif p == "/n1": self.send(200, "text/html", b"<html><head><title>One</title></head><body><p>the navigation's first</p></body></html>")
         elif p == "/home":
             c = self.headers.get("Cookie", "")
             self.send(200, "text/html", ("<html><head><title>Home</title></head><body><p>cookie: %s</p></body></html>" % (c or "none")).encode())
@@ -76,6 +90,9 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(b"0\r\n\r\n")
         elif p == "/i.png": self.send(200, "image/png", png16())
         elif p == "/p.jpg": self.send(200, "image/jpeg", jpeg24())
+        elif p == "/slow.png":
+            time.sleep(3)
+            self.send(200, "image/png", png16())
         else: self.send(404, "text/html", b"<html><body><p>no such page</p></body></html>")
     def do_POST(self):
         n = int(self.headers.get("Content-Length", "0"))
@@ -115,24 +132,54 @@ boot() {   # boot <log> <keys function>
       -serial file:$LOG >/dev/null 2>&1
 }
 
+# The main page again, with its sheet and pictures: the count of loads so
+# far. A fresh load leaves the keyboard spot on nothing, so what follows
+# can step from a known place. The navigation folds, so the visible links
+# are the three in the body: the second page, the packed page, the chunked
+# page; then the form's fields; then the fold's own line.
+home_again() {
+    waitcount $LOG 'get http://10.0.2.100/ -> 200' $1 20
+    waitcount $LOG 'styles: .* 1 of 1 sheets' $1 20
+    waitcount $LOG 'picture p.jpg' $1 20
+}
+
 first() {
     waitlog $LOG 'by lease' 30
     keys tab tab tab tab tab tab pause
     say "10.0.2.100/"
-    waitlog $LOG 'get http://10.0.2.100/ -> 200' 30
-    waitlog $LOG 'picture p.jpg' 30
+    home_again 1
     sleep 1
     echo "screendump $W/page.ppm"
+    # the first link in hand while the slow picture is still coming; it is the
+    # body's second-page link, not the hidden one nor one of the folded navigation's
     keys n ret pause
     waitlog $LOG 'get http://10.0.2.100/second -> 200' 20
     keys backspace pause
-    waitcount $LOG 'get http://10.0.2.100/ -> 200' 2 20
-    waitlog $LOG 'picture p.jpg' 5
+    home_again 2
+    # the form, on the known layout: three body links, then the name field
     keys n n n n ret pause
     say "erebus"
     waitlog $LOG 'at http://10.0.2.100/home' 20
     keys b pause
     waitlog $LOG 'kept http://10.0.2.100/home' 10
+    # back to the main page for the fold and the styles
+    say "10.0.2.100/"
+    home_again 3
+    # the fold is the last spot: open it
+    keys p ret pause
+    waitlog $LOG 'fold 0 opened' 10
+    sleep 1
+    echo "screendump $W/open.ppm"
+    # the styles off: the whole page as it came, the hidden link among it
+    keys s pause
+    waitlog $LOG 'styles off' 10
+    sleep 1
+    echo "screendump $W/plain.ppm"
+    # plain document order: the navigation's three, then the link a rule hid
+    keys n n n n ret pause
+    waitlog $LOG 'trap -> 404' 20
+    keys s pause
+    waitlog $LOG 'styles on' 10
     say "10.0.2.100/gz"
     waitlog $LOG 'gz -> 200' 20
     say "10.0.2.100/chunk"
@@ -157,9 +204,7 @@ boot $W/boot1.log first
 boot $W/boot2.log second
 kill $SRV 2>/dev/null
 wait 2>/dev/null
-python3 tools/ppm2png.py $W/page.ppm $W/page.png 2>/dev/null
-python3 tools/ppm2png.py $W/chunk.ppm $W/chunk.png 2>/dev/null
-python3 tools/ppm2png.py $W/marks.ppm $W/marks.png 2>/dev/null
+for p in page open plain chunk marks; do python3 tools/ppm2png.py $W/$p.ppm $W/$p.png 2>/dev/null; done
 
 echo "--- boot 1: what the browser said ---"
 grep -a 'web:' $W/boot1.log | cut -c1-130
@@ -172,9 +217,15 @@ ok=1
 grep -aq 'get http://10.0.2.100/ -> 200' $W/boot1.log && echo "the page was fetched" || { echo "FAILED: no page"; ok=0; }
 grep -aq 'picture /i.png: png 16x16' $W/boot1.log && echo "the png was decoded" || { echo "FAILED: png"; ok=0; }
 grep -aq 'picture p.jpg: jpeg 24x16' $W/boot1.log && echo "the jpeg was decoded" || { echo "FAILED: jpeg"; ok=0; }
+grep -aq 'get http://10.0.2.100/s.css -> 200.*text/css' $W/boot1.log && echo "the stylesheet was fetched" || { echo "FAILED: sheet"; ok=0; }
+grep -aq 'styles: [0-9]* rules, 1 of 1 sheets, 2 parts hidden, 1 folds' $W/boot1.log && echo "and read: two parts hidden, the navigation folded" || { echo "FAILED: styles"; ok=0; }
 grep -aq 'get http://10.0.2.100/second -> 200' $W/boot1.log && echo "a link was followed by keyboard" || { echo "FAILED: link"; ok=0; }
-grep -aq 'post http://10.0.2.100/login -> 200.* at http://10.0.2.100/home' $W/boot1.log && echo "the post was answered with a move, followed" || { echo "FAILED: redirect after post"; ok=0; }
+awk '/GET \/slow.png/ { s = 1 } /GET \/second/ { if (s) ok = 1 } END { exit !ok }' $W/server.log && echo "while the slow picture was still coming" || { echo "FAILED: the slow picture did not precede the link"; ok=0; }
 [ "$(count $W/boot1.log 'get http://10.0.2.100/ -> 200')" -ge 2 ] && echo "and backspace went back" || { echo "FAILED: back"; ok=0; }
+grep -aq 'fold 0 opened' $W/boot1.log && echo "the navigation folded, and opened on a press" || { echo "FAILED: fold"; ok=0; }
+grep -aq 'styles off' $W/boot1.log && grep -aq 'trap -> 404' $W/boot1.log && echo "with the styles off the hidden link was there" || { echo "FAILED: plain"; ok=0; }
+[ "$(grep -c 'GET /trap' $W/server.log)" -eq 1 ] && echo "and only then" || { echo "FAILED: the hidden link was followed while styled"; ok=0; }
+grep -aq 'post http://10.0.2.100/login -> 200.* at http://10.0.2.100/home' $W/boot1.log && echo "the post was answered with a move, followed" || { echo "FAILED: redirect after post"; ok=0; }
 grep -q 'POST /login .*body=user=erebus&pass=x' $W/server.log && echo "the form was posted with what was typed" || { echo "FAILED: post"; ok=0; }
 grep -aq 'cookie from 10.0.2.100: session (kept)' $W/boot1.log && echo "the cookie was taken" || { echo "FAILED: cookie"; ok=0; }
 grep -q 'GET /home | cookie=session=abc123' $W/server.log && echo "and sent on the redirect that followed" || { echo "FAILED: cookie not sent"; ok=0; }
@@ -184,4 +235,4 @@ grep -aq 'chunk -> 200.*chunked' $W/boot1.log && echo "a chunked page was joined
 grep -aq '1 bookmark kept' $W/boot2.log && echo "the bookmark was there at the next start" || { echo "FAILED: bookmark gone"; ok=0; }
 grep -aq '1 cookie kept from before' $W/boot2.log && echo "so was the cookie" || { echo "FAILED: cookie gone"; ok=0; }
 [ "$(grep -c 'GET /home | cookie=session=abc123' $W/server.log)" -ge 2 ] && echo "and it rode on the first request after" || { echo "FAILED: kept cookie not sent"; ok=0; }
-[ $ok = 1 ] && echo "the browser fetches, renders, follows, posts, keeps cookies and bookmarks" || echo "the browser FAILED"
+[ $ok = 1 ] && echo "the browser fetches, styles, folds, follows, posts, keeps cookies and bookmarks" || echo "the browser FAILED"

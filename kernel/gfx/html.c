@@ -1,17 +1,53 @@
 /*
- * html.c -- text browser lens: one pass over markup.
+ * html.c -- text browser lens: one pass over markup, with the part of the stylesheet that changes what a page says.
  * - headings, paragraphs, lists, quotes, pre, tables, links, forms (text fields, submit), pictures
  * - utf-8 decoded to code points; named and numeric entities
- * - scripts, styles, comments and unknown tags are dropped
- * - no CSS, no JavaScript; width from the window; a picture is drawn when its lender has it decoded,
- *   a frame with the alternative text until then
+ * - an element stack carries the computed style: display none and visibility hidden drop the subtree, font-weight
+ *   sets words strong, color colours them, text-align sets the line, list-style none drops the bullet, display
+ *   block or inline decides the break; the style attribute wins over the sheet; hidden and align attributes read
+ * - nav, header, footer and aside fold to one line with a count, opened by the person; header and footer only
+ *   outside article, section and main
+ * - a line is gathered and painted on the break, so it can be centred or set right
+ * - scripts, styles, svg, templates, comments and unknown tags are dropped; noscript is read (there is no script)
+ * - no JavaScript; width from the window; a picture is drawn when its lender has it decoded, a frame with the
+ *   alternative text until then
+ * - one page at a time: the state is static, too big for a thread's stack
  */
 #include <eb/html.h>
 
-#define WORD_MAX  96
-#define IND_STEP  2                 /* columns per level of indent */
-#define FIELD_COLS 22               /* width of a text field, in glyphs */
+#define WORD_MAX    96
+#define IND_STEP    2               /* columns per level of indent */
+#define FIELD_COLS  22              /* width of a text field, in glyphs */
 #define IMAGE_MAX_H 480             /* pixels a picture may stand tall */
+#define STACK_MAX   96              /* open elements remembered */
+#define LINE_MAX    320             /* cells in one line */
+#define LFIELDS_MAX 12              /* fields in one line */
+#define ATTRS_MAX   12
+
+typedef struct {
+    u32 cp;                         /* 0 for blank */
+    u32 color;
+    i16 link;                       /* -1 for none */
+    u8  found;
+    u8  under;
+} cell;
+
+typedef struct {
+    i32 col;
+    u32 w;
+    u32 idx;
+    u8  kind;
+} lfield;
+
+/* One open element: its tag and what the styles made of it. */
+typedef struct {
+    u32 tag;
+    u8  display;                    /* CSS_DISPLAY_* */
+    u8  bold, align, list_none, vis_hidden;
+    u8  has_color;
+    u8  fold;                       /* this element started a fold */
+    u32 color;
+} frame;
 
 typedef struct {
     const html_view *v;
@@ -27,7 +63,6 @@ typedef struct {
     /* Mood. */
     u32  bold;
     i32  link;                      /* -1, or index into urls */
-    u32  skip;                      /* inside script/style */
     u32  pre;                       /* inside preformatted text */
 
     /* Headings, as a level stack so a close knows what it closes. */
@@ -43,7 +78,111 @@ typedef struct {
 
     u32  word[WORD_MAX];            /* code points */
     u32  wlen;
+
+    /* The line being gathered. */
+    cell   line[LINE_MAX];
+    i32    line_end;                /* one past the last cell written */
+    lfield lf[LFIELDS_MAX];
+    u32    nlf;
+    u8     line_align;
+    bool   align_set;
+
+    /* The open elements. */
+    css_elem chain[STACK_MAX];
+    frame    meta[STACK_MAX];
+    u32      depth;
+    u32      overflow;              /* opens past STACK_MAX, so their closes pop nothing */
+    i32      hide_at;               /* the element that hides its subtree, or -1 */
+    i32      fold_at;               /* the element folded, or -1 */
+    bool     fold_open;
+    u8       fold_kind;
+    u32      fold_n;                /* folds numbered so far */
+    u32      fold_links, fold_words, fold_fields;
+    bool     in_word;
+    u32      hidden_count;
 } flow;
+
+static flow F;
+
+/* ------------------------------------------------------------------ */
+/* Names                                                               */
+/* ------------------------------------------------------------------ */
+
+static bool tag_is(const char *t, const char *want)
+{
+    u32 i = 0;
+    while (want[i]) { if (t[i] != want[i]) return false; i++; }
+    return t[i] == 0;
+}
+
+static char to_lower(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+}
+
+static u32 slen(const char *s) { u32 n = 0; while (s[n]) n++; return n; }
+
+static bool is_heading(const char *name)
+{
+    return name[0] == 'h' && name[1] >= '1' && name[1] <= '6' && name[2] == 0;
+}
+
+static bool is_void(const char *n)
+{
+    return tag_is(n, "br") || tag_is(n, "hr") || tag_is(n, "img") || tag_is(n, "input") ||
+           tag_is(n, "meta") || tag_is(n, "link") || tag_is(n, "area") || tag_is(n, "base") ||
+           tag_is(n, "col") || tag_is(n, "embed") || tag_is(n, "source") || tag_is(n, "track") ||
+           tag_is(n, "wbr") || tag_is(n, "param");
+}
+
+/* The break an element owes by its own nature: two rows, one, or none. */
+static u32 ua_gap(const char *n)
+{
+    if (tag_is(n, "p") || tag_is(n, "section") || tag_is(n, "article") || tag_is(n, "header") ||
+        tag_is(n, "footer") || tag_is(n, "main") || tag_is(n, "nav") || tag_is(n, "aside") ||
+        tag_is(n, "figure") || tag_is(n, "dl") || tag_is(n, "address") || tag_is(n, "table") ||
+        tag_is(n, "pre") || is_heading(n))
+        return 2;
+    if (tag_is(n, "div") || tag_is(n, "tr") || tag_is(n, "dt") || tag_is(n, "dd") ||
+        tag_is(n, "ul") || tag_is(n, "ol") || tag_is(n, "li") || tag_is(n, "form") ||
+        tag_is(n, "fieldset") || tag_is(n, "details") || tag_is(n, "summary") ||
+        tag_is(n, "figcaption") || tag_is(n, "caption") || tag_is(n, "center") ||
+        tag_is(n, "blockquote") || tag_is(n, "menu") || tag_is(n, "hr") || tag_is(n, "body"))
+        return 1;
+    return 0;
+}
+
+static bool is_block(const char *n)
+{
+    return ua_gap(n) > 0 || tag_is(n, "td") || tag_is(n, "th") || tag_is(n, "thead") ||
+           tag_is(n, "tbody") || tag_is(n, "tfoot") || tag_is(n, "html") || tag_is(n, "head");
+}
+
+/* What folds: 1 navigation, 2 header, 3 footer, 4 aside; 0 for nothing. */
+static u8 fold_kind_of(const char *n, const char *role)
+{
+    if (role) {
+        if (tag_is(role, "navigation") || tag_is(role, "menu") || tag_is(role, "menubar")) return 1;
+        if (tag_is(role, "banner")) return 2;
+        if (tag_is(role, "contentinfo")) return 3;
+        if (tag_is(role, "complementary")) return 4;
+    }
+    if (tag_is(n, "nav")) return 1;
+    if (tag_is(n, "header")) return 2;
+    if (tag_is(n, "footer")) return 3;
+    if (tag_is(n, "aside")) return 4;
+    return 0;
+}
+
+static const char *fold_name(u8 kind)
+{
+    switch (kind) {
+    case 1: return "navigation";
+    case 2: return "header";
+    case 3: return "footer";
+    default: return "aside";
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* Placement                                                           */
@@ -59,8 +198,96 @@ static i32 pixel_y(const flow *f, u32 row)
     return f->v->y + (i32)(row - f->v->scroll) * GLYPH_H;
 }
 
+static frame *top(flow *f) { return f->depth ? &f->meta[f->depth - 1] : NULL; }
+
+static bool hidden(const flow *f) { return f->hide_at >= 0; }
+static bool folded(const flow *f) { return f->fold_at >= 0 && !f->fold_open; }
+static bool quiet(const flow *f)  { return hidden(f) || folded(f); }
+
+static u8 cur_align(flow *f)
+{
+    frame *t = top(f);
+    return t ? t->align : CSS_ALIGN_LEFT;
+}
+
+static void spot_add(html_spot *spots, u32 *count, i32 x, i32 y, i32 w, i32 h, u32 ref)
+{
+    if (!spots || !count || *count >= HTML_SPOTS_MAX) return;
+    spots[(*count)++] = (html_spot){ x, y, w, h, ref };
+}
+
+/* Paints the gathered line where it falls, shifted for its alignment,
+ * and notes the links and fields in it. */
+static void line_paint(flow *f)
+{
+    html_sink *s = f->sink;
+    if (f->line_dirty) {
+        i32 shift = 0;
+        if (f->line_align == CSS_ALIGN_CENTER) shift = (f->cols - f->line_end) / 2;
+        else if (f->line_align == CSS_ALIGN_RIGHT) shift = f->cols - f->line_end;
+        if (shift < 0) shift = 0;
+        bool vis = visible(f, f->row);
+        i32 y = vis ? pixel_y(f, f->row) : 0;
+
+        if (vis) {
+            for (i32 c = 0; c < f->line_end; c++) {
+                cell *k = &f->line[c];
+                if (!k->cp) continue;
+                i32 x = f->v->x + (c + shift) * GLYPH_W;
+                if (k->found) fb_rect(x, y, GLYPH_W, GLYPH_H, f->v->col.accent);
+                fb_glyph_cp(x, y, k->cp, k->color, 0, false);
+                if (k->under) fb_rect(x, y + GLYPH_H - 2, GLYPH_W, 1, k->color);
+            }
+            if (s && s->link_spots && s->link_spot_count) {
+                i32 run = -1, start = 0, end = 0;
+                for (i32 c = 0; c <= f->line_end; c++) {
+                    const cell *k = c < f->line_end ? &f->line[c] : NULL;
+                    if (k && !k->cp) continue;
+                    i32 l = k ? k->link : -1;
+                    if (run >= 0 && l == run && c - end <= 1) { end = c + 1; continue; }
+                    if (run >= 0)
+                        spot_add(s->link_spots, s->link_spot_count, f->v->x + (start + shift) * GLYPH_W, y,
+                                 (end - start) * GLYPH_W, GLYPH_H, (u32)run);
+                    if (l >= 0) { run = l; start = c; end = c + 1; } else run = -1;
+                }
+            }
+        }
+
+        for (u32 i = 0; i < f->nlf; i++) {
+            const lfield *lf = &f->lf[i];
+            i32 x = f->v->x + (lf->col + shift) * GLYPH_W;
+            i32 w = (i32)lf->w * GLYPH_W;
+            if (!vis) continue;
+            if (lf->kind == FIELD_SUBMIT) {
+                const char *label = (s && s->field_init) ? s->field_init[lf->idx] : "";
+                fb_rect(x - 2, y - 2, w + 2, GLYPH_H + 4, f->v->col.edge);
+                fb_glyph(x, y, '[', f->v->col.accent, 0, false);
+                u32 ll = 0;
+                for (; label[ll] && ll + 2 < lf->w; ll++)
+                    fb_glyph(x + GLYPH_W + (i32)ll * GLYPH_W, y, (u8)label[ll], f->v->col.accent, 0, false);
+                fb_glyph(x + GLYPH_W + (i32)ll * GLYPH_W, y, ']', f->v->col.accent, 0, false);
+            } else {
+                const char *shown = "";
+                if (s && s->field_values) shown = s->field_values[lf->idx];
+                else if (s && s->field_init) shown = s->field_init[lf->idx];
+                fb_rect(x - 2, y - 2, w + 2, GLYPH_H + 3, f->v->col.edge);
+                fb_rect(x - 1, y - 1, w, GLYPH_H + 1, f->v->col.faint);
+                for (u32 k = 0; shown[k] && k + 1 < lf->w; k++)
+                    fb_glyph(x + (i32)k * GLYPH_W, y, lf->kind == FIELD_PASS ? '*' : (u8)shown[k],
+                             f->v->col.text, 0, false);
+            }
+            if (s) spot_add(s->field_spots, s->field_spot_count, x - 2, y - 2, w + 2, GLYPH_H + 4, lf->idx);
+        }
+    }
+    for (i32 c = 0; c < f->line_end; c++) f->line[c].cp = 0;
+    f->line_end = 0;
+    f->nlf = 0;
+    f->align_set = false;
+}
+
 static void line_break(flow *f)
 {
+    line_paint(f);
     f->col = f->indent;
     f->row++;
     f->line_dirty = false;
@@ -78,28 +305,11 @@ static void settle_blanks(flow *f)
     f->col = f->indent;
 }
 
-/* ------------------------------------------------------------------ */
-/* Link spots                                                          */
-/* ------------------------------------------------------------------ */
-
-static void link_note(flow *f, i32 x, u32 row, u32 chars)
+static void line_take_align(flow *f)
 {
-    html_sink *s = f->sink;
-    if (!s || !s->link_spots || !s->link_spot_count || f->link < 0) return;
-    if (!visible(f, row)) return;
-    i32 y = pixel_y(f, row);
-
-    if (*s->link_spot_count > 0) {
-        html_spot *last = &s->link_spots[*s->link_spot_count - 1];
-        if (last->ref == (u32)f->link && last->y == y &&
-            last->x + last->w >= x - GLYPH_W) {
-            last->w = (x + (i32)chars * GLYPH_W) - last->x;
-            return;
-        }
-    }
-    if (*s->link_spot_count >= HTML_SPOTS_MAX) return;
-    s->link_spots[(*s->link_spot_count)++] = (html_spot){
-        x, y, (i32)chars * GLYPH_W, GLYPH_H, (u32)f->link };
+    if (f->align_set) return;
+    f->line_align = cur_align(f);
+    f->align_set = true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -123,6 +333,22 @@ static bool word_has(const flow *f, const char *find)
     return false;
 }
 
+/* A colour the sheet asked for, unless it would vanish on the page. */
+static bool usable_color(u32 c)
+{
+    u32 r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+    return (r * 299 + g * 587 + b * 114) / 1000 <= 190;
+}
+
+static color word_color(flow *f)
+{
+    frame *t = top(f);
+    if (f->link >= 0) return f->v->col.accent;
+    if (f->head_depth || f->bold || (t && t->bold)) return f->v->col.text;
+    if (t && t->has_color && usable_color(t->color)) return (color)t->color;
+    return f->v->col.dim;
+}
+
 static void word_flush(flow *f)
 {
     if (f->wlen == 0) return;
@@ -130,13 +356,12 @@ static void word_flush(flow *f)
 
     if (f->col + (i32)f->wlen > f->cols && f->col > f->indent) line_break(f);
 
-    color c = f->v->col.dim;
-    if (f->head_depth || f->bold) c = f->v->col.text;
-    if (f->link >= 0) c = f->v->col.accent;
-
-    i32 x = f->v->x + f->col * GLYPH_W;
+    color c = word_color(f);
     u32 shown = f->wlen;
-    if ((i32)shown > f->cols - f->col) shown = (u32)(f->cols - f->col);
+    i32 room = f->cols - f->col;
+    if (room < 1) room = 1;
+    if ((i32)shown > room) shown = (u32)room;
+    if (f->col + (i32)shown > LINE_MAX) shown = (u32)(LINE_MAX - f->col);
 
     /* A word that is being looked for is drawn marked, and its row
      * is answered when it is the first at or past the row asked from. */
@@ -145,18 +370,17 @@ static void word_flush(flow *f)
         *f->sink->find_row == (u32)-1)
         *f->sink->find_row = f->row;
 
-    if (visible(f, f->row)) {
-        i32 y = pixel_y(f, f->row);
-        if (found) fb_rect(x, y, (i32)shown * GLYPH_W, GLYPH_H, f->v->col.accent);
-        for (u32 i = 0; i < shown; i++)
-            fb_glyph_cp(x + (i32)i * GLYPH_W, y, f->word[i],
-                        found ? f->v->col.text : c, 0, false);
-        if (f->link >= 0 && !found)
-            fb_rect(x, y + GLYPH_H - 2, (i32)shown * GLYPH_W, 1, c);
+    line_take_align(f);
+    for (u32 i = 0; i < shown && f->col + (i32)i < LINE_MAX; i++) {
+        cell *k = &f->line[f->col + (i32)i];
+        k->cp = f->word[i];
+        k->color = found ? f->v->col.text : c;
+        k->link = (i16)(f->link >= 0 && f->link < 32000 ? f->link : -1);
+        k->found = found;
+        k->under = f->link >= 0 && !found;
     }
-    link_note(f, x, f->row, shown);
-
     f->col += (i32)shown;
+    if (f->col > f->line_end) f->line_end = f->col;
     f->line_dirty = true;
     f->wlen = 0;
 
@@ -184,6 +408,7 @@ static u32 utf8_take(const u8 *s, u64 left, u32 *cp)
         if ((s[i] & 0xC0) != 0x80) { *cp = c; return 1; }
         v = (v << 6) | (s[i] & 0x3Fu);
     }
+    if (v > 0x10FFFF) { *cp = c; return 1; }        /* past the last code point: not utf-8 */
     *cp = v;
     return more + 1;
 }
@@ -207,11 +432,39 @@ static void rule(flow *f, color c)
     f->col = f->indent;
 }
 
+/* One step in, never past the middle of the window. */
+static void indent_more(flow *f)
+{
+    if (f->indent + IND_STEP <= f->cols / 2) f->indent += IND_STEP;
+    f->col = f->indent;
+}
+
 /* Two spaces between table cells, when the row already holds one. */
 static void cell_gap(flow *f)
 {
     word_flush(f);
     if (f->line_dirty && f->col + 2 < f->cols) f->col += 2;
+}
+
+/* A line of plain ascii on a row of its own, in one colour, and the
+ * rectangle it took. */
+static void plain_line(flow *f, const char *text, color c, i32 *x, i32 *y, i32 *w)
+{
+    word_flush(f);
+    settle_blanks(f);
+    if (f->line_dirty) line_break(f);
+    u32 n = slen(text);
+    if ((i32)n > f->cols - f->indent) n = (u32)(f->cols - f->indent);
+    *x = f->v->x + f->indent * GLYPH_W;
+    *w = (i32)n * GLYPH_W;
+    *y = -1;
+    if (visible(f, f->row)) {
+        *y = pixel_y(f, f->row);
+        for (u32 i = 0; i < n; i++) fb_glyph(*x + (i32)i * GLYPH_W, *y, (u8)text[i], c, 0, false);
+    }
+    f->row++;
+    f->col = f->indent;
+    f->line_dirty = false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -248,51 +501,22 @@ static void field_emit(flow *f, u8 kind, const char *name,
     /* Its width in the flow. A submit is as wide as its label; a text
      * field a fixed box. */
     u32 w = FIELD_COLS;
-    const char *label = value;
     if (kind == FIELD_SUBMIT) {
-        u32 ll = 0; while (label[ll]) ll++;
+        u32 ll = slen(value);
         w = (ll ? ll : 2) + 2;               /* room for the brackets */
     }
+    if ((i32)w > f->cols - f->indent) w = (u32)(f->cols - f->indent);
 
     word_flush(f);
     settle_blanks(f);
     if (f->col + (i32)w > f->cols && f->col > f->indent) line_break(f);
+    if (f->nlf >= LFIELDS_MAX) line_break(f);
+    if (f->nlf >= LFIELDS_MAX) return;
 
-    i32 x = f->v->x + f->col * GLYPH_W;
-    i32 y = visible(f, f->row) ? pixel_y(f, f->row) : -1000;
-
-    if (kind == FIELD_SUBMIT) {
-        if (y > -1000) {
-            fb_rect(x - 2, y - 2, (i32)w * GLYPH_W + 2, GLYPH_H + 4,
-                    f->v->col.edge);
-            i32 tx = x + GLYPH_W;
-            fb_glyph(x, y, '[', f->v->col.accent, 0, false);
-            for (u32 i = 0; label[i]; i++)
-                fb_glyph(tx + (i32)i * GLYPH_W, y, (u8)label[i],
-                         f->v->col.accent, 0, false);
-            u32 ll = 0; while (label[ll]) ll++;
-            fb_glyph(tx + (i32)ll * GLYPH_W, y, ']', f->v->col.accent,
-                     0, false);
-        }
-    } else if (y > -1000) {
-        fb_rect(x - 2, y - 2, (i32)w * GLYPH_W + 2, GLYPH_H + 3,
-                f->v->col.edge);
-        fb_rect(x - 1, y - 1, (i32)w * GLYPH_W, GLYPH_H + 1,
-                f->v->col.faint);
-        const char *shown = s->field_values ? s->field_values[idx] : value;
-        for (u32 i = 0; shown[i] && i < w - 1; i++)
-            fb_glyph(x + (i32)i * GLYPH_W, y,
-                     kind == FIELD_PASS ? '*' : (u8)shown[i],
-                     f->v->col.text, 0, false);
-    }
-
-    if (s->field_spots && s->field_spot_count &&
-        *s->field_spot_count < HTML_SPOTS_MAX && visible(f, f->row))
-        s->field_spots[(*s->field_spot_count)++] = (html_spot){
-            x - 2, pixel_y(f, f->row) - 2, (i32)w * GLYPH_W + 2,
-            GLYPH_H + 4, idx };
-
+    line_take_align(f);
+    f->lf[f->nlf++] = (lfield){ f->col, w, idx, kind };
     f->col += (i32)w;
+    if (f->col > f->line_end) f->line_end = f->col;
     f->line_dirty = true;
     if (f->col < f->cols) f->col++;
     else line_break(f);
@@ -301,13 +525,6 @@ static void field_emit(flow *f, u8 kind, const char *name,
 /* ------------------------------------------------------------------ */
 /* Entities                                                            */
 /* ------------------------------------------------------------------ */
-
-static char to_lower(char c)
-{
-    return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
-}
-
-static bool tag_is(const char *t, const char *want);
 
 /* The named entities a page is likely to use; the rest are numbers. */
 static const struct { const char *name; u32 cp; } ENTITIES[] = {
@@ -371,31 +588,16 @@ static u32 entity(flow *f, const u8 *s, u64 left)
 /* Tags                                                                */
 /* ------------------------------------------------------------------ */
 
-static bool tag_is(const char *t, const char *want)
-{
-    u32 i = 0;
-    while (want[i]) { if (t[i] != want[i]) return false; i++; }
-    return t[i] == 0;
-}
-
-/* A tag name that is a heading: h1..h6, or title standing in for one. */
-static bool n_is_heading(const char *name)
-{
-    if (name[0] == 'h' && name[1] >= '1' && name[1] <= '6' && name[2] == 0)
-        return true;
-    return tag_is(name, "title");
-}
-
-#define ATTRS_MAX 10
-
 typedef struct {
     char name[12];
     bool closing;
-    char key[ATTRS_MAX][12];
+    char key[ATTRS_MAX][16];
     char val[ATTRS_MAX][HTML_URL_MAX];
     u32  nattr;
     u64  end;
 } parsed_tag;
+
+static parsed_tag T;
 
 static const char *attr(const parsed_tag *t, const char *key)
 {
@@ -426,7 +628,7 @@ static void parse_tag(const u8 *s, u64 left, parsed_tag *t)
             p++;
         if (p >= left || s[p] == '>') break;
 
-        char key[12];
+        char key[16];
         u32 kn = 0;
         while (p < left && s[p] != '=' && s[p] != '>' && s[p] != ' ' &&
                s[p] != '\t' && s[p] != '\n' && s[p] != '\r') {
@@ -435,7 +637,10 @@ static void parse_tag(const u8 *s, u64 left, parsed_tag *t)
         }
         key[kn] = 0;
 
-        char val[HTML_URL_MAX];
+        /* the value goes straight into its slot; a slot past the last
+         * is a scratch one, written and forgotten */
+        u32 slot = t->nattr < ATTRS_MAX ? t->nattr : ATTRS_MAX - 1;
+        char *val = t->val[slot];
         u32 vn = 0;
         if (p < left && s[p] == '=') {
             p++;
@@ -451,13 +656,13 @@ static void parse_tag(const u8 *s, u64 left, parsed_tag *t)
                         { "&lt;", '<' }, { "&gt;", '>' }, { "&#39;", '\'' }, { "&#38;", '&' } };
                     u32 hit = 0;
                     for (u32 e = 0; e < sizeof(E) / sizeof(E[0]) && !hit; e++) {
-                        u32 n = 0;
-                        while (E[e].name[n] && p + n < left && s[p + n] == (u8)E[e].name[n]) n++;
-                        if (E[e].name[n] == 0) { if (vn < sizeof(val) - 1) val[vn++] = E[e].c; p += n; hit = 1; }
+                        u32 k = 0;
+                        while (E[e].name[k] && p + k < left && s[p + k] == (u8)E[e].name[k]) k++;
+                        if (E[e].name[k] == 0) { if (vn < HTML_URL_MAX - 1) val[vn++] = E[e].c; p += k; hit = 1; }
                     }
                     if (hit) continue;
                 }
-                if (vn < sizeof(val) - 1) val[vn++] = (char)s[p];
+                if (vn < HTML_URL_MAX - 1) val[vn++] = (char)s[p];
                 p++;
             }
             if (q && p < left && (char)s[p] == q) p++;
@@ -466,18 +671,320 @@ static void parse_tag(const u8 *s, u64 left, parsed_tag *t)
 
         if (kn && t->nattr < ATTRS_MAX) {
             u32 i = 0;
-            while (key[i] && i < 11) { t->key[t->nattr][i] = key[i]; i++; }
+            while (key[i]) { t->key[t->nattr][i] = key[i]; i++; }
             t->key[t->nattr][i] = 0;
-            u32 j = 0;
-            while (val[j] && j < HTML_URL_MAX - 1)
-                { t->val[t->nattr][j] = val[j]; j++; }
-            t->val[t->nattr][j] = 0;
             t->nattr++;
         }
     }
     if (p < left) p++;                        /* the '>' */
     t->end = p;
 }
+
+/* Swallow to a named closing tag, returning the source offset past it;
+ * where the closing tag begins goes to *at when asked. */
+static u64 swallow_to(const u8 *s, u64 left, u64 from, const char *close, u64 *at)
+{
+    u64 p = from;
+    while (p < left) {
+        if (s[p] == '<' && p + 1 < left && s[p+1] == '/') {
+            u64 q = p + 2;
+            u32 i = 0;
+            while (close[i] && q < left &&
+                   to_lower((char)s[q]) == close[i]) { i++; q++; }
+            if (close[i] == 0 && (q >= left || s[q] == '>' || s[q] == ' ' || s[q] == '\n' || s[q] == '\t' || s[q] == '\r')) {
+                if (at) *at = p;
+                while (q < left && s[q] != '>') q++;
+                return q < left ? q + 1 : left;
+            }
+        }
+        p++;
+    }
+    if (at) *at = left;
+    return left;
+}
+
+/* ------------------------------------------------------------------ */
+/* The element stack and the styles                                    */
+/* ------------------------------------------------------------------ */
+
+static void fold_end(flow *f);
+
+static void pop_top(flow *f)
+{
+    if (!f->depth) return;
+    u32 i = --f->depth;
+    if ((i32)i == f->hide_at) f->hide_at = -1;
+    if ((i32)i == f->fold_at) fold_end(f);
+}
+
+/* Pops through the nearest element with one of the tags wanted, unless
+ * one of the stop tags stands above it. */
+static void pop_within(flow *f, const u32 *want, u32 nwant, const u32 *stop, u32 nstop)
+{
+    i32 i = (i32)f->depth - 1;
+    while (i >= 0) {
+        u32 t = f->chain[i].tag;
+        for (u32 k = 0; k < nstop; k++) if (t == stop[k]) return;
+        for (u32 k = 0; k < nwant; k++)
+            if (t == want[k]) { while ((i32)f->depth > i) pop_top(f); return; }
+        i--;
+    }
+}
+
+static u32 H_HTML, H_P, H_LI, H_UL, H_OL, H_MENU, H_DT, H_DD, H_DL, H_TD, H_TH, H_TR, H_TABLE,
+           H_THEAD, H_TBODY, H_TFOOT, H_ARTICLE, H_SECTION, H_MAIN;
+
+static void names_init(void)
+{
+    if (H_HTML) return;
+    H_HTML = css_hash("html"); H_P = css_hash("p"); H_LI = css_hash("li"); H_UL = css_hash("ul");
+    H_OL = css_hash("ol"); H_MENU = css_hash("menu"); H_DT = css_hash("dt"); H_DD = css_hash("dd");
+    H_DL = css_hash("dl"); H_TD = css_hash("td"); H_TH = css_hash("th"); H_TR = css_hash("tr");
+    H_TABLE = css_hash("table"); H_THEAD = css_hash("thead"); H_TBODY = css_hash("tbody");
+    H_TFOOT = css_hash("tfoot"); H_ARTICLE = css_hash("article"); H_SECTION = css_hash("section");
+    H_MAIN = css_hash("main");
+}
+
+/* The closes the markup left implicit before this element opens. */
+static void implicit_closes(flow *f, const char *name)
+{
+    if (tag_is(name, "body")) {
+        while (f->depth && f->chain[f->depth - 1].tag != H_HTML) pop_top(f);
+        return;
+    }
+    if (is_block(name) && f->depth && f->chain[f->depth - 1].tag == H_P) pop_top(f);
+    if (tag_is(name, "li")) {
+        u32 want[1] = { H_LI }, stop[3] = { H_UL, H_OL, H_MENU };
+        pop_within(f, want, 1, stop, 3);
+    } else if (tag_is(name, "dt") || tag_is(name, "dd")) {
+        u32 want[2] = { H_DT, H_DD }, stop[1] = { H_DL };
+        pop_within(f, want, 2, stop, 1);
+    } else if (tag_is(name, "td") || tag_is(name, "th")) {
+        u32 want[2] = { H_TD, H_TH }, stop[2] = { H_TR, H_TABLE };
+        pop_within(f, want, 2, stop, 2);
+    } else if (tag_is(name, "tr")) {
+        u32 want[1] = { H_TR }, stop[4] = { H_TABLE, H_THEAD, H_TBODY, H_TFOOT };
+        pop_within(f, want, 1, stop, 4);
+    } else if (tag_is(name, "thead") || tag_is(name, "tbody") || tag_is(name, "tfoot")) {
+        u32 want[3] = { H_THEAD, H_TBODY, H_TFOOT }, stop[1] = { H_TABLE };
+        pop_within(f, want, 3, stop, 1);
+    }
+}
+
+/* Whether an ancestor is an article, section or main: a header or
+ * footer inside one belongs to it and is not folded. */
+static bool inside_sectioning(const flow *f)
+{
+    for (u32 i = 0; i < f->depth; i++) {
+        u32 t = f->chain[i].tag;
+        if (t == H_ARTICLE || t == H_SECTION || t == H_MAIN) return true;
+    }
+    return false;
+}
+
+static void fold_start(flow *f, u8 kind);
+
+/* Opens an element: the implicit closes, the stack, the computed
+ * style. A void element is worked out in place and not kept. Returns
+ * the frame, or NULL when the stack is full. */
+static frame *elem_open(flow *f, const parsed_tag *t)
+{
+    const char *name = t->name;
+    implicit_closes(f, name);
+    if (f->depth >= STACK_MAX) { if (!is_void(name)) f->overflow++; return NULL; }
+
+    css_elem *e = &f->chain[f->depth];
+    frame *fr = &f->meta[f->depth];
+    frame *parent = top(f);
+
+    e->tag = css_hash(name);
+    e->id = 0; e->ncls = 0; e->nattr = 0;
+    const char *id = attr(t, "id");
+    if (id && id[0]) e->id = css_hash(id);
+    const char *cls = attr(t, "class");
+    if (cls) {
+        u32 i = 0;
+        while (cls[i] && e->ncls < CSS_ELEM_CLASSES) {
+            while (cls[i] == ' ' || cls[i] == '\t' || cls[i] == '\n' || cls[i] == '\r') i++;
+            u32 s = i;
+            while (cls[i] && cls[i] != ' ' && cls[i] != '\t' && cls[i] != '\n' && cls[i] != '\r') i++;
+            if (i > s) e->cls[e->ncls++] = css_hash_n((const u8 *)cls + s, i - s);
+        }
+    }
+    for (u32 i = 0; i < t->nattr && e->nattr < CSS_ELEM_ATTRS; i++) {
+        e->attr[e->nattr] = css_hash(t->key[i]);
+        e->attr_val[e->nattr] = css_hash(t->val[i]);
+        e->nattr++;
+    }
+
+    /* inherited from the parent */
+    fr->tag = e->tag;
+    fr->bold = parent ? parent->bold : 0;
+    fr->align = parent ? parent->align : CSS_ALIGN_LEFT;
+    fr->list_none = parent ? parent->list_none : 0;
+    fr->vis_hidden = parent ? parent->vis_hidden : 0;
+    fr->has_color = parent ? parent->has_color : 0;
+    fr->color = parent ? parent->color : 0;
+    fr->fold = 0;
+
+    /* the sheet, then the style attribute */
+    css_decl d;
+    d.set = 0; d.important = 0; d.display = 0; d.hidden = 0; d.bold = 0; d.align = 0; d.list_none = 0; d.color = 0;
+    if (f->sink && f->sink->sheet) css_match(f->sink->sheet, f->chain, f->depth + 1, &d);
+    const char *style = attr(t, "style");
+    if (style && style[0]) {
+        css_decl sd;
+        css_declarations((const u8 *)style, slen(style), &sd);
+        for (u32 p = 0; p < CSS_PROPS; p++) {
+            u8 bit = (u8)(1u << p);
+            if (!(sd.set & bit)) continue;
+            if ((d.important & bit) && !(sd.important & bit)) continue;
+            d.set |= bit;
+            switch (bit) {
+            case CSS_SET_DISPLAY:    d.display = sd.display; break;
+            case CSS_SET_VISIBILITY: d.hidden = sd.hidden; break;
+            case CSS_SET_WEIGHT:     d.bold = sd.bold; break;
+            case CSS_SET_COLOR:      d.color = sd.color; break;
+            case CSS_SET_ALIGN:      d.align = sd.align; break;
+            case CSS_SET_LIST:       d.list_none = sd.list_none; break;
+            default: break;
+            }
+        }
+    }
+
+    fr->display = (d.set & CSS_SET_DISPLAY) ? d.display : (is_block(name) ? CSS_DISPLAY_BLOCK : CSS_DISPLAY_INLINE);
+    bool by_nature = tag_is(name, "template") || tag_is(name, "head");
+    if (attr(t, "hidden") || by_nature) fr->display = CSS_DISPLAY_NONE;
+    if (fr->display == CSS_DISPLAY_NONE && (tag_is(name, "html") || tag_is(name, "body"))) fr->display = CSS_DISPLAY_BLOCK;
+    if (d.set & CSS_SET_VISIBILITY) fr->vis_hidden = d.hidden;
+    if (d.set & CSS_SET_WEIGHT) fr->bold = d.bold;
+    if (d.set & CSS_SET_COLOR) { fr->has_color = 1; fr->color = d.color; }
+    if (d.set & CSS_SET_ALIGN) fr->align = d.align;
+    else {
+        const char *al = attr(t, "align");
+        if (tag_is(name, "center")) fr->align = CSS_ALIGN_CENTER;
+        else if (al && (al[0] == 'c' || al[0] == 'C')) fr->align = CSS_ALIGN_CENTER;
+        else if (al && (al[0] == 'r' || al[0] == 'R')) fr->align = CSS_ALIGN_RIGHT;
+        else if (al && (al[0] == 'l' || al[0] == 'L')) fr->align = CSS_ALIGN_LEFT;
+    }
+    if (d.set & CSS_SET_LIST) fr->list_none = d.list_none;
+
+    if (is_void(name)) return fr;
+
+    u32 at = f->depth++;
+    bool was_quiet = quiet(f);
+    if ((fr->display == CSS_DISPLAY_NONE || fr->vis_hidden) && f->hide_at < 0) {
+        f->hide_at = (i32)at;
+        if (!was_quiet && !by_nature) f->hidden_count++;
+    }
+    if (f->sink && f->sink->fold && !quiet(f) && f->fold_at < 0) {
+        u8 kind = fold_kind_of(name, attr(t, "role"));
+        if (kind == 2 || kind == 3) { if (inside_sectioning(f)) kind = 0; }
+        if (kind) { fr->fold = 1; f->fold_at = (i32)at; fold_start(f, kind); }
+    }
+    return fr;
+}
+
+/* Closes an element: pops through it. Returns whether it was inside
+ * something quiet (hidden, or folded shut) -- then its closing owes
+ * the page nothing. found says whether it was open at all; display
+ * answers what the styles made of it. */
+static bool elem_close(flow *f, const char *name, bool *found, u8 *display)
+{
+    *found = false;
+    *display = is_block(name) ? CSS_DISPLAY_BLOCK : CSS_DISPLAY_INLINE;
+    if (f->overflow) { f->overflow--; return true; }
+    u32 h = css_hash(name);
+    i32 i = (i32)f->depth - 1;
+    while (i >= 0 && f->chain[i].tag != h) i--;
+    if (i < 0) return false;
+    *found = true;
+    *display = f->meta[i].display;
+    bool was_quiet = quiet(f);
+    while ((i32)f->depth > i) pop_top(f);
+    return was_quiet;
+}
+
+/* ------------------------------------------------------------------ */
+/* Folds                                                               */
+/* ------------------------------------------------------------------ */
+
+static void fold_line(flow *f, const char *text, u32 ordinal)
+{
+    i32 x, y, w;
+    plain_line(f, text, f->v->col.accent, &x, &y, &w);
+    if (y >= 0 && f->sink)
+        spot_add(f->sink->fold_spots, f->sink->fold_spot_count, x, y, w, GLYPH_H, ordinal);
+    f->blanks = 1;
+}
+
+static void fold_start(flow *f, u8 kind)
+{
+    u32 ordinal = f->fold_n++;
+    f->fold_kind = kind;
+    f->fold_open = ordinal < 64 && ((f->sink->unfold >> ordinal) & 1);
+    f->fold_links = f->fold_words = f->fold_fields = 0;
+    f->in_word = false;
+    if (f->sink->fold_count) *f->sink->fold_count = f->fold_n;
+    if (f->fold_open) {
+        char text[40];
+        u32 n = 0;
+        text[n++] = '-'; text[n++] = ' ';
+        for (const char *s = fold_name(kind); *s; s++) text[n++] = *s;
+        text[n] = 0;
+        fold_line(f, text, ordinal);
+    }
+}
+
+static u32 put_dec(char *d, u32 at, u32 v)
+{
+    char tmp[12]; u32 n = 0;
+    if (v == 0) tmp[n++] = '0';
+    while (v) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n) d[at++] = tmp[--n];
+    return at;
+}
+
+static u32 put_str(char *d, u32 at, const char *s)
+{
+    while (*s) d[at++] = *s++;
+    return at;
+}
+
+/* The fold's element closed: shut, it is one line with what it held. */
+static void fold_end(flow *f)
+{
+    u32 ordinal = f->fold_n - 1;
+    bool open = f->fold_open;
+    f->fold_at = -1;
+    f->fold_open = false;
+    if (open) return;
+    if (f->fold_links + f->fold_words + f->fold_fields == 0) return;
+    char text[96];
+    u32 n = 0;
+    n = put_str(text, n, "+ ");
+    n = put_str(text, n, fold_name(f->fold_kind));
+    n = put_str(text, n, " (");
+    bool first = true;
+    if (f->fold_links) {
+        n = put_dec(text, n, f->fold_links); n = put_str(text, n, f->fold_links == 1 ? " link" : " links"); first = false;
+    }
+    if (f->fold_words) {
+        if (!first) n = put_str(text, n, ", ");
+        n = put_dec(text, n, f->fold_words); n = put_str(text, n, f->fold_words == 1 ? " word" : " words"); first = false;
+    }
+    if (f->fold_fields) {
+        if (!first) n = put_str(text, n, ", ");
+        n = put_dec(text, n, f->fold_fields); n = put_str(text, n, f->fold_fields == 1 ? " field" : " fields");
+    }
+    n = put_str(text, n, ")");
+    text[n] = 0;
+    fold_line(f, text, ordinal);
+}
+
+/* ------------------------------------------------------------------ */
+/* Pictures                                                            */
+/* ------------------------------------------------------------------ */
 
 /* A picture: its url goes to the lender's list; drawn when the lender
  * has it, a frame with the alternative text until then. It stands on
@@ -487,8 +994,13 @@ static void picture(flow *f, const parsed_tag *t)
 {
     const char *src = attr(t, "src");
     const char *alt = attr(t, "alt");
+    const char *wa = attr(t, "width"), *ha = attr(t, "height");
     html_sink *sk = f->sink;
     const html_image *img = NULL;
+
+    /* a tracking pixel is nothing to look at */
+    if ((wa && (wa[0] == '0' || wa[0] == '1') && wa[1] == 0) ||
+        (ha && (ha[0] == '0' || ha[0] == '1') && ha[1] == 0)) return;
 
     if (sk && sk->images && sk->image_count && src && src[0] &&
         src[0] != 'd' /* data: urls are not fetched */) {
@@ -528,6 +1040,9 @@ static void picture(flow *f, const parsed_tag *t)
     }
     u32 rows = (u32)((dh + GLYPH_H - 1) / GLYPH_H);
     i32 x = f->v->x + f->indent * GLYPH_W;
+    u8 al = cur_align(f);
+    if (al == CSS_ALIGN_CENTER) x += (avail - dw) / 2;
+    else if (al == CSS_ALIGN_RIGHT) x += avail - dw;
 
     /* Drawn where the rows fall on the screen, clipped to the window. */
     i32 win_top = f->v->y, win_bottom = f->v->y + f->rows * GLYPH_H;
@@ -546,12 +1061,10 @@ static void picture(flow *f, const parsed_tag *t)
                     fb_glyph(tx, y + 2, (u8)say[i], f->v->col.dim, 0, false);
             }
         }
-        if (f->link >= 0 && sk && sk->link_spots && sk->link_spot_count &&
-            *sk->link_spot_count < HTML_SPOTS_MAX) {
+        if (f->link >= 0 && sk) {
             i32 sy = y > win_top ? y : win_top;
             i32 sh = (y + dh < win_bottom ? y + dh : win_bottom) - sy;
-            if (sh > 0)
-                sk->link_spots[(*sk->link_spot_count)++] = (html_spot){ x, sy, dw, sh, (u32)f->link };
+            if (sh > 0) spot_add(sk->link_spots, sk->link_spot_count, x, sy, dw, sh, (u32)f->link);
         }
     }
 
@@ -561,25 +1074,9 @@ static void picture(flow *f, const parsed_tag *t)
     f->blanks = 0;
 }
 
-/* Swallow to a named closing tag, returning the source offset past it. */
-static u64 swallow_to(const u8 *s, u64 left, u64 from, const char *close)
-{
-    u64 p = from;
-    while (p < left) {
-        if (s[p] == '<' && p + 1 < left && s[p+1] == '/') {
-            u64 q = p + 2;
-            u32 i = 0;
-            while (close[i] && q < left &&
-                   to_lower((char)s[q]) == close[i]) { i++; q++; }
-            if (close[i] == 0) {
-                while (q < left && s[q] != '>') q++;
-                return q < left ? q + 1 : left;
-            }
-        }
-        p++;
-    }
-    return left;
-}
+/* ------------------------------------------------------------------ */
+/* One tag                                                             */
+/* ------------------------------------------------------------------ */
 
 /* Handles one tag. Returns the source offset just past it. */
 static u64 tag(flow *f, const u8 *s, u64 left)
@@ -592,23 +1089,23 @@ static u64 tag(flow *f, const u8 *s, u64 left)
         return p + 3 < left ? p + 3 : left;
     }
 
-    parsed_tag t;
-    parse_tag(s, left, &t);
-    const char *name = t.name;
-    bool close = t.closing;
+    parsed_tag *t = &T;
+    parse_tag(s, left, t);
+    const char *name = t->name;
+    bool close = t->closing;
+    if (!name[0]) return t->end;
 
     if (tag_is(name, "script") || tag_is(name, "style") ||
-        tag_is(name, "svg") || tag_is(name, "noscript") ||
-        tag_is(name, "template")) {
-        if (close) return t.end;
-        return swallow_to(s, left, t.end, name);
+        tag_is(name, "svg") || tag_is(name, "template")) {
+        if (close) return t->end;
+        return swallow_to(s, left, t->end, name, NULL);
     }
 
     /* The title is the page's name, not its prose: kept for the
      * lender, never drawn. */
     if (tag_is(name, "title")) {
-        if (close) return t.end;
-        u64 p = t.end;
+        if (close) return t->end;
+        u64 p = t->end;
         u32 n = 0;
         html_sink *sk = f->sink;
         while (p < left && s[p] != '<') {
@@ -621,70 +1118,133 @@ static u64 tag(flow *f, const u8 *s, u64 left)
             while (n && sk->title[n - 1] == ' ') n--;
             sk->title[n] = 0;
         }
-        return swallow_to(s, left, t.end, "title");
+        return swallow_to(s, left, t->end, "title", NULL);
     }
 
-    if (tag_is(name, "br")) { want_break(f, 1); return t.end; }
-    if (tag_is(name, "hr")) { rule(f, f->v->col.faint); return t.end; }
+    /* --- closing --- */
+    if (close) {
+        bool found; u8 display;
+        bool was_quiet = elem_close(f, name, &found, &display);
+        if (was_quiet) return t->end;
+        u32 gap = ua_gap(name);
+        if (display == CSS_DISPLAY_INLINE) gap = 0;
+        else if (gap == 0 && display == CSS_DISPLAY_BLOCK && !is_void(name)) gap = 1;
 
-    if (tag_is(name, "p") || tag_is(name, "section") ||
-        tag_is(name, "article") || tag_is(name, "header") ||
-        tag_is(name, "footer") || tag_is(name, "main") ||
-        tag_is(name, "nav") || tag_is(name, "figure") ||
-        tag_is(name, "dl") || tag_is(name, "address")) {
-        want_break(f, 2);
-        return t.end;
-    }
-    if (tag_is(name, "div") || tag_is(name, "tr") || tag_is(name, "dt") ||
-        tag_is(name, "dd") || tag_is(name, "label")) {
-        want_break(f, 1);
-        return t.end;
+        if (tag_is(name, "td") || tag_is(name, "th")) {
+            if (tag_is(name, "th") && f->bold) f->bold--;
+            return t->end;
+        }
+        if (tag_is(name, "pre")) { if (gap) want_break(f, gap); if (f->pre) f->pre--; return t->end; }
+        if (tag_is(name, "blockquote")) {
+            if (gap) want_break(f, gap);
+            if (f->indent >= IND_STEP) f->indent -= IND_STEP;
+            f->col = f->indent;
+            return t->end;
+        }
+        if (tag_is(name, "ul") || tag_is(name, "ol")) {
+            if (gap) want_break(f, gap);
+            if (f->list_depth) f->list_depth--;
+            if (f->indent >= IND_STEP) f->indent -= IND_STEP;
+            f->col = f->indent;
+            return t->end;
+        }
+        if (is_heading(name)) {
+            u32 lvl = (u32)(name[1] - '0');
+            if (gap) want_break(f, gap);
+            if (f->head_depth) f->head_depth--;
+            if (lvl <= 2 && gap) rule(f, f->v->col.faint);
+            return t->end;
+        }
+        if (tag_is(name, "b") || tag_is(name, "strong") ||
+            tag_is(name, "em") || tag_is(name, "i") || tag_is(name, "code")) {
+            word_flush(f);
+            if (f->bold) f->bold--;
+            if (gap) want_break(f, gap);
+            return t->end;
+        }
+        if (tag_is(name, "a")) { word_flush(f); f->link = -1; if (gap) want_break(f, gap); return t->end; }
+        if (tag_is(name, "form")) { if (gap) want_break(f, gap); f->cur_form = -1; return t->end; }
+        if (gap) want_break(f, gap);
+        return t->end;
     }
 
-    if (tag_is(name, "table")) {
-        want_break(f, 2);
-        return t.end;
+    /* --- opening --- */
+    frame *fr = elem_open(f, t);
+    bool self_hidden = fr && (fr->display == CSS_DISPLAY_NONE || fr->vis_hidden);
+    if (quiet(f) || self_hidden) {
+        bool counting = folded(f) && !hidden(f) && !self_hidden;
+        if (tag_is(name, "a")) {
+            const char *href = attr(t, "href");
+            if (counting && href && href[0] && href[0] != '#') f->fold_links++;
+            return t->end;
+        }
+        if (tag_is(name, "form")) {
+            html_sink *sk = f->sink;
+            if (!counting && sk && sk->forms && sk->form_count && *sk->form_count < HTML_FORMS_MAX) {
+                u32 i = (*sk->form_count)++;
+                const char *act = attr(t, "action");
+                u32 c = 0;
+                if (act) while (act[c] && c < HTML_URL_MAX - 1) { sk->forms[i].action[c] = act[c]; c++; }
+                sk->forms[i].action[c] = 0;
+                const char *m = attr(t, "method");
+                sk->forms[i].method = (m && (m[0] == 'p' || m[0] == 'P')) ? METHOD_POST : METHOD_GET;
+                f->cur_form = (i32)i;
+            }
+            return t->end;
+        }
+        if (tag_is(name, "input")) {
+            const char *type = attr(t, "type");
+            bool submit = type && (type[0] == 's' || type[0] == 'S' || type[0] == 'b' || type[0] == 'B' || type[0] == 'i' || type[0] == 'I');
+            if (counting) { if (!(type && (type[0] == 'h' || type[0] == 'H'))) f->fold_fields++; }
+            else if (!submit) {
+                /* a hidden field still goes with its form */
+                const char *nm = attr(t, "name"), *vl = attr(t, "value");
+                if (nm && nm[0]) field_emit(f, FIELD_HIDDEN, nm, vl ? vl : "");
+            }
+            return t->end;
+        }
+        if (tag_is(name, "textarea") || tag_is(name, "button") || tag_is(name, "select")) {
+            if (counting && !tag_is(name, "select")) f->fold_fields++;
+            return swallow_to(s, left, t->end, name, NULL);
+        }
+        return t->end;
     }
+
+    u32 gap = ua_gap(name);
+    if (fr && fr->display == CSS_DISPLAY_INLINE) gap = 0;
+    else if (fr && gap == 0 && fr->display == CSS_DISPLAY_BLOCK && !is_void(name)) gap = 1;
+
+    if (tag_is(name, "br")) { want_break(f, 1); return t->end; }
+    if (tag_is(name, "hr")) { rule(f, f->v->col.faint); return t->end; }
+
     if (tag_is(name, "td") || tag_is(name, "th")) {
-        if (!close) cell_gap(f);
-        if (tag_is(name, "th")) { if (close && f->bold) f->bold--; else f->bold++; }
-        return t.end;
+        cell_gap(f);
+        if (tag_is(name, "th")) f->bold++;
+        return t->end;
     }
 
-    if (tag_is(name, "pre")) {
-        want_break(f, 2);
-        if (close) { if (f->pre) f->pre--; }
-        else f->pre++;
-        return t.end;
-    }
+    if (tag_is(name, "pre")) { if (gap) want_break(f, gap); f->pre++; return t->end; }
 
     if (tag_is(name, "blockquote")) {
-        want_break(f, 1);
-        if (close) { if (f->indent >= IND_STEP) f->indent -= IND_STEP; }
-        else f->indent += IND_STEP;
-        f->col = f->indent;
-        return t.end;
+        if (gap) want_break(f, gap);
+        indent_more(f);
+        return t->end;
     }
 
     if (tag_is(name, "ul") || tag_is(name, "ol")) {
-        want_break(f, 1);
-        if (close) {
-            if (f->list_depth) f->list_depth--;
-            if (f->indent >= IND_STEP) f->indent -= IND_STEP;
-        } else {
-            if (f->list_depth < 8) {
-                f->list_num[f->list_depth] = tag_is(name, "ol") ? 1 : 0;
-                f->list_depth++;
-            }
-            f->indent += IND_STEP;
+        if (gap) want_break(f, gap);
+        if (f->list_depth < 8) {
+            f->list_num[f->list_depth] = tag_is(name, "ol") ? 1 : 0;
+            f->list_depth++;
         }
-        f->col = f->indent;
-        return t.end;
+        indent_more(f);
+        return t->end;
     }
 
     if (tag_is(name, "li")) {
-        want_break(f, 1);
-        if (!close) {
+        if (gap) want_break(f, gap);
+        bool bullet = gap > 0 && !(fr && fr->list_none);
+        if (bullet) {
             settle_blanks(f);
             u32 depth = f->list_depth ? f->list_depth - 1 : 0;
             if (f->list_depth && f->list_num[depth] > 0) {
@@ -702,35 +1262,32 @@ static u64 tag(flow *f, const u8 *s, u64 left)
                 word_add(f, '-');
             }
             word_flush(f);
+        } else if (f->list_depth && f->list_num[f->list_depth - 1] > 0) {
+            f->list_num[f->list_depth - 1]++;
         }
-        return t.end;
+        return t->end;
     }
 
-    if (n_is_heading(name)) {
-        u32 lvl = (name[0] == 't') ? 1 : (u32)(name[1] - '0');
-        want_break(f, 2);
-        if (close) {
-            if (f->head_depth) f->head_depth--;
-            if (lvl <= 2) rule(f, f->v->col.faint);
-        } else if (f->head_depth < 8) {
-            f->head_lvl[f->head_depth++] = (u8)lvl;
-        }
-        return t.end;
+    if (is_heading(name)) {
+        u32 lvl = (u32)(name[1] - '0');
+        if (gap) want_break(f, gap);
+        if (f->head_depth < 8) f->head_lvl[f->head_depth++] = (u8)lvl;
+        return t->end;
     }
 
     if (tag_is(name, "b") || tag_is(name, "strong") ||
         tag_is(name, "em") || tag_is(name, "i") || tag_is(name, "code")) {
         word_flush(f);
-        if (close) { if (f->bold) f->bold--; }
-        else f->bold++;
-        return t.end;
+        if (gap) want_break(f, gap);
+        f->bold++;
+        return t->end;
     }
 
     if (tag_is(name, "a")) {
         word_flush(f);
-        if (close) { f->link = -1; return t.end; }
+        if (gap) want_break(f, gap);
         html_sink *sk = f->sink;
-        const char *href = attr(&t, "href");
+        const char *href = attr(t, "href");
         if (sk && sk->urls && sk->url_count && href &&
             *sk->url_count < HTML_LINKS_MAX) {
             u32 i = (*sk->url_count)++;
@@ -741,40 +1298,38 @@ static u64 tag(flow *f, const u8 *s, u64 left)
             f->link = c > 0 ? (i32)i : -1;
             if (c == 0) (*sk->url_count)--;
         }
-        return t.end;
+        return t->end;
     }
 
     if (tag_is(name, "img")) {
-        picture(f, &t);
-        return t.end;
+        picture(f, t);
+        return t->end;
     }
 
     /* --- forms --- */
     if (tag_is(name, "form")) {
-        want_break(f, 1);
-        if (close) { f->cur_form = -1; return t.end; }
+        if (gap) want_break(f, gap);
         html_sink *sk = f->sink;
         if (sk && sk->forms && sk->form_count &&
             *sk->form_count < HTML_FORMS_MAX) {
             u32 i = (*sk->form_count)++;
-            const char *act = attr(&t, "action");
+            const char *act = attr(t, "action");
             u32 c = 0;
             if (act) while (act[c] && c < HTML_URL_MAX - 1)
                 { sk->forms[i].action[c] = act[c]; c++; }
             sk->forms[i].action[c] = 0;
-            const char *m = attr(&t, "method");
+            const char *m = attr(t, "method");
             sk->forms[i].method = (m && (m[0] == 'p' || m[0] == 'P'))
                                 ? METHOD_POST : METHOD_GET;
             f->cur_form = (i32)i;
         }
-        return t.end;
+        return t->end;
     }
 
     if (tag_is(name, "input")) {
-        if (close) return t.end;
-        const char *type = attr(&t, "type");
-        const char *nm = attr(&t, "name");
-        const char *vl = attr(&t, "value");
+        const char *type = attr(t, "type");
+        const char *nm = attr(t, "name");
+        const char *vl = attr(t, "value");
         u8 kind = FIELD_TEXT;
         if (type) {
             if (type[0] == 'h' || type[0] == 'H') kind = FIELD_HIDDEN;
@@ -784,26 +1339,26 @@ static u64 tag(flow *f, const u8 *s, u64 left)
             else if (type[0]=='b'||type[0]=='B'||type[0]=='i'||type[0]=='I')
                 kind = FIELD_SUBMIT;    /* button, image */
         }
+        if (gap) want_break(f, gap);
         if (kind == FIELD_SUBMIT)
             field_emit(f, kind, nm ? nm : "", vl ? vl : "go");
         else
             field_emit(f, kind, nm ? nm : "", vl ? vl : "");
-        return t.end;
+        return t->end;
     }
 
     if (tag_is(name, "textarea")) {
-        if (close) return t.end;
-        const char *nm = attr(&t, "name");
+        const char *nm = attr(t, "name");
+        if (gap) want_break(f, gap);
         field_emit(f, FIELD_TEXT, nm ? nm : "", "");
-        return swallow_to(s, left, t.end, "textarea");
+        return swallow_to(s, left, t->end, "textarea", NULL);
     }
 
     if (tag_is(name, "button")) {
-        if (close) return t.end;
         /* The label is the button's own words. */
         char label[HTML_VALUE_MAX];
         u32 ln = 0;
-        u64 p = t.end;
+        u64 p = t->end;
         while (p < left && s[p] != '<') {
             char ch = (char)s[p++];
             if (ch == '\n' || ch == '\t' || ch == '\r') ch = ' ';
@@ -811,30 +1366,46 @@ static u64 tag(flow *f, const u8 *s, u64 left)
         }
         while (ln && label[ln - 1] == ' ') ln--;
         label[ln] = 0;
-        const char *nm = attr(&t, "name");
+        const char *nm = attr(t, "name");
+        if (gap) want_break(f, gap);
         field_emit(f, FIELD_SUBMIT, nm ? nm : "", ln ? label : "go");
-        return swallow_to(s, left, t.end, "button");
+        return swallow_to(s, left, t->end, "button", NULL);
     }
 
     if (tag_is(name, "select")) {
         /* Not fillable here; show its first option's text and move on. */
-        return swallow_to(s, left, t.end, "select");
+        return swallow_to(s, left, t->end, "select", NULL);
     }
 
-    return t.end;
+    if (gap) want_break(f, gap);
+    return t->end;
 }
 
 /* ------------------------------------------------------------------ */
 
 u32 html_render(const html_view *v, html_sink *sink)
 {
-    flow f = { 0 };
-    f.v = v;
-    f.sink = sink;
-    f.cols = v->w / GLYPH_W;
-    f.rows = v->h / GLYPH_H;
-    f.link = -1;
-    f.cur_form = -1;
+    flow *f = &F;
+    names_init();
+
+    /* everything but the line's cells, which are kept clean */
+    f->v = v;
+    f->sink = sink;
+    f->cols = v->w / GLYPH_W;
+    if (f->cols > LINE_MAX) f->cols = LINE_MAX;
+    f->rows = v->h / GLYPH_H;
+    f->col = 0; f->row = 0; f->indent = 0;
+    f->blanks = 0; f->line_dirty = false;
+    f->bold = 0; f->link = -1; f->pre = 0;
+    f->head_depth = 0; f->list_depth = 0;
+    f->cur_form = -1;
+    f->wlen = 0;
+    for (i32 c = 0; c < f->line_end; c++) f->line[c].cp = 0;
+    f->line_end = 0; f->nlf = 0; f->line_align = CSS_ALIGN_LEFT; f->align_set = false;
+    f->depth = 0; f->overflow = 0;
+    f->hide_at = -1; f->fold_at = -1; f->fold_open = false; f->fold_kind = 0; f->fold_n = 0;
+    f->fold_links = f->fold_words = f->fold_fields = 0; f->in_word = false;
+    f->hidden_count = 0;
 
     if (sink) {
         if (sink->url_count) *sink->url_count = 0;
@@ -845,8 +1416,11 @@ u32 html_render(const html_view *v, html_sink *sink)
         if (sink->image_count) *sink->image_count = 0;
         if (sink->title && sink->title_max) sink->title[0] = 0;
         if (sink->find_row) *sink->find_row = (u32)-1;
+        if (sink->fold_spot_count) *sink->fold_spot_count = 0;
+        if (sink->fold_count) *sink->fold_count = 0;
+        if (sink->hidden_count) *sink->hidden_count = 0;
     }
-    if (f.cols < 8) return 0;
+    if (f->cols < 8) return 0;
 
     const u8 *s = v->src;
     u64 i = 0;
@@ -854,32 +1428,124 @@ u32 html_render(const html_view *v, html_sink *sink)
     while (i < v->len && s[i]) {
         u8 c = s[i];
 
-        if (c == '<') { i += tag(&f, s + i, v->len - i); continue; }
-        if (f.skip) { i++; continue; }
-        if (c == '&') { i += entity(&f, s + i, v->len - i); continue; }
+        if (c == '<') { i += tag(f, s + i, v->len - i); continue; }
+        if (hidden(f)) { i++; continue; }
+        if (folded(f)) {
+            bool space = c == ' ' || c == '\n' || c == '\t' || c == '\r';
+            if (space) f->in_word = false;
+            else if (!f->in_word) { f->in_word = true; f->fold_words++; }
+            i++;
+            continue;
+        }
+        if (c == '&') { i += entity(f, s + i, v->len - i); continue; }
 
         if (c >= 0x80) {
             u32 cp;
             i += utf8_take(s + i, v->len - i, &cp);
-            if (cp == 0xA0) { if (f.pre) word_add(&f, ' '); else word_flush(&f); }
-            else if (cp >= 0xA0) word_add(&f, cp);
+            if (cp == 0xA0) { if (f->pre) word_add(f, ' '); else word_flush(f); }
+            else if (cp >= 0xA0) word_add(f, cp);
             continue;
         }
 
-        if (f.pre) {
-            if (c == '\n') { word_flush(&f); want_break(&f, 1); }
-            else if (c == '\t') { word_add(&f, ' '); word_add(&f, ' '); }
-            else if (c == ' ') word_add(&f, ' ');
-            else if (c >= 0x20 && c < 0x7F) word_add(&f, c);
+        if (f->pre) {
+            if (c == '\n') { word_flush(f); want_break(f, 1); }
+            else if (c == '\t') { word_add(f, ' '); word_add(f, ' '); }
+            else if (c == ' ') word_add(f, ' ');
+            else if (c >= 0x20 && c < 0x7F) word_add(f, c);
         } else {
             if (c == ' ' || c == '\n' || c == '\t' || c == '\r')
-                word_flush(&f);
+                word_flush(f);
             else if (c >= 0x20 && c < 0x7F)
-                word_add(&f, c);
+                word_add(f, c);
         }
         i++;
     }
-    word_flush(&f);
+    word_flush(f);
+    while (f->depth) pop_top(f);                 /* a fold left open by the page closes here */
+    word_flush(f);
+    bool dirty = f->line_dirty;
+    if (dirty) line_paint(f);
+    if (sink && sink->hidden_count) *sink->hidden_count = f->hidden_count;
 
-    return f.row + (f.line_dirty ? 1 : 0);
+    return f->row + (dirty ? 1 : 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* The styles                                                          */
+/* ------------------------------------------------------------------ */
+
+/* Whether a rel attribute names a stylesheet, and not an alternate one. */
+static bool rel_stylesheet(const char *rel)
+{
+    bool sheet = false, alternate = false;
+    u32 i = 0;
+    while (rel[i]) {
+        while (rel[i] == ' ' || rel[i] == '\t') i++;
+        u32 s = i;
+        while (rel[i] && rel[i] != ' ' && rel[i] != '\t') i++;
+        u32 n = i - s;
+        char w[16];
+        u32 k = 0;
+        for (u32 j = s; j < i && k < sizeof(w) - 1; j++) w[k++] = to_lower(rel[j]);
+        w[k] = 0;
+        if (n == 10 && tag_is(w, "stylesheet")) sheet = true;
+        if (n == 9 && tag_is(w, "alternate")) alternate = true;
+    }
+    return sheet && !alternate;
+}
+
+u32 html_styles(const html_view *v, html_sink *sink, css_sheet *sheet)
+{
+    css_reset(sheet, (u32)v->w);
+    if (sink && sink->sheet_count) *sink->sheet_count = 0;
+    const u8 *s = v->src;
+    u64 n = v->len;
+    u64 i = 0;
+    parsed_tag *t = &T;
+
+    while (i < n && s[i]) {
+        if (s[i] != '<') { i++; continue; }
+        if (n - i > 3 && s[i + 1] == '!' && s[i + 2] == '-' && s[i + 3] == '-') {
+            u64 p = i + 4;
+            while (p + 2 < n && !(s[p] == '-' && s[p + 1] == '-' && s[p + 2] == '>')) p++;
+            i = p + 3 < n ? p + 3 : n;
+            continue;
+        }
+        parse_tag(s + i, n - i, t);
+        u64 end = i + t->end;
+        if (!t->closing && tag_is(t->name, "script")) {
+            end = i + swallow_to(s + i, n - i, t->end, "script", NULL);
+        } else if (!t->closing && tag_is(t->name, "style")) {
+            u64 close_at;
+            end = i + swallow_to(s + i, n - i, t->end, "style", &close_at);
+            close_at += i;
+            const char *media = attr(t, "media");
+            if (!media || !media[0] || css_media((const u8 *)media, slen(media), sheet->width))
+                css_parse(sheet, s + i + t->end, close_at > i + t->end ? close_at - i - t->end : 0);
+        } else if (!t->closing && tag_is(t->name, "link")) {
+            const char *rel = attr(t, "rel");
+            const char *href = attr(t, "href");
+            const char *media = attr(t, "media");
+            if (rel && href && href[0] && rel_stylesheet(rel) &&
+                (!media || !media[0] || css_media((const u8 *)media, slen(media), sheet->width))) {
+                if (sink && sink->sheets && sink->sheet_count) {
+                    u32 k = 0;
+                    for (; k < *sink->sheet_count; k++) if (tag_is(sink->sheets[k], href)) break;
+                    if (k == *sink->sheet_count && k < CSS_SHEETS_MAX) {
+                        u32 c = 0;
+                        while (href[c] && c < HTML_URL_MAX - 1) { sink->sheets[k][c] = href[c]; c++; }
+                        sink->sheets[k][c] = 0;
+                        (*sink->sheet_count)++;
+                    }
+                }
+                if (sink && sink->sheet_text) {
+                    u32 len = 0;
+                    const u8 *text = sink->sheet_text(sink->sheet_ctx, href, &len);
+                    if (text && len) css_parse(sheet, text, len);
+                }
+            }
+        }
+        i = end > i ? end : i + 1;
+    }
+    return sheet->count;
 }

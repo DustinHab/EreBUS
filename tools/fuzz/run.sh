@@ -1,6 +1,7 @@
 #!/bin/sh
 # run.sh -- fuzz the parsers for a while under the address and undefined-behaviour sanitizers.
-# - tools: lang (compiler, assembler, linker), pki (certificates, keys, signatures), html (the page renderer),
+# - tools: lang (compiler, assembler, linker), pki (certificates, keys, signatures), html (the page renderer with
+#   its styles), css (the stylesheet reader alone),
 #   net (frames, the tcp client, the http client, the door with ssh, the air), pipe (the object pipe's
 #   datagrams, sealed and plain), tls (the tls client fed a server's bytes), img (png, jpeg, inflate)
 # - seeds: the kernel's own sources and objects for lang, the certificate fixtures for pki, the manual for html,
@@ -14,7 +15,7 @@
 cd "$(dirname "$0")/../.."
 SECS=${1:-60}
 shift 2>/dev/null
-TOOLS=${*:-"lang pki html net pipe tls img"}
+TOOLS=${*:-"lang pki html css net pipe tls img"}
 CC="clang -O1 -g -std=c11 -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
     -Wno-unused-function -Wno-incompatible-library-redeclaration -I. -Ikernel/include"
 
@@ -61,6 +62,15 @@ seed_html() {
     C=build/fuzz/html/corpus
     printf '<html><body><h1>Title</h1><p>Some <b>bold</b> and <a href="/x?y=1">a link</a>.</p><ul><li>one</li><li>two</li></ul><table><tr><td>a</td><td>b</td></tr></table><form action="/go" method="get"><input name="q" value="hi"><input type="submit" value="Go"></form><pre>  kept\n spaces</pre><blockquote>quoted</blockquote>&amp;&#65;&lt;</body></html>' > $C/page0
     head -c 20000 MANUAL.md > $C/manual0
+    printf '\000\000\002\000nav a{display:none} .x{color:#c00;font-weight:bold} p{text-align:center} @media (max-width:600px){h1{display:none}}
+<html><head><title>T</title><link rel=stylesheet href=/s.css><style>.y{visibility:hidden}</style></head><body><nav><a href=/a>a</a><a href=/b>b</a></nav><h1 class=x>Head</h1><p>centred <span class=y>gone</span> <b style="color:blue">blue</b></p><footer><a href=/c>c</a></footer></body></html>' > $C/styled0
+}
+
+seed_css() {
+    C=build/fuzz/css/corpus
+    printf '\000@charset "utf-8"; /* c */ @import url(x.css); @media screen and (min-width: 600px), print { .a > b#c[d="e"] , div.f.g h { display: none !important; color: rgb(10, 20%%, 30) } } @supports (display:grid) { ul li { list-style: none; text-align: center } } body { font: bold 12px/1.5 Arial; visibility: hidden; font-weight: 700 } a:hover { color: red } .p { color: #abc; --x: var(--y) }' > $C/sheet0
+    printf '\001display: none; color: #ff0000 !important; font-weight: bold; text-align: right; list-style: none inside' > $C/decl0
+    printf '\002screen and (max-width: 800px), not print and (min-width: 20em), (400px <= width <= 1200px), (orientation: landscape)' > $C/media0
 }
 
 seed_net() {
@@ -193,7 +203,8 @@ for t in $TOOLS; do
     case $t in
         lang) build lang kernel/lang/cc.c kernel/lang/asm.c kernel/lang/ld.c kernel/lang/gnu.c && seed_lang && run lang 65536 ;;
         pki)  build pki kernel/net/asn1.c kernel/net/bn.c kernel/net/ec.c kernel/net/rsa.c kernel/net/x509.c kernel/net/sha256.c kernel/net/sha512.c && seed_pki && run pki 8192 ;;
-        html) build html kernel/gfx/html.c && seed_html && run html 32768 ;;
+        html) build html kernel/gfx/html.c kernel/gfx/css.c && seed_html && run html 32768 ;;
+        css)  build css kernel/gfx/css.c && seed_css && run css 16384 ;;
         net)  build net kernel/net/net.c kernel/net/ssh.c kernel/net/wifi.c kernel/net/nodes.c kernel/net/sha256.c kernel/net/x25519.c kernel/lib/base64.c && seed_net && run net 65536 ;;
         pipe) build pipe kernel/net/pipe.c kernel/net/nodes.c kernel/net/sha256.c kernel/lib/base64.c && seed_pipe && run pipe 65536 ;;
         tls)  build tls kernel/net/tls.c kernel/net/asn1.c kernel/net/bn.c kernel/net/ec.c kernel/net/rsa.c kernel/net/x509.c kernel/net/pki_selftest.c kernel/net/sha512.c kernel/net/x25519.c && seed_tls && run tls 65536 ;;

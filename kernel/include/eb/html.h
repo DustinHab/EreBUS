@@ -3,6 +3,7 @@
 
 #include <eb/types.h>
 #include <eb/fb.h>
+#include <eb/css.h>
 
 /* Reading a page the way it was meant, more or less.
  *
@@ -11,19 +12,22 @@
  * step in, tables lay their cells side by side, preformatted text
  * keeps its spaces, links take their colour, and forms grow fields a
  * person can type into and a button that sends them. Everything else
- * -- the scripts, the styles, the tags themselves -- is furniture the
- * reader was never meant to see.
+ * -- the scripts, the tags themselves -- is furniture the reader was
+ * never meant to see.
  *
- * No CSS and no scripting: the page decides what it says, not how the
- * screen is painted or what runs when it loads. A text browser, then,
- * and honest about it -- but a text browser that fills in forms.
+ * Of the stylesheets, the part that changes what a page says is
+ * honoured: what they hide stays hidden, what they set bold, centred
+ * or coloured is drawn so, what they make a block or a line is broken
+ * so. Nothing is laid out in boxes; there is one font. Navigation,
+ * headers, footers and asides fold to a line each, opened on request.
+ * No scripting: the page decides what it says, not what runs.
  *
  * The renderer draws nothing outside [scroll, scroll+rows) and returns
  * how tall the whole flow was. The sink, if given, collects the links
  * and form fields it found and the rectangles where they landed.
  */
 
-#define HTML_URL_MAX    192
+#define HTML_URL_MAX    400
 #define HTML_NAME_MAX   64
 #define HTML_VALUE_MAX  128
 #define HTML_LINKS_MAX  64
@@ -50,7 +54,7 @@ typedef struct {
 
 typedef struct {
     i32 x, y, w, h;
-    u32 ref;                        /* link: url index. field: field index. */
+    u32 ref;                        /* link: url index. field: field index. fold: its number. */
 } html_spot;
 
 typedef struct {
@@ -119,8 +123,32 @@ typedef struct {
     const char *find;
     u32         find_from;
     u32        *find_row;
+
+    /* Styles: the page's rules (NULL for none), and whether the
+     * navigation, headers, footers and asides fold. Each fold is
+     * numbered as it comes; a set bit in unfold opens it. The line
+     * that stands for a fold is a spot, its ref the fold's number.
+     * How many parts were hidden and how many folds there were go out. */
+    const css_sheet *sheet;
+    bool        fold;
+    u64         unfold;
+    html_spot  *fold_spots;
+    u32        *fold_spot_count;
+    u32        *hidden_count;
+    u32        *fold_count;
+
+    /* The sheets the page links (html_styles): the urls go out; for
+     * each the lender answers the fetched text, or NULL. */
+    char      (*sheets)[HTML_URL_MAX];
+    u32        *sheet_count;
+    const u8 *(*sheet_text)(void *ctx, const char *url, u32 *len);
+    void       *sheet_ctx;
 } html_sink;
 
 u32 html_render(const html_view *v, html_sink *sink);
+
+/* Reads the page's <style> blocks and the stylesheets it links into
+ * the rule table, in the page's order; returns how many rules. */
+u32 html_styles(const html_view *v, html_sink *sink, css_sheet *sheet);
 
 #endif /* EB_HTML_H */

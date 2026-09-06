@@ -235,7 +235,9 @@ typedef enum {
     HOT_INSTALL,     /* make the focused kernel the one the next start runs */
     HOT_RESTART,     /* save everything and start the machine again */
     HOT_KEEP,        /* the browser: remember the page as a bookmark */
-    HOT_FIND         /* the browser: open the search for a word on the page */
+    HOT_FIND,        /* the browser: open the search for a word on the page */
+    HOT_FOLD,        /* the browser: open or shut a folded part of the page */
+    HOT_PLAIN        /* the browser: the page with or without its styles */
 } hot_kind;
 
 typedef struct {
@@ -1391,6 +1393,7 @@ static void submit_form(u32 field_index)
 #define WEB_SCRATCH_PAGES 2048              /* 8 MiB of decoding room */
 #define WEB_PIC_PIXELS    (1600u * 1200u)   /* the largest picture decoded */
 #define WEB_BODY_MAX      2048
+#define WEB_SHEET_PAGES   512               /* 2 MiB: the stylesheets as they came */
 
 typedef struct {
     char url[HTML_URL_MAX];                 /* as the page named it */
@@ -1398,8 +1401,23 @@ typedef struct {
     u8   state;                             /* 0 wanted, 1 loading, 2 ready, 3 failed */
 } web_pic;
 
+typedef struct {
+    char url[HTML_URL_MAX];                 /* as the page named it */
+    u32  at, len;                           /* where it lies in the sheet store */
+    u8   state;                             /* 0 wanted, 1 loading, 2 there, 3 failed */
+} web_sheet;
+
 static struct {
     u8  *buf, *pic_buf, *scratch;
+    css_sheet *rules;                       /* the page's rule table */
+    u8  *sheets;                            /* the stylesheets fetched, end to end */
+    web_sheet sheet[CSS_SHEETS_MAX]; u32 nsheet; u32 sheet_used;
+    i32  sheet_loading; u32 sheet_req;
+    bool styled;                            /* the rule table matches the page and the sheets in hand */
+    bool plain;                             /* styles and folds off, by the person */
+    bool style_report;                      /* say what the styles did after the next render */
+    u64  unfold;                            /* the folds opened, by number */
+    u32  hidden_n, fold_n, nrules;
     char url[WEB_URL_MAX];                  /* the page shown */
     char addr[WEB_URL_MAX];                 /* the address line */
     u32  addr_len;
@@ -1418,9 +1436,13 @@ static struct {
     char find[48]; u32 find_len; bool find_edit; u32 find_from, find_row;
     i32  spot;                              /* keyboard focus over the spots; -1 none */
     u32  rows, vis;
-} web = { .pic_loading = -1, .spot = -1 };
+} web = { .pic_loading = -1, .sheet_loading = -1, .spot = -1 };
 static char web_images[HTML_IMAGES_MAX][HTML_URL_MAX];
 static u32  web_image_count;
+static char web_sheet_urls[CSS_SHEETS_MAX][HTML_URL_MAX];
+static u32  web_sheet_count;
+static html_spot fold_spots[HTML_SPOTS_MAX];
+static u32  fold_spot_count;
 static u8   web_start[16384];               /* the start page, built from the bookmarks */
 
 static bool web_prepare(void)
@@ -1429,11 +1451,48 @@ static bool web_prepare(void)
     phys_addr b = pmm_alloc_contig(WEB_BUF_PAGES);
     phys_addr p = pmm_alloc_contig(WEB_PIC_PAGES);
     phys_addr s = pmm_alloc_contig(WEB_SCRATCH_PAGES);
-    if (b == PMM_NO_FRAME || p == PMM_NO_FRAME || s == PMM_NO_FRAME) return false;
+    phys_addr r = pmm_alloc_contig(CSS_SHEET_PAGES);
+    phys_addr t = pmm_alloc_contig(WEB_SHEET_PAGES);
+    if (b == PMM_NO_FRAME || p == PMM_NO_FRAME || s == PMM_NO_FRAME ||
+        r == PMM_NO_FRAME || t == PMM_NO_FRAME) return false;
     web.buf = (u8 *)phys_to_virt(b);
     web.pic_buf = (u8 *)phys_to_virt(p);
     web.scratch = (u8 *)phys_to_virt(s);
+    web.rules = (css_sheet *)phys_to_virt(r);
+    web.sheets = (u8 *)phys_to_virt(t);
+    css_reset(web.rules, 0);
     return true;
+}
+
+/* The page's stylesheets start over: for a new page, and when the
+ * styles are turned back on. */
+static void web_sheets_drop(void)
+{
+    web.nsheet = 0;
+    web.sheet_used = 0;
+    web.sheet_loading = -1;
+    web.styled = false;
+}
+
+/* What the style reader asks for: the sheet's text, when it is there.
+ * The urls it names are noted, so the tick can go and get them. */
+static const u8 *web_sheet_text(void *ctx, const char *url, u32 *len)
+{
+    (void)ctx;
+    for (u32 i = 0; i < web.nsheet; i++) {
+        if (strcmp(web.sheet[i].url, url) != 0) continue;
+        if (web.sheet[i].state != 2) return NULL;
+        *len = web.sheet[i].len;
+        return web.sheets + web.sheet[i].at;
+    }
+    if (web.nsheet < CSS_SHEETS_MAX && !web.loading && !web.has_pending) {
+        web_sheet *s = &web.sheet[web.nsheet++];
+        memset(s, 0, sizeof(*s));
+        u32 n = 0;
+        while (url[n] && n < HTML_URL_MAX - 1) { s->url[n] = url[n]; n++; }
+        s->url[n] = 0;
+    }
+    return NULL;
 }
 
 static void web_pics_drop(void)
@@ -1570,11 +1629,38 @@ static void web_decode_pic(web_pic *p, const u8 *data, u32 len)
 }
 
 /* Once a loop of the shell: the answer taken when it came, the next
- * picture asked for when the wire is free. */
+ * stylesheet or picture asked for when the wire is free. */
 static void web_tick(void)
 {
     if (!web.buf) return;
     web_answer a;
+
+    /* A picture or a sheet that came is taken first, whatever else is
+     * pending: the wire is one ask at a time, and an ask nobody takes
+     * would hold it forever. What came for a page already left is
+     * dropped. */
+    if (web.pic_loading >= 0 && web_finished(web.pic_req, &a)) {
+        web_pic *p = &web.pic[web.pic_loading];
+        if (a.ok && a.status == 200 && a.len && !web.has_pending) web_decode_pic(p, a.data, a.len);
+        else p->state = 3;
+        web.pic_loading = -1;
+        nav.redraw = true;
+    }
+    if (web.sheet_loading >= 0 && web_finished(web.sheet_req, &a)) {
+        web_sheet *sh = &web.sheet[web.sheet_loading];
+        u32 room = WEB_SHEET_PAGES * PAGE_SIZE - web.sheet_used;
+        if (a.ok && a.status == 200 && a.len && a.len <= room && !web.has_pending) {
+            memcpy(web.sheets + web.sheet_used, a.data, a.len);
+            sh->at = web.sheet_used; sh->len = a.len; sh->state = 2;
+            web.sheet_used += a.len;
+            web.styled = false;
+        } else {
+            sh->state = 3;
+            if (a.ok && a.len > room) kprintf("web:  stylesheet %s: no room for %u bytes\n", sh->url, a.len);
+        }
+        web.sheet_loading = -1;
+        nav.redraw = true;
+    }
 
     if (web.has_pending && !web_busy()) {
         web_pics_drop();
@@ -1611,19 +1697,25 @@ static void web_tick(void)
         field_focus = -1;
         web_image_count = 0;
         web_pics_drop();                 /* the old page's pictures, noted while it was still shown */
+        web_sheet_count = 0;
+        web_sheets_drop();
+        web.unfold = 0;
         nav.redraw = true;
     }
 
     if (web.loading || web.has_pending) return;
+    if (web.pic_loading >= 0 || web.sheet_loading >= 0) return;
 
-    if (web.pic_loading >= 0) {
-        if (web_finished(web.pic_req, &a)) {
-            web_pic *p = &web.pic[web.pic_loading];
-            if (a.ok && a.status == 200 && a.len) web_decode_pic(p, a.data, a.len);
-            else p->state = 3;
-            web.pic_loading = -1;
-            nav.redraw = true;
-        }
+    /* the stylesheets first: the page reads differently once they are there */
+    for (u32 i = 0; i < web.nsheet; i++) {
+        if (web.sheet[i].state != 0) continue;
+        char url[WEB_URL_MAX];
+        web_resolve(web.url, web.sheet[i].url, url, sizeof(url));
+        if (!url[0] || web_busy() || web.plain) { web.sheet[i].state = 3; continue; }
+        web.sheet_req = web_ask(url, WEB_GET, NULL, 0, web.pic_buf, WEB_PIC_PAGES * PAGE_SIZE);
+        if (!web.sheet_req) { web.sheet[i].state = 3; continue; }
+        web.sheet[i].state = 1;
+        web.sheet_loading = (i32)i;
         return;
     }
     for (u32 i = 0; i < web.npic; i++) {
@@ -1818,15 +1910,39 @@ static void web_forward(void)
     web_begin(to, WEB_GET, NULL, 0);
 }
 
+/* A folded part of the page opened or shut, by its number. */
+static void web_fold_toggle(u32 spot_index)
+{
+    if (spot_index >= fold_spot_count) return;
+    u32 n = fold_spots[spot_index].ref;
+    if (n < 64) web.unfold ^= 1ull << n;
+    kprintf("web:  fold %u %s\n", n, (n < 64 && (web.unfold >> n) & 1) ? "opened" : "shut");
+    nav.redraw = true;
+}
+
+/* The page with its styles and folds, or as it came. */
+static void web_plain_toggle(void)
+{
+    web.plain = !web.plain;
+    web.styled = false;
+    kprintf("web:  styles %s\n", web.plain ? "off: the page as it came" : "on");
+    if (!web.plain) {
+        /* the sheets are asked for again when they were skipped */
+        for (u32 i = 0; i < web.nsheet; i++) if (web.sheet[i].state == 3) web.sheet[i].state = 0;
+    }
+    web.spot = -1;
+    nav.redraw = true;
+}
+
 /* Enter on the keyboard's spot: a link is followed, a field takes the
- * writing, a button sends. */
+ * writing, a button sends, a fold opens or shuts. */
 static void web_press_spot(void)
 {
     if (web.spot < 0) return;
     u32 s = (u32)web.spot;
     if (s < link_spot_count) { web_follow_link(s); return; }
     s -= link_spot_count;
-    if (s >= field_spot_count) return;
+    if (s >= field_spot_count) { web_fold_toggle(s - field_spot_count); return; }
     u32 fi = field_spots[s].ref;
     if (fi < field_count && field_defs[fi].kind == FIELD_SUBMIT) web_submit(fi);
     else field_focus = (i32)s;
@@ -1851,8 +1967,8 @@ static void draw_web_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     sx = strip_word(sx, y, "<", web.nback > 0, HOT_BACK);
     sx = strip_word(sx, y, ">", web.nfwd > 0, HOT_FWD);
     i32 right = x + w;
-    i32 keep_w = 4 * GLYPH_W + 8, go_w = 2 * GLYPH_W + 8, find_w = 4 * GLYPH_W + 8;
-    i32 addr_w = right - sx - keep_w - go_w - find_w - 3 * GLYPH_W;
+    i32 keep_w = 4 * GLYPH_W + 8, go_w = 2 * GLYPH_W + 8, find_w = 4 * GLYPH_W + 8, plain_w = 5 * GLYPH_W + 8;
+    i32 addr_w = right - sx - keep_w - go_w - find_w - plain_w - 4 * GLYPH_W;
     if (addr_w < 10 * GLYPH_W) addr_w = 10 * GLYPH_W;
     if (web.addr_edit) fb_rect(sx - 3, y - 3, addr_w, ROW, C_PANEL_HI);
     const char *shown = web.addr;
@@ -1886,6 +2002,13 @@ static void draw_web_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     if (lit || web.find_edit) fb_rect(sx - 4, y - 3, find_w, ROW, C_EDGE);
     text_at(sx, y, right, "find", (lit || web.find_edit) ? C_TEXT : C_WRITE);
     hot_add(sx - 4, y - 3, find_w, ROW, HOT_FIND, 0);
+    sx += find_w + GLYPH_W;
+
+    /* the page as it came, without its styles and folds */
+    lit = is_hovered(HOT_PLAIN, 0);
+    if (lit || web.plain) fb_rect(sx - 4, y - 3, plain_w, ROW, C_EDGE);
+    text_at(sx, y, right, "plain", (lit || web.plain) ? C_TEXT : C_WRITE);
+    hot_add(sx - 4, y - 3, plain_w, ROW, HOT_PLAIN, 0);
 
     fb_rect(x, y + ROW - 4, w, 1, C_EDGE);
 
@@ -1953,6 +2076,11 @@ static void draw_web_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         .image = web_image_lookup, .image_ctx = NULL,
         .title = web.title, .title_max = sizeof(web.title),
         .find = web.find_len ? find_low : NULL, .find_from = web.find_from, .find_row = &web.find_row,
+        .sheet = web.plain ? NULL : web.rules, .fold = !web.plain, .unfold = web.unfold,
+        .fold_spots = fold_spots, .fold_spot_count = &fold_spot_count,
+        .hidden_count = &web.hidden_n, .fold_count = &web.fold_n,
+        .sheets = web_sheet_urls, .sheet_count = &web_sheet_count,
+        .sheet_text = web_sheet_text, .sheet_ctx = NULL,
     };
     html_view v = {
         .src = src, .len = len,
@@ -1960,8 +2088,22 @@ static void draw_web_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         .scroll = scrolls[SCR_WEB],
         .col = { C_TEXT, C_DIM, C_FAINT, C_ACCENT, C_EDGE },
     };
+    /* The rule table is read again when the page or its sheets changed. */
+    if (!web.styled && !web.plain) {
+        web.nrules = html_styles(&v, &sink, web.rules);
+        web.styled = true;
+        web.style_report = web.have && web.url[0];
+    }
     web.rows = html_render(&v, &sink);
     web.vis = (u32)(bh / GLYPH_H);
+    if (web.style_report) {
+        u32 there = 0;
+        for (u32 i = 0; i < web.nsheet; i++) if (web.sheet[i].state == 2) there++;
+        kprintf("web:  styles: %u rules, %u of %u sheets%s, %u parts hidden, %u folds\n",
+                web.nrules, there, web.nsheet, web.rules->dropped ? " (table full)" : "",
+                web.hidden_n, web.fold_n);
+        web.style_report = false;
+    }
 
     u32 print = fields_print();
     if (print != field_shape) {
@@ -1984,6 +2126,8 @@ static void draw_web_shell(i32 sw, i32 sh, i32 top, i32 bottom)
             if (cx < sp->x + sp->w - 2) fb_rect(cx, sp->y + 3, 2, GLYPH_H, C_ACCENT);
         }
     }
+    for (u32 i = 0; i < fold_spot_count; i++)
+        hot_add(fold_spots[i].x, fold_spots[i].y - 2, fold_spots[i].w, fold_spots[i].h + 4, HOT_FOLD, i);
 
     /* The keyboard's spot, framed. */
     if (web.spot >= 0) {
@@ -1991,6 +2135,7 @@ static void draw_web_shell(i32 sw, i32 sh, i32 top, i32 bottom)
         const html_spot *sp = NULL;
         if (s < link_spot_count) sp = &link_spots[s];
         else if (s - link_spot_count < field_spot_count) sp = &field_spots[s - link_spot_count];
+        else if (s - link_spot_count - field_spot_count < fold_spot_count) sp = &fold_spots[s - link_spot_count - field_spot_count];
         else web.spot = -1;
         if (sp) fb_frame(sp->x - 2, sp->y - 2, sp->w + 4, sp->h + 4, 1, C_ACCENT);
     }
@@ -2055,7 +2200,7 @@ static bool web_key(const key_event *k)
         return true;
     }
 
-    u32 spots = link_spot_count + field_spot_count;
+    u32 spots = link_spot_count + field_spot_count + fold_spot_count;
     switch (c) {
     case KEY_ENTER:
         if (web.spot >= 0) web_press_spot();
@@ -2081,6 +2226,8 @@ static bool web_key(const key_event *k)
         web.find_edit = true; web.find_from = 0; nav.redraw = true; return true;
     case 'b':
         web_keep(); return true;
+    case 's':
+        web_plain_toggle(); return true;
     default:
         break;
     }
@@ -2111,6 +2258,8 @@ static bool web_hot(const hot_region *r)
     case HOT_FWD:  web_forward(); return true;
     case HOT_KEEP: web_keep(); return true;
     case HOT_FIND: web.find_edit = !web.find_edit; web.addr_edit = false; nav.redraw = true; return true;
+    case HOT_PLAIN: web_plain_toggle(); return true;
+    case HOT_FOLD: web_fold_toggle(r->index); return true;
     case HOT_LINK: web_follow_link(r->index); return true;
     case HOT_FIELD:
         if (r->index < field_spot_count) field_focus = (i32)r->index;
