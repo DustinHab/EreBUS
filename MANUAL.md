@@ -1,8 +1,8 @@
 # EreBUS Manual
 
-For EreBUS 0.8.9. This manual is updated with every release; the version it describes is the one on the releases page.
+For EreBUS 0.9.0. This manual is updated with every release; the version it describes is the one on the releases page.
 
-Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions
+Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions · 17 Formats
 
 ---
 
@@ -194,6 +194,8 @@ The terminal walks like the shell does: it stands on an object and can go only w
 | `journal` | the last things that happened |
 | `time` | the wall clock and the uptime |
 | `version` | what the running kernel calls itself |
+| `load` | the processor's idle share since the start, or since the last `load`; the interrupts served, and how many were message-signalled |
+| `formats` | the formats this kernel writes and reads (chapter 17), and the store's identity |
 | `help` | the words |
 
 ---
@@ -274,6 +276,7 @@ Started from the add palette; the running program lands in the list you stand on
 - `end` ends a program; everything it held is let go.
 - A program cannot print; it can only send to the console port it was born with. What it says lands in the journal under its name.
 - Eight system calls exist: exit, yield, send, receive, read, write, pass, clock. None opens, finds or grants anything.
+- `yield` rests the program until the next tick (10 ms): a program that has nothing to do costs nothing, and whatever it waits for is looked at again within that. A blocking `receive` sleeps until a message comes.
 
 ---
 
@@ -375,11 +378,15 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 
 ## 11 Storage
 
-- **Disks**: AHCI, up to eight, and usb disks (sticks, card readers: bulk-only transport, 512-byte sectors) through the xhci driver. Roles: the boot disk (port 0, the FAT volume with `\EFI\BOOT\BOOTX64.EFI` and `\erebus\kernel.elf`), the store (a GPT partition of type `E2EB0500-5354-4F52-4552-454255530001`), and an exchange disk (FAT32) when one stands beside them.
+- **Disks**: AHCI, up to eight, and usb disks (sticks, card readers: bulk-only transport) through the xhci driver. Roles: the boot disk (port 0, the FAT volume with `\EFI\BOOT\BOOTX64.EFI` and `\erebus\kernel.elf`), the store (a GPT partition of type `E2EB0500-5354-4F52-4552-454255530001`), and an exchange disk (FAT32) when one stands beside them.
+- **Interrupts**: the disk controller and the usb controller interrupt -- by message (msi, msi-x) when they can, on their legacy line otherwise -- and a command is waited for on that rather than by looking; the boot log says which way (`blk: ahci interrupts by msi 64`, `usb: interrupts by msi-x 65`). A controller with neither is looked at as before.
 - **Settling** (2.2): the store is where the graph lives; a disk taken whole boots the machine; a partition or free space only holds the store. Foreign disks are never written.
+- **The store's first sector**: the mark `EREBUS STORE`, the store's format (chapter 17) and a random identity, given when the store is made. A store an older kernel made carries the mark alone and is given format and identity when first met; the boot log says `blk: the store speaks format 1, id ...`, and `formats` in the terminal repeats it.
 - **Snapshots**: two alternating slots, generation number and checksum, sixteen generations kept; objects from 4 KiB up go into a content-addressed blob log that is compacted when full.
 - **Exchange disk**: its root directory appears as `the disk` on the system shelf (`take in <list>`); `write out <list>` writes texts and bytes back under 8.3 names. Files up to 4 MiB in, 16 MiB out.
-- **USB sticks**: a stick made with `tools/mkusb.sh` boots the machine and holds its store -- on a machine with no store yet, the store partition on the stick is the store and the stick counts as the boot disk; the start-up still offers the machine's own disks (2.2), since a stick is there to install from. Beside a machine that has its store, such a stick keeps to itself. A plain usb disk (no store partition) is the exchange disk when none stands on sata. A usb disk can be settled on (`settle on disk N`) like any other. Reads and writes go 64 KiB at a time; a usb disk unplugged while it is the store leaves the machine without one until the next start.
+- **USB sticks**: a stick made with `tools/mkusb.sh` boots the machine and holds its store -- on a machine with no store yet, the store partition on the stick is the store and the stick counts as the boot disk; the start-up still offers the machine's own disks (2.2), since a stick is there to install from. Beside a machine that has its store, such a stick keeps to itself. A plain usb disk (no store partition) is the exchange disk when none stands on sata. A usb disk can be settled on (`settle on disk N`) like any other. Reads and writes go 64 KiB at a time.
+- **Unplugging the store**: a stick that is the store and is pulled out is noticed (`blk: the store's disk was unplugged; nothing is saved until it is back`, on the attention page too). The graph stays in memory and changes wait; the stick plugged back in is known by its identity and saving resumes with the next generation. Another stick with a store of its own is left alone meanwhile, and so is a blank one: only the unplugged store is taken back. Turning the machine off before that loses what waited.
+- **Bigger blocks**: a usb disk with 1024-, 2048- or 4096-byte blocks is moved block by block and counted in 512-byte sectors, so the store and the exchange disk work on it as on any other; a partition table another system wrote on such a disk in its own block size is not read.
 
 ---
 
@@ -388,6 +395,7 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 ### 12.1 Address and pages
 
 - The address comes by DHCP, or is claimed with `address | a.b.c.d`; `address` shows the card, its MAC and the address.
+- The card interrupts: by message (msi) when it can, on its legacy line through the 8259 otherwise; the boot log says which (`net: 82574l: interrupts by msi 65`, `net: 82540em: interrupts by line 11`). The network thread sleeps between interrupts and wakes on the tick for its timers; a card with neither is looked at every 10 ms. With the disk, usb and network threads all sleeping on their interrupts, and programs resting on `yield`, the processor halts when nothing is happening: `load` says how much of the time.
 - `fetch`: point a text at it whose first line is `host/path`; the page is written into the text and shown through the page lens. `https` pages arrive over TLS 1.3 with the server verified against the trusted authorities (12.5); the page lens marks the page `verified`, or `sealed, unverified` when the channel was encrypted but the server could not be verified.
 - The palette's `page` is a text template for this.
 
@@ -512,10 +520,10 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 
 - Requirements (Linux; WSL2 with Ubuntu works): `clang lld nasm make qemu-system-x86 ovmf mtools dosfstools xorriso gdb unifont python3-pil`.
 - `make` builds loader, kernel and `build/esp.img`; `make run` starts QEMU with the serial log on the terminal; `sh tools/mkiso.sh` builds `build/erebus.iso`; `sh tools/mkusb.sh` a stick image.
-- `sh build/battery.sh` runs the regression tests: one build, 28 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`), then renew, update-test and tlstest alone (renew rebuilds the kernel; the other two use qemu's one forwarded connection per boot). Logs, screenshots and QEMU stderr are copied back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (480); a failed or stopped test runs once more, marked "2nd try" in the summary. KVM is used when `/dev/kvm` is writable (`NOKVM=1` forces TCG). The summary lists seconds per test; the full output is in `build/battery.log`. About 4 minutes on 32 cores. `sh build/kvm-battery.sh` adds the kernel built on the machine itself.
+- `sh build/battery.sh` runs the regression tests: one build, 31 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`), then renew, update-test and tlstest alone (renew rebuilds the kernel; the other two run a server on the host). Logs, screenshots and QEMU stderr are copied back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (480); a failed or stopped test runs once more, marked "2nd try" in the summary. KVM is used when `/dev/kvm` is writable (`NOKVM=1` forces TCG). The summary lists seconds per test; the full output is in `build/battery.log`. About 4 minutes on 32 cores. `sh build/kvm-battery.sh` adds the kernel built on the machine itself.
 - `sh build/battery.sh --one <test>` runs a single test that way; `BUILD=<dir> sh tools/<test>.sh` does the same by hand.
 - The tests drive the real screen through QEMU's monitor and wait on serial log lines (`tools/testlib.sh`: `waitlog`, `waitcount`, `waitfile`, `bootwait`); see the table in README.md. `tools/pkitest.sh` runs on the host: it builds the certificate checker from the kernel's own files and tries it against openssl-made chains and the live github chains kept in `tools/pki/fixtures`.
-- `sh tools/fuzz/run.sh <seconds> [lang pki html]` fuzzes the language tools, the certificate checker and the page renderer under the address and undefined-behaviour sanitizers; corpora and crash files land in `build/fuzz/<tool>/`.
+- `sh tools/fuzz/run.sh <seconds> [lang pki html net pipe tls]` fuzzes, under the address and undefined-behaviour sanitizers, the language tools, the certificate checker, the page renderer, the wire (frames into the pump, the tcp and http client, the door with ssh, the air), the pipe's datagrams (sealed and plain) and the tls client; the ciphers and signatures are stubbed to pass in the last three, so the parsers behind authentication see the input. Corpora and crash files land in `build/fuzz/<tool>/`.
 - The built-in authorities come from `tools/pki/authorities.txt` (a certificate file and a name per line); `sh tools/mkauthorities.sh` regenerates `kernel/net/authorities.h` from them.
 - The kernel's version comes from `git describe`; a tag `X.Y.Z` on the commit makes the boot line `EreBUS X.Y.Z (x86_64)`.
 
@@ -541,3 +549,29 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 | 0.8.7 | 2026-09-05 | the tls client verifies the server (12.5): the certificate chain is walked to a trusted authority -- ECDSA P-256 and RSA (PKCS#1 v1.5) signatures with SHA-256, dates, host names from the subject alternative names, authority marks in the middle -- and the server's signature over the handshake (ECDSA or RSA-PSS) is checked against the certificate's key. Built-in authorities: Sectigo DV E36 for github.com, Let's Encrypt YR1-YR3 for the release cdn; `authority \|` adds one of your own; `tls \| strict` refuses an unverified server, otherwise the page is marked `sealed, unverified` and the journal says why. New at start: `tls: certificate checks ready`. The machine now keeps a full date, from the real-time clock and the net. |
 | 0.8.8 | 2026-09-05 | fixes across the system, no new words. Fetching ran at a fraction of the link: the tcp window was a fixed 32 KiB whatever room the receive ring had left, so the peer sent what could not be kept and every cut cost its retransmit timeout -- the release package (2.8 MB) took 93 s and takes 1.2 s now. The window is the room in the ring, a window update goes out when room opens again (the door too), a fetch stops when Content-Length is reached instead of waiting for the peer's close, and the card's receive ring holds 128 frames. Scheduler: the idle thread yields after every interrupt and is passed over while another thread is ready. Pipe: a handshake in progress is no longer replaced by one for another address (a task sent across two machines restarted both handshakes against each other every round; the slow scheduler had hidden it). TCP: a fin arriving ahead of lost data no longer ends the stream short (the late data was then dropped and the page or package came truncated); a retransmission that begins before the expected byte is taken from that byte on; malformed header offsets are refused; the log counts what arrived out of order. DNS: names that end in a compression pointer. Certificates: an extension with a malformed boolean read an uninitialized element (the fuzzer found it). Self-update: a version name of full length overflowed the report line. Bundles and FAT32: length checks that could wrap; a volume whose tables lie past its end or whose root cluster is out of range is refused. The fuzzers (15) now cover the certificate checker and the page renderer. |
 | 0.8.9 | 2026-09-06 | the web verified: thirty-four roots from the Mozilla bundle join the built-in authorities, with ECDSA over P-384 and RSA up to 4096 bits under SHA-256, SHA-384 and SHA-512 -- Wikipedia, Google, Amazon, Microsoft, heise and GitHub verify from the machine (12.5). Far work: `split` works for compiled tasks (the range comes as a `RANG` message, 9.3) and under a quorum (every piece on N machines, majority per piece, 9.5). `unvouch <node>` withdraws a vouch; the nodes table's new `via` column says how each key came to be there (13.2). Self-update reads a one-line `version` file first and fetches the package only when it names something newer (13.8). USB disks: sticks and card readers are driven through xhci, and a stick made with `tools/mkusb.sh` carries the store (11). |
+| 0.9.0 | 2026-09-06 | the machine at rest: the network card, the usb controller and the disk controller interrupt (msi, msi-x, or their legacy line) and their threads sleep on it; `yield` rests a program until the next tick; the processor halts when nothing happens, and `load` says how much of the time (12.1). The parsers on the wire fuzzed: frames, the tcp and http client, the door with ssh, the air, the pipe's datagrams and the tls client, with three overruns found and closed (a length near 2^32 in an ssh name-list, a ServerHello length past its record, an echo request whose total length was shorter than its header). The store's stick can be unplugged and plugged back in: the store carries an identity, the changes wait, another store is refused (11). USB disks with bigger blocks are driven. Every format written to a disk or put on a wire has its number in one place, `formats` prints them, and chapter 17 states the promise. |
+
+---
+
+## 17 Formats
+
+Everything this system writes to a disk or puts on a wire, with the number it speaks and the oldest it still reads. The numbers live in one place, `kernel/include/eb/formats.h`; `formats` in the terminal prints them, with the store's identity.
+
+| Format | Identifier | Speaks | Reads | Where |
+|---|---|---|---|---|
+| the store's first sector | `EREBUS STORE` | 1 | 0 and up | mark, format, identity, when made; a store an older kernel made carries the mark alone (format 0) and is given the rest when first met |
+| a generation | `EREBSNAP` | 5 | 4 and up | header with generation, counts, checksum; 4 kept every payload inline, 5 puts big ones in the log |
+| a big object in the log | `EREBBLOB` | 1 | 0 and up | header with size, hash, sequence; 0 said no format |
+| a pipe datagram | `EBPX` | kinds 1 to 15 | -- | the kind after the mark; an unknown kind is ignored, which is how a kind is added |
+| a release package | `EBUPDATE` | -- | -- | signature, version, kernel; the signature covers version and kernel |
+| a bundle | `EBB1` | -- | -- | a list as one byte stream (`pack`, `unpack`) |
+| a program image | `EBX2` | -- | `EBX1` | code, data, zeroed room, entry; 1 had no entry and starts at the first code byte |
+| the loader's handover | -- | 3 | 2 | `common/bootinfo.h`; 3 hands the loader's files over |
+| settings, nodes | text | -- | -- | a line per matter or row; the last line on a matter wins; an unknown matter or column is kept as written |
+
+The promise:
+
+- A kernel reads every format an older kernel of the same major version wrote. A store made by 0.9 is read by every later 0.x and by 1.0.
+- A format that has to change gets a new number here and keeps the old one readable for at least one major version; nothing changes shape under an old number.
+- A kernel finding a format newer than it speaks leaves it alone and says so (`blk: the store on ... carries a store of format 2, newer than this kernel's 1; it is left alone`), rather than reading it as something it is not.
+- The wire: a datagram of an unknown kind is ignored; a node speaking a newer pipe keeps the kinds here unchanged. The handshake carries each side's version, so a node knows what the other speaks.

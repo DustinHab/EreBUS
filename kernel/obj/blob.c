@@ -10,8 +10,9 @@
 #include <eb/pmm.h>
 #include <eb/mm.h>
 #include <eb/fmt.h>
+#include <eb/formats.h>
 
-#define BLOB_MAGIC    0x424F4C4242455245ULL     /* "EREBBLOB" */
+#define BLOB_MAGIC    FORMAT_BLOB_MAGIC
 #define BLOB_BASE_LBA 34816u                     /* 17 MiB: past the ring of generations */
 #define BLOB_MAX      4096u
 #define CHUNK_SECTORS 512u                       /* 256 KiB moved at a time */
@@ -22,6 +23,8 @@ typedef struct {
     u64 size;
     u8  hash[32];
     u64 seq;
+    u32 format;                                  /* 0 in entries older kernels wrote */
+    u32 reserved;
 } blob_header;
 
 typedef struct {
@@ -61,11 +64,13 @@ static bool header_at(u64 lba, blob_header *h)
     if (!blk_read(lba, 1, sector)) return false;
     const blob_header *p = (const blob_header *)sector;
     if (p->magic != BLOB_MAGIC || p->size == 0) return false;
+    if (p->format > FORMAT_BLOB) return false;   /* a newer kernel's entry: not read */
     if (lba + 1 + sectors_of(p->size) > end) return false;
     h->magic = p->magic;
     h->size = p->size;
     copy32(h->hash, p->hash);
     h->seq = p->seq;
+    h->format = p->format;
     return true;
 }
 
@@ -204,6 +209,8 @@ bool blob_store(const u8 *hash, const void *data, u64 size, u64 *lba_out)
     h.size = size;
     copy32(h.hash, hash);
     h.seq = seq++;
+    h.format = FORMAT_BLOB;
+    h.reserved = 0;
     for (u32 i = 0; i < BLK_SECTOR_SIZE; i++) sector[i] = 0;
     for (u32 i = 0; i < sizeof(h); i++) sector[i] = ((const u8 *)&h)[i];
     if (!blk_write(next, 1, sector)) return false;

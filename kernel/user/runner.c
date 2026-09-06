@@ -485,9 +485,10 @@ void user_runner(u64 console, u64 inbox)
     char line[LINE_MAX];
 
     for (;;) {
-        /* A spinning script is preempted anyway; yielding on top of
-         * that keeps it a polite neighbour rather than a warm one. */
-        if (++steps >= 128) { steps = 0; r_yield(); }
+        /* A spinning script is preempted anyway; a rest now and then
+         * keeps it a polite neighbour rather than a warm one. A yield
+         * rests until the next tick, so not too often. */
+        if (++steps >= 4096) { steps = 0; r_yield(); }
 
         /* The budget holds against everything: loops, rests, and a
          * wait nobody will ever answer all pass through here. */

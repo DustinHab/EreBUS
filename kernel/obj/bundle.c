@@ -9,8 +9,9 @@
 #include <eb/string.h>
 #include <eb/fmt.h>
 #include <eb/io.h>
+#include <eb/formats.h>
 
-#define BMAGIC 0x31424245u           /* "EBB1", little-endian */
+#define BMAGIC FORMAT_BUNDLE_MAGIC   /* "EBB1", little-endian */
 #define BUNDLE_MAX 65536
 #define VISIT_MAX 128
 #define DEPTH_MAX 4

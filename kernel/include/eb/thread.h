@@ -70,9 +70,30 @@ void sched_wake(thread *t);
 void thread_condemn(thread *t);
 bool thread_condemned(const thread *t);
 
-/* Called from the timer interrupt. Marks the slice as spent; the switch
- * itself happens on the way out of the handler. */
+/* Called from the timer interrupt. Marks the slice as spent and wakes
+ * the sleepers whose time has come; the switch itself happens on the
+ * way out of the handler. */
 void sched_tick(void);
+
+/* Sleeps for at least this long. The tick is the clock, so the sleep
+ * ends on the first tick past the deadline. */
+void sched_sleep_ns(u64 ns);
+
+/* An event: something a thread waits for -- a frame on the wire, a
+ * finished transfer, a key -- signalled from an interrupt handler or
+ * from another thread. A signal that finds nobody waiting is kept
+ * until the next wait, so a check-then-wait never loses one. Waiting
+ * takes a deadline; a signal that never comes still returns the thread
+ * to its loop. */
+#define EVENT_WAITERS 4
+typedef struct {
+    volatile u64 pending;
+    thread *waiters[EVENT_WAITERS];
+    u32     nwaiters;
+} event;
+
+void event_signal(event *e);                  /* safe from an interrupt handler */
+bool event_wait(event *e, u64 timeout_ns);    /* true when signalled, false on the deadline */
 
 /* Performs a pending switch, if one is due. Called at the end of
  * interrupt handling, where it is safe to change stacks. */

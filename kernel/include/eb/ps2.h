@@ -48,6 +48,10 @@ bool ps2_mouse_present(void);
 bool ps2_poll_key(key_event *out);
 bool ps2_poll_mouse(mouse_event *out);
 
+/* Sleeps until a key or a movement is queued, or the time is up; true
+ * when something came. Whichever wire it came down. */
+bool ps2_input_wait(u64 timeout_ns);
+
 u64 ps2_key_count(void);
 u64 ps2_mouse_count(void);
 

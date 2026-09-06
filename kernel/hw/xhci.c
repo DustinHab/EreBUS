@@ -1,5 +1,6 @@
 /*
- * xhci.c -- USB keyboards, mice and disks via xHCI, polled by a thread.
+ * xhci.c -- USB keyboards, mice and disks via xHCI, driven by a thread the controller's interrupt wakes.
+ * - interrupter 0 by msi, msi-x or the legacy line; a controller with none is looked at every 4 ms
  * - firmware handoff, port power, Intel port routing, root ports, hubs (route string, TT), hotplug
  * - keyboards: boot protocol, 8-byte reports, repeat in the driver
  * - mice: report descriptor parsed (buttons, axes, wheel, report id); boot protocol as fallback
@@ -7,7 +8,8 @@
  * - disks: bulk-only transport, scsi (inquiry, test unit ready, read capacity, read/write 10), 64 KiB per
  *   transfer through sixteen chained blocks; registered with the block layer (blk_add), which may make one
  *   the store; the controller is held by one thread at a time
- * - not driven: isochronous endpoints, disks with sectors other than 512 bytes
+ * - disks with 1024-, 2048- or 4096-byte blocks are moved block by block and counted in 512-byte sectors
+ * - not driven: isochronous endpoints
  */
 #include <eb/xhci.h>
 #include <eb/pci.h>
@@ -46,8 +48,12 @@ static bool   present;
 
 #define CMD_RUN      (1u << 0)
 #define CMD_RESET    (1u << 1)
+#define CMD_INTE     (1u << 2)
 #define STS_HALTED   (1u << 0)
+#define STS_EINT     (1u << 3)
 #define STS_NOT_READY (1u << 11)
+#define IMAN_IP      (1u << 0)
+#define IMAN_IE      (1u << 1)
 
 #define PORT_CONNECTED (1u << 0)
 #define PORT_ENABLED   (1u << 1)
@@ -122,6 +128,14 @@ static u32  ev_deq, ev_cycle;
 static u64 *dcbaa;
 static phys_addr dcbaa_pa;
 
+/* The controller's interrupt lands here; the thread and whoever waits
+ * on a transfer sleep on it. port_changed remembers a port event seen
+ * on the ring, so the ports are looked at without waiting for the
+ * next scheduled look. */
+static event usb_event;
+static bool  irq_driven;
+static bool  port_changed;
+
 static bool ring_make(ring *r)
 {
     phys_addr p = pmm_alloc();
@@ -178,7 +192,8 @@ typedef struct {
     u32       dci_in, dci_out;
     u8        iface;
     u8       *data; phys_addr data_pa;
-    u64       sectors;
+    u64       sectors;                    /* in 512-byte sectors, as the block layer counts */
+    u32       bsize;                      /* the disk's own block: 512, or a power of two up to 4096 */
     u32       tag;
     i32       disk;                       /* its number in the block layer */
 } usbstore;
@@ -259,7 +274,7 @@ static void take(void)
 {
     thread *me = sched_current();
     if (held && holder == me) { hold_depth++; return; }
-    while (__atomic_exchange_n(&held, 1, __ATOMIC_ACQUIRE)) sched_yield();
+    while (__atomic_exchange_n(&held, 1, __ATOMIC_ACQUIRE)) sched_sleep_ns(1000000ULL);
     holder = me;
     hold_depth = 1;
 }
@@ -523,8 +538,9 @@ static void process_events(void)
                     handle_report(d, in, in->report_len - last_transfer.residue);
                 queue_report(d, in);
             }
+        } else if (type == T_PORT_EVENT) {
+            port_changed = true;       /* the ports themselves say what */
         }
-        /* port changes are read off the ports themselves, later */
 
         ev_deq++;
         if (ev_deq == RING_TRBS) { ev_deq = 0; ev_cycle ^= 1; }
@@ -534,16 +550,36 @@ static void process_events(void)
     rt[RT_ERDP_HI] = (u32)(deq >> 32);
 }
 
+/* A pause between looks at the ring: until the controller's interrupt
+ * wakes us, at most this long; a controller without one is given the
+ * processor away and looked at again on the next turn. */
+static void pause_ns(u64 ns)
+{
+    if (irq_driven) event_wait(&usb_event, ns);
+    else sched_yield();
+}
+
 static bool wait_ns(u64 ns, bool (*done)(void))
 {
     u64 since = time_ns();
     while (time_ns() - since < ns) {
         process_events();
         if (done()) return true;
-        sched_yield();
+        pause_ns(10000000ULL);
     }
     process_events();
     return done();
+}
+
+static void on_interrupt(trap_frame *f)
+{
+    (void)f;
+    u32 sts = op[OP_USBSTS];
+    if (!(sts & STS_EINT)) return;               /* somebody else's, on a shared line */
+    op[OP_USBSTS] = STS_EINT;
+    u32 iman = rt[RT_IMAN];
+    if (iman & IMAN_IP) rt[RT_IMAN] = iman;      /* the pending bit clears when written */
+    event_signal(&usb_event);
 }
 
 static phys_addr waiting_for;
@@ -605,7 +641,7 @@ static u32 ep0_packet(u32 speed)
 static void wait_ms(u64 ms)
 {
     u64 since = time_ns();
-    while (time_ns() - since < ms * 1000000ULL) { process_events(); sched_yield(); }
+    while (time_ns() - since < ms * 1000000ULL) { process_events(); pause_ns(ms * 1000000ULL); }
 }
 
 /* A port with no power reports nothing plugged into it, forever.
@@ -823,6 +859,26 @@ static bool scsi(usbdev *d, const u8 *cdb, u32 cdblen, bool in, u32 len, u32 *go
 /* Sectors in or out, for the block layer. Held for the duration, since
  * whichever thread wants the sectors shares the controller with the one
  * watching the ports. */
+/* n of the disk's own blocks at block address, between the disk and
+ * the data pages. The controller is held by the caller. */
+static bool blocks_move(usbdev *d, u64 block, u32 n, bool write)
+{
+    usbstore *s = &d->st;
+    u32 bytes = n * s->bsize;
+    u8 cdb[10] = { write ? 0x2A : 0x28, 0,
+                   (u8)(block >> 24), (u8)(block >> 16), (u8)(block >> 8), (u8)block,
+                   0, (u8)(n >> 8), (u8)n, 0 };
+    u32 got = 0;
+    if (!scsi(d, cdb, 10, !write, bytes, &got)) return false;
+    return write || got >= bytes;
+}
+
+/* Sectors in or out, for the block layer. Held for the duration, since
+ * whichever thread wants the sectors shares the controller with the one
+ * watching the ports. A disk with bigger blocks than the layer's
+ * sectors is read block by block around the sectors asked for, and
+ * written by reading the blocks, laying the sectors in, and writing
+ * them back. */
 static bool storage_io(void *ctx, u64 lba, u32 count, void *buf, bool write)
 {
     usbdev *d = (usbdev *)ctx;
@@ -831,18 +887,25 @@ static bool storage_io(void *ctx, u64 lba, u32 count, void *buf, bool write)
     take();
     u8 *p = (u8 *)buf;
     bool ok = true;
+    u32 k = s->bsize / 512;                    /* sectors per block */
+    u32 room = STORE_PAGES * 4096 / s->bsize;  /* blocks the data pages hold */
     while (count && ok) {
-        u32 n = count > STORE_PAGES * 8 ? STORE_PAGES * 8 : count;   /* 64 KiB at a time */
+        u64 block = lba / k;
+        u32 off = (u32)(lba % k) * 512;        /* where the first sector lies in its block */
+        u32 n = count;                         /* sectors this round */
+        if ((u64)off + (u64)n * 512 > (u64)room * s->bsize) n = (room * s->bsize - off) / 512;
+        u32 blocks = (off + n * 512 + s->bsize - 1) / s->bsize;
         u32 bytes = n * 512;
-        if (write) memcpy(s->data, p, bytes);
-        u8 cdb[10] = { write ? 0x2A : 0x28, 0,
-                       (u8)(lba >> 24), (u8)(lba >> 16), (u8)(lba >> 8), (u8)lba,
-                       0, (u8)(n >> 8), (u8)n, 0 };
-        u32 got = 0;
-        ok = scsi(d, cdb, 10, !write, bytes, &got);
-        if (ok && !write) {
-            if (got < bytes) ok = false;
-            else memcpy(p, s->data, bytes);
+        if (write) {
+            bool whole = (off == 0) && (n * 512 == blocks * s->bsize);
+            if (!whole) ok = blocks_move(d, block, blocks, false);   /* the rest of the blocks */
+            if (ok) {
+                memcpy(s->data + off, p, bytes);
+                ok = blocks_move(d, block, blocks, true);
+            }
+        } else {
+            ok = blocks_move(d, block, blocks, false);
+            if (ok) memcpy(p, s->data + off, bytes);
         }
         p += bytes;
         lba += n;
@@ -929,14 +992,19 @@ static bool storage_up(usbdev *d, u8 config_value, u8 iface, u8 ep_in, u8 ep_out
     }
     u32 last = ((u32)s->data[0] << 24) | ((u32)s->data[1] << 16) | ((u32)s->data[2] << 8) | s->data[3];
     u32 bsize = ((u32)s->data[4] << 24) | ((u32)s->data[5] << 16) | ((u32)s->data[6] << 8) | s->data[7];
-    if (bsize != 512) {
-        kprintf("usb:  the disk has %u-byte sectors; only 512 are driven\n", bsize);
+    if (bsize != 512 && bsize != 1024 && bsize != 2048 && bsize != 4096) {
+        kprintf("usb:  the disk has %u-byte blocks; only 512 to 4096 are driven\n", bsize);
         s->used = false;
         return true;
     }
-    s->sectors = (u64)last + 1;
+    s->bsize = bsize;
+    s->sectors = ((u64)last + 1) * (bsize / 512);
     disks++;
-    kprintf("usb:  a disk, %s, %llu sectors\n", label[0] ? label : "unnamed", s->sectors);
+    if (bsize == 512)
+        kprintf("usb:  a disk, %s, %llu sectors\n", label[0] ? label : "unnamed", s->sectors);
+    else
+        kprintf("usb:  a disk, %s, %llu blocks of %u bytes, counted as %llu sectors\n",
+                label[0] ? label : "unnamed", (u64)last + 1, bsize, s->sectors);
     s->disk = blk_add(label[0] ? label : d->name, s->sectors, storage_io, d);
     if (s->disk < 0) kprintf("usb:  the block layer has no room for the disk\n");
     return true;
@@ -1526,22 +1594,26 @@ static void handle_report(usbdev *d, usbin *in, u32 len)
 }
 
 /* A key held down repeats, as a PS/2 keyboard would have done on its
- * own: after half a second, thirty times a second. */
-static void repeat_held(void)
+ * own: after half a second, thirty times a second. Answers whether a
+ * key is held at all, so the thread knows to look again soon. */
+static bool repeat_held(void)
 {
     u64 now = time_ns();
+    bool any = false;
     for (u32 i = 0; i < DEV_MAX; i++) {
         usbdev *d = &dev[i];
         if (!d->used) continue;
         for (u32 k = 0; k < IN_MAX; k++) {
             usbin *in = &d->in[k];
             if (!in->used || in->kind != KIND_KEYBOARD || !in->held) continue;
+            any = true;
             if (now - in->held_since < 500000000ULL) continue;
             if (now - in->last_repeat < 33000000ULL) continue;
             in->last_repeat = now;
             feed_usage(in->held, true);
         }
     }
+    return any;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1612,15 +1684,20 @@ static void usb_thread(void *arg)
     for (;;) {
         take();
         process_events();
-        repeat_held();
+        bool holding = repeat_held();
         u64 now = time_ns();
-        if (now - last_look > 500000000ULL) {     /* twice a second: who came, who went */
+        if (port_changed || now - last_look > 500000000ULL) {   /* who came, who went */
+            port_changed = false;
             last_look = now;
             look_at_ports();
         }
         give();
-        u64 since = time_ns();
-        while (time_ns() - since < 4000000ULL) sched_yield();
+
+        /* Until the controller's next word; a held key wants a look
+         * every tick for its repeats, the hubs one twice a second. A
+         * controller without an interrupt is looked at every 4 ms. */
+        if (irq_driven) event_wait(&usb_event, holding ? 10000000ULL : 500000000ULL);
+        else sched_sleep_ns(4000000ULL);
     }
 }
 
@@ -1772,7 +1849,16 @@ bool xhci_init(void)
     rt[RT_ERDP_HI] = (u32)(ev_pa >> 32);
     rt[RT_ERSTBA_LO] = (u32)erst_pa;
     rt[RT_ERSTBA_HI] = (u32)(erst_pa >> 32);
-    rt[RT_IMAN] = 0;                              /* no interrupt; the thread reads */
+    rt[RT_IMAN] = IMAN_IP;                        /* nothing pending yet, not enabled yet */
+
+    /* The interrupt: a message when the controller can send one, else
+     * the pin's line; without either the thread looks in on its own. */
+    pci_irq irq = pci_attach_irq(pd, on_interrupt, true);
+    if (irq.kind != PCI_IRQ_NONE) {
+        rt[RT_IMAN] = IMAN_IE | IMAN_IP;
+        op[OP_USBCMD] |= CMD_INTE;
+        irq_driven = true;
+    }
 
     op[OP_USBCMD] |= CMD_RUN;
     since = time_ns();
@@ -1782,6 +1868,8 @@ bool xhci_init(void)
 
     kprintf("usb:  xhci at %02x:%02x.%u, %u ports, %u slots, %u-byte contexts\n",
             pd->bus, pd->device, pd->function, max_ports, max_slots, csz);
+    if (irq_driven) kprintf("usb:  interrupts by %s %u\n", pci_irq_words(irq.kind), irq.number);
+    else kprintf("usb:  no interrupt to attach; polled every 4 ms\n");
     kprintf("usb:  %s\n", pointer_selftest()
             ? "self test passed -- a pointer descriptor parses correctly"
             : "SELF TEST FAILED -- boot protocol only, no wheels");

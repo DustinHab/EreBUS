@@ -500,6 +500,7 @@ bool tls_get(const u8 addr[4], const char *host, u32 hlen,
         tcp_close(); return false;
     }
     u32 sh_len = ((u32)rec[1] << 16) | ((u32)rec[2] << 8) | rec[3];
+    if (4 + sh_len > (u32)rlen) { tcp_close(); return false; }   /* a length past the record */
     sha256_update(&tr, rec, 4 + sh_len);
 
     u8 server_pub[32];

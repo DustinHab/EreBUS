@@ -9,10 +9,11 @@
 #include <eb/mm.h>
 #include <eb/fmt.h>
 #include <eb/crypto.h>
+#include <eb/formats.h>
 
-#define SNAP_MAGIC   0x50414E5342455245ULL   /* "EREBSNAP" */
-#define SNAP_VERSION 5u
-#define SNAP_OLDEST  4u                      /* still read: everything inline */
+#define SNAP_MAGIC   FORMAT_SNAPSHOT_MAGIC
+#define SNAP_VERSION FORMAT_SNAPSHOT
+#define SNAP_OLDEST  FORMAT_SNAPSHOT_OLDEST  /* still read: everything inline */
 
 /* A ring of slots rather than two.
  *

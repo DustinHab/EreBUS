@@ -31,17 +31,7 @@ _Static_assert(sizeof(percpu) == 16, "syscall.S depends on this layout");
 
 #define EFER_SCE (1ULL << 0)
 
-static u64 rdmsr(u32 msr)
-{
-    u32 lo, hi;
-    __asm__ volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
-    return ((u64)hi << 32) | lo;
-}
-
-static void wrmsr(u32 msr, u64 v)
-{
-    __asm__ volatile ("wrmsr" :: "c"(msr), "a"((u32)v), "d"((u32)(v >> 32)));
-}
+/* rdmsr and wrmsr come from eb/io.h */
 
 extern void syscall_entry(void);
 
@@ -213,7 +203,11 @@ u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4)
         return SYS_OK;
 
     case SYS_YIELD:
-        sched_yield();
+        /* A program that yields has nothing to do right now: it rests
+         * until the next tick rather than taking the processor straight
+         * back, so a machine full of waiting programs is a machine at
+         * rest. Whatever it waits for is looked at again within 10 ms. */
+        sched_sleep_ns(1);
         return SYS_OK;
 
     case SYS_SEND:

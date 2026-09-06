@@ -2,6 +2,7 @@
 #define EB_PCI_H
 
 #include <eb/types.h>
+#include <eb/trap.h>
 
 /* PCI configuration space, through the two ports at 0xCF8 and 0xCFC.
  *
@@ -35,5 +36,21 @@ void pci_write16(const pci_device *d, u8 offset, u16 value);
 u64  pci_bar(const pci_device *d, u32 index);
 
 const char *pci_class_name(u8 class_code, u8 subclass);
+
+/* The capability list: the offset of the first entry with this id, or
+ * 0 when the device has none. */
+u8   pci_find_capability(const pci_device *d, u8 id);
+
+/* A device's interrupt, attached to a handler: message-signalled when
+ * the device can (msi first, msi-x when allowed and msi is missing),
+ * else its interrupt pin's legacy line as the firmware routed it.
+ * kind says which; number is the vector or the line. */
+#define PCI_IRQ_NONE 0
+#define PCI_IRQ_MSI  1
+#define PCI_IRQ_MSIX 2
+#define PCI_IRQ_LINE 3
+typedef struct { u8 kind, number; } pci_irq;
+pci_irq pci_attach_irq(const pci_device *d, irq_handler fn, bool msix_ok);
+const char *pci_irq_words(u8 kind);      /* "msi", "msi-x", "line", "none" */
 
 #endif /* EB_PCI_H */

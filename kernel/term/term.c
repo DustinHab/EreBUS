@@ -29,6 +29,9 @@
 #include <eb/fmt.h>
 #include <eb/time.h>
 #include <eb/thread.h>
+#include <eb/trap.h>
+#include <eb/blk.h>
+#include <eb/formats.h>
 #include <eb/string.h>
 
 /* One for the screen, and one for each door slot ssh may fill at once,
@@ -2060,6 +2063,57 @@ static void cmd_time(term_session *s)
     t_say(s, " seconds");
 }
 
+/* How much of the processor went to nobody: since the start on the
+ * first asking, since the last asking after that -- so 'load', a
+ * pause, 'load' measures the pause. And the interrupts served. */
+static void cmd_load(term_session *s)
+{
+    static u64 idle_then, now_then, irq_then;
+    u64 idle = sched_idle_ns(), now = time_ns(), irqs = trap_irq_count();
+    u64 span = now - now_then, rest = idle - idle_then;
+    if (span == 0) span = 1;
+    if (rest > span) rest = span;
+    t_puts(s, "idle ");
+    t_dec(s, rest * 100 / span);
+    t_puts(s, "% over the last ");
+    t_dec(s, span / 1000000000ULL);
+    t_puts(s, now_then ? " seconds since the last look; " : " seconds since the start; ");
+    t_dec(s, irqs - irq_then);
+    t_puts(s, " interrupts, ");
+    t_dec(s, trap_msi_count());
+    t_say(s, " message-signalled so far");
+    /* and into the log, where a test bench can read it */
+    kprintf("load: idle %llu%% over %llu s, %llu interrupts, %llu message-signalled so far\n",
+            rest * 100 / span, span / 1000000000ULL, irqs - irq_then, trap_msi_count());
+    idle_then = idle; now_then = now; irq_then = irqs;
+}
+
+/* The formats this kernel writes and reads (eb/formats.h), and the
+ * promise that goes with them. */
+static void cmd_formats(term_session *s)
+{
+    t_puts(s, "store            format "); t_dec(s, FORMAT_STORE);
+    t_puts(s, " (reads "); t_dec(s, FORMAT_STORE_OLDEST); t_puts(s, " and up)");
+    if (blk_store_id()) {
+        t_puts(s, "; this store's id ");
+        u64 id = blk_store_id();
+        for (i32 i = 60; i >= 0; i -= 4) t_putc(s, "0123456789abcdef"[(id >> i) & 15]);
+    }
+    t_end(s);
+    t_puts(s, "generation       format "); t_dec(s, FORMAT_SNAPSHOT);
+    t_puts(s, " (reads "); t_dec(s, FORMAT_SNAPSHOT_OLDEST); t_say(s, " and up)");
+    t_puts(s, "big objects      format "); t_dec(s, FORMAT_BLOB);
+    t_puts(s, " (reads "); t_dec(s, FORMAT_BLOB_OLDEST); t_say(s, " and up)");
+    t_puts(s, "pipe datagram    EBPX, kinds 1 to "); t_dec(s, FORMAT_PIPE_KINDS); t_say(s, "; an unknown kind is ignored");
+    t_say(s, "release package  EBUPDATE");
+    t_say(s, "bundle           EBB1");
+    t_say(s, "program image    EBX2 (reads EBX1)");
+    t_puts(s, "boot handover    "); t_dec(s, FORMAT_HANDOVER);
+    t_puts(s, " (reads "); t_dec(s, FORMAT_HANDOVER_OLDEST); t_say(s, ")");
+    t_say(s, "settings, nodes  texts, a line per matter or row; unknown lines are kept");
+    t_say(s, "the promise: a kernel reads every format an older kernel of the same major version wrote.");
+}
+
 static void cmd_help(term_session *s)
 {
     t_say(s, "syntax: a verb, a name, and 'to', 'at' or 'with' before a second name.");
@@ -2129,6 +2183,8 @@ static void cmd_help(term_session *s)
     t_say(s, "the machine");
     t_say(s, "  journal          the journal");
     t_say(s, "  time             wall clock and uptime");
+    t_say(s, "  load             the processor's idle share and the interrupts served");
+    t_say(s, "  formats          the formats this kernel writes and reads, and the store's id");
 }
 
 /* ------------------------------------------------------------------ */
@@ -2338,6 +2394,8 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "point at", &rest))cmd_point(s, rest);
     else if (word_starts(line, "journal", NULL))  cmd_journal(s);
     else if (word_starts(line, "time", NULL))     cmd_time(s);
+    else if (word_starts(line, "load", NULL))     cmd_load(s);
+    else if (word_starts(line, "formats", NULL))  cmd_formats(s);
     else if (word_starts(line, "version", NULL))  cmd_version(s);
     else if (word_starts(line, "nodes", NULL))    cmd_nodes(s);
     else if (word_starts(line, "allow", &rest))   cmd_allow(s, rest);

@@ -6,6 +6,7 @@
 #include <eb/trap.h>
 #include <eb/gdt.h>
 #include <eb/pic.h>
+#include <eb/apic.h>
 #include <eb/thread.h>
 #include <eb/vmm.h>
 #include <eb/proc.h>
@@ -60,18 +61,41 @@ static void set_gate(u8 vector, u8 ist, u8 type_attr)
 
 #define IRQ_BASE 32
 #define IRQ_COUNT 16
+#define IRQ_SHARE 4          /* handlers on one legacy line */
 
-static irq_handler handlers[IRQ_COUNT];
-static u64 irq_total;
+/* Message-signalled interrupts land on vectors of their own, above the
+ * legacy pair's sixteen and well clear of them. */
+#define MSI_BASE  64
+#define MSI_COUNT 16
+
+static irq_handler handlers[IRQ_COUNT][IRQ_SHARE];
+static irq_handler msi_handlers[MSI_COUNT];
+static u64 irq_total, msi_total;
 
 void irq_install(u8 irq, irq_handler fn)
 {
-    if (irq >= IRQ_COUNT) return;
-    handlers[irq] = fn;
-    pic_set_mask(irq, fn == NULL);
+    if (irq >= IRQ_COUNT || !fn) return;
+    for (u32 i = 0; i < IRQ_SHARE; i++) {
+        if (handlers[irq][i]) continue;
+        handlers[irq][i] = fn;
+        pic_set_mask(irq, false);
+        return;
+    }
+}
+
+i32 irq_alloc_vector(irq_handler fn)
+{
+    if (!fn || !lapic_present()) return -1;
+    for (u32 i = 0; i < MSI_COUNT; i++) {
+        if (msi_handlers[i]) continue;
+        msi_handlers[i] = fn;
+        return (i32)(MSI_BASE + i);
+    }
+    return -1;
 }
 
 u64 trap_irq_count(void) { return irq_total; }
+u64 trap_msi_count(void) { return msi_total; }
 
 /* ------------------------------------------------------------------ */
 /* Crash reporting                                                     */
@@ -278,7 +302,7 @@ void trap_dispatch(trap_frame *f)
         if (pic_spurious(irq)) return;
 
         irq_total++;
-        if (handlers[irq]) handlers[irq](f);
+        for (u32 i = 0; i < IRQ_SHARE && handlers[irq][i]; i++) handlers[irq][i](f);
         pic_eoi(irq);
 
         /* The one place a thread switch can happen behind a thread's
@@ -291,9 +315,23 @@ void trap_dispatch(trap_frame *f)
         return;
     }
 
-    /* Nothing is configured to deliver anything above 47 yet, so this
-     * is worth saying out loud rather than swallowing. */
+    if (f->vector >= MSI_BASE && f->vector < MSI_BASE + MSI_COUNT) {
+        u32 i = (u32)(f->vector - MSI_BASE);
+        irq_total++;
+        msi_total++;
+        if (msi_handlers[i]) msi_handlers[i](f);
+        lapic_eoi();
+        sched_preempt_if_due();
+        return;
+    }
+
+    /* The local controller's spurious vector: nothing to acknowledge. */
+    if (f->vector == 0xFF) return;
+
+    /* Nothing is configured to deliver anything else, so this is worth
+     * saying out loud rather than swallowing. */
     kprintf("kern: unexpected interrupt %llu, ignored\n", f->vector);
+    lapic_eoi();
 }
 
 /* ------------------------------------------------------------------ */

@@ -28,8 +28,9 @@
 #include <eb/cc.h>
 #include <eb/ld.h>
 #include <eb/term.h>
+#include <eb/formats.h>
 
-#define MAGIC     0x58504245u        /* "EBPX", little-endian */
+#define MAGIC     FORMAT_PIPE_MAGIC  /* "EBPX", little-endian */
 #define K_OFFER   1
 #define K_CHUNK   2
 #define K_TAKEN   3

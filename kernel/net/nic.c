@@ -6,13 +6,21 @@
 #include <eb/net.h>
 #include <eb/wifi.h>
 #include <eb/pci.h>
+#include <eb/thread.h>
 #include <eb/fmt.h>
 
 #define ETH_RADIO 0x88B5              /* the test bench's radio: 802.11 inside ethernet */
 
 static const nic_ops *card;
+static event wire;                    /* the card's interrupt lands here */
+static bool  interrupts;
 
 void nic_register(const nic_ops *ops) { card = ops; }
+
+void nic_signal(void)                 { event_signal(&wire); }
+bool nic_wait(u64 timeout_ns)         { return event_wait(&wire, timeout_ns); }
+bool nic_interrupts(void)             { return interrupts; }
+void nic_note_interrupts(bool yes)    { interrupts = yes; }
 
 /* Everything on the bus that is a network card, named, so a machine
  * whose card nobody here drives says which card that was. Guessing

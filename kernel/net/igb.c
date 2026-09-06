@@ -1,7 +1,8 @@
 /*
  * igb.c -- Intel 82575/82576, 82580/I350, I210/I211: advanced descriptors, one queue.
  * - per-queue register blocks; descriptors written and written back in different layouts
- * - polled by the network thread; no interrupts
+ * - read by the network thread; the card's interrupt (msi, or its legacy line; the older cause register, not
+ *   the msi-x scheme) wakes it
  * - PHY over MDIC (address from MDICNFG on parts after the 82575); PHPM says whether the PHY sleeps
  */
 #include <eb/net.h>
@@ -19,7 +20,9 @@
 #define R_STATUS   0x00008
 #define R_CTRL_EXT 0x00018
 #define R_ICR      0x000C0
+#define R_IMS      0x000D0
 #define R_IMC      0x000D8
+#define IMS_WANTED ((1u << 0) | (1u << 2) | (1u << 4) | (1u << 6) | (1u << 7))   /* txdw, lsc, rxdmt0, rxo, rxt0 */
 #define R_RCTL     0x00100
 #define R_TCTL     0x00400
 #define R_MRQC     0x05818
@@ -173,8 +176,13 @@ static const known *look_up(u16 id)
 
 static void wait_ms(u64 ms)
 {
-    u64 since = time_ns();
-    while (time_ns() - since < ms * 1000000ULL) sched_yield();
+    sched_sleep_ns(ms * 1000000ULL);
+}
+
+static void on_interrupt(trap_frame *f)
+{
+    (void)f;
+    if (rr(R_ICR)) nic_signal();
 }
 
 /* ------------------------------------------------------------------ */
@@ -464,6 +472,16 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
             k->name, dev->bus, dev->device, dev->function,
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
             (rr(R_STATUS) & STATUS_LU) ? "link up" : "no link");
+
+    pci_irq irq = pci_attach_irq(dev, on_interrupt, false);
+    if (irq.kind != PCI_IRQ_NONE) {
+        (void)rr(R_ICR);
+        wr(R_IMS, IMS_WANTED);
+        nic_note_interrupts(true);
+        kprintf("net:  %s: interrupts by %s %u\n", k->name, pci_irq_words(irq.kind), irq.number);
+    } else {
+        kprintf("net:  %s: no interrupt to attach; polled\n", k->name);
+    }
 
     up = true;
     nic_register(&igb_ops);

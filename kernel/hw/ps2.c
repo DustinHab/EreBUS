@@ -3,6 +3,7 @@
  */
 #include <eb/ps2.h>
 #include <eb/trap.h>
+#include <eb/thread.h>
 #include <eb/pic.h>
 #include <eb/settings.h>
 #include <eb/io.h>
@@ -96,12 +97,16 @@ static u32         key_head, key_tail;
 static mouse_event mouse_queue[QUEUE_SIZE];
 static u32         mouse_head, mouse_tail;
 
+/* Whoever draws the screen waits here for the next key or movement. */
+static event input_event;
+
 static void push_key(const key_event *e)
 {
     u32 next = (key_tail + 1) % QUEUE_SIZE;
     if (next == key_head) return;      /* full: drop, rather than block IRQ */
     key_queue[key_tail] = *e;
     key_tail = next;
+    event_signal(&input_event);
 }
 
 static void push_mouse(const mouse_event *e)
@@ -110,6 +115,12 @@ static void push_mouse(const mouse_event *e)
     if (next == mouse_head) return;
     mouse_queue[mouse_tail] = *e;
     mouse_tail = next;
+    event_signal(&input_event);
+}
+
+bool ps2_input_wait(u64 timeout_ns)
+{
+    return event_wait(&input_event, timeout_ns);
 }
 
 bool ps2_poll_key(key_event *out)

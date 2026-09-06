@@ -13,7 +13,7 @@ void car25519(gf o)
         o[i] += (1LL << 16);
         i64 c = o[i] >> 16;
         o[(i + 1) * (i < 15)] += c - 1 + 37 * (c - 1) * (i == 15);
-        o[i] -= c << 16;
+        o[i] -= c * (1LL << 16);                 /* c may be negative: no shift of it */
     }
 }
 

@@ -37,6 +37,14 @@ typedef struct {
 
 void        nic_register(const nic_ops *ops);
 bool        nic_up(void);
+
+/* The card's interrupt handler says something arrived; the network
+ * thread waits here between looks at the wire, up to the time given,
+ * and a card without an interrupt is looked at when that time is up. */
+void        nic_signal(void);
+bool        nic_wait(u64 timeout_ns);
+bool        nic_interrupts(void);           /* whether the card raises them */
+void        nic_note_interrupts(bool yes);  /* the driver says so once it knows */
 const char *nic_name(void);
 const u8   *nic_mac(void);
 bool        nic_send(const void *frame, u32 len);

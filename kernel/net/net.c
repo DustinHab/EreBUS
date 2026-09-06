@@ -379,7 +379,10 @@ static void net_pump(void)
             continue;
         u8 ihl = (u8)(p[0] & 0x0F) * 4;
         u16 tot = ((u16)p[2] << 8) | p[3];
-        if (ihl < 20 || tot > plen) continue;
+        /* A total length shorter than the header would make the payload
+         * length wrap: such a packet is refused whole (the fuzzer found
+         * an echo request built that way copied past the frame). */
+        if (ihl < 20 || tot < ihl || tot > plen) continue;
         u8 proto = p[9];
         const u8 *inner = p + ihl;
         u32 ilen = tot - ihl;
@@ -426,11 +429,12 @@ static void net_pump(void)
     }
 }
 
-/* A short breath: look at the wire, let everyone else run. */
+/* A short breath: look at the wire, then wait for the card's next word
+ * -- or a tick, whichever comes first, so the timers above still run. */
 void net_breathe(void)
 {
     net_pump();
-    sched_yield();
+    nic_wait(10000000ULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -476,7 +480,7 @@ static bool mac_for(const u8 *dst, u8 out_mac[6])
                     for (u32 j = 0; j < 6; j++) out_mac[j] = neigh[i].mac[j];
                     return true;
                 }
-            sched_yield();
+            nic_wait(10000000ULL);
         }
     }
     return false;

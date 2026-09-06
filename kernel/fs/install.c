@@ -33,7 +33,7 @@ static u32 wait_key(u64 limit_ns)
             if (k.codepoint) return k.codepoint;
         }
         if (time_ns() - since > limit_ns) return 0;
-        sched_yield();
+        ps2_input_wait(10000000ULL);
     }
 }
 

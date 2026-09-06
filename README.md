@@ -63,7 +63,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - Font: GNU Unifont 8x16, embedded at build time.
 - Serial as first output; it costs 20 ms per log line at 115200 baud (`make shot SERIAL=null` to compare).
 - No SSE/MMX in the kernel; the vector unit is enabled for user programs only and saved per process.
-- 8259 before APIC: works without ACPI parsing.
+- The 8259 pair for the legacy lines, the local APIC for message-signalled interrupts: no ACPI parsing needed for either.
 - Interrupt stubs as a 16-byte table; `tools/check-isr.sh` verifies the layout.
 - No task bar, no window frames; every visible control is clickable; keyboard is a shortcut.
 - Names live on the reference, not the object.
@@ -79,8 +79,9 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Direct map, per-section page tables, NX, CR0.WP, SMEP, SMAP, UMIP, W^X (`make wx`)
 - [x] PAT: framebuffer mapped write-combining
 - [x] Bitmap frame allocator, next-fit heap, guard pages under thread stacks
-- [x] Preemptive round-robin threads, per-thread CPU accounting
-- [x] Ring-3 processes, own address spaces, 8 system calls, registers zeroed on return to user
+- [x] Preemptive round-robin threads, per-thread CPU accounting; sleeping with a deadline, events signalled from interrupt handlers
+- [x] Local APIC on; MSI and MSI-X for pci devices (ahci, xhci, e1000e, igb, the I2xx cards), the legacy line through the 8259 where a device has none; the disk, usb and network threads sleep on their interrupts; the processor halts when nothing happens (`load`)
+- [x] Ring-3 processes, own address spaces, 8 system calls, registers zeroed on return to user; `yield` rests a program until the next tick
 - [x] Processes reaped by the next thread through the scheduler
 - [x] Kernel version from `git describe` (build/version.c), shown in the boot log and the desktop
 
@@ -91,6 +92,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Cycle collector (`obj_collect`), runs in the snapshot's quiet moment (`make sweep`)
 - [x] Snapshots: two alternating slots, generation + checksum, 16 generations kept, time travel in the shell
 - [x] Blob log for objects from 4 KiB up, content-addressed (SHA-256), compaction
+- [x] Formats: every disk and wire format with its number and the oldest still read in `kernel/include/eb/formats.h`; `formats` in the terminal; the store's first sector carries format and identity (MANUAL.md 17)
 - [x] Journal as a read-only text object
 - [x] Settings as a text object, applied as typed (`theme`, `save`, `clock`, `pointer`, `hints`, `slice`, `start`, `name`, `address`, `peer` by address or node name, `work`, `keys`, `door |`, `wlan |`, `update |`)
 - [x] Activity table rewritten once a second
@@ -106,7 +108,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Add palette: text, bytes, list, picture, task, standard programs
 - [x] Bin for let-go references; `turn off`; `restart`
 - [x] German keyboard layout (`keys | german`)
-- [x] Terminal grammar: verb, name, `to`/`at`/`with`; words: `help look where go back home find read write make copy rename let go run give end scan found point at send ask say build link compile assemble install take in write out disks settle yes networks join leave wifi address receive restart version nodes allow forget trust vouch renew update`
+- [x] Terminal grammar: verb, name, `to`/`at`/`with`; words: `help look where go back home find read write make copy rename let go run give end scan found point at send ask say build link compile assemble install take in write out disks settle yes networks join leave wifi address receive restart version load formats nodes allow forget trust vouch unvouch renew update`
 - [x] Boot-time offer: with no store and a keyboard present, the start-up lists the disks and takes a number, then `yes`; escape or 2 minutes of silence continues without a store
 
 ### Programs and languages
@@ -120,11 +122,12 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] `install this kernel`: loader and kernel the machine booted from onto the boot disk; store untouched
 - [x] `receive <n> bytes as <name>`: a file in through the door as raw bytes
 - [x] Self-build: `tools/selfbuild.sh` (host, cchost), `tools/selfkernel.sh` (on the machine, through the door, under KVM: 82 objects in ~30 s)
-- [x] Fuzzing of compiler, assembler, linker (`tools/fuzz/run.sh`)
+- [x] Fuzzing of compiler, assembler, linker, certificate checker, page renderer, the wire, the pipe and the tls client (`tools/fuzz/run.sh`)
 
 ### Storage
 - [x] PCI enumeration; AHCI, up to 8 disks; roles: boot disk (port 0), store, exchange disk
-- [x] USB disks through xhci (bulk-only transport, scsi, 64 KiB per transfer) in the same block layer; a stick made with `tools/mkusb.sh` boots the machine and carries its store; otherwise a usb disk is the exchange disk; `settle on disk N` works on one
+- [x] USB disks through xhci (bulk-only transport, scsi, 64 KiB per transfer, blocks of 512 to 4096 bytes) in the same block layer; a stick made with `tools/mkusb.sh` boots the machine and carries its store; otherwise a usb disk is the exchange disk; `settle on disk N` works on one
+- [x] The store's stick unplugged: noticed, changes wait in memory, the stick is taken back by its identity and saving resumes; another store plugged in meanwhile is refused
 - [x] GPT read/write; store partition type `E2EB0500-5354-4F52-4552-454255530001`
 - [x] FAT32: read, write, directories, rename, format; boot volume found via GPT EFI partition, MBR, or LBA 0
 - [x] Exchange disk: `take in`, `write out` (root directory, 8.3 names, 64 KiB per file)
@@ -194,6 +197,8 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/relaytest.sh, agenttest.sh, persisttest.sh | capability passing between programs, rights following the reference, snapshots (also `make relay`, `make agent`, `make persist`) |
 | tools/sticktest.sh | one disk carries loader, kernel and store |
 | tools/usbstick.sh | the same stick as a usb disk, the only disk: booted from and its store found through xhci |
+| tools/usbunplug.sh | the store's stick unplugged while running: noticed, changes wait, another store refused, the stick taken back by its identity, the waiting changes written and restored on the next boot |
+| tools/irqtest.sh | the devices interrupt instead of being polled: e1000 on its legacy line, ahci and xhci by message, e1000e and igb by message, rtl8139 on its line, each getting its lease; keys through the usb keyboard; the processor idle 90% or more over a quiet spell (`load`) |
 | tools/foreigndisk.sh | a foreign disk stays byte-identical |
 | tools/settletest.sh, settlefree.sh | settling whole / in free space |
 | tools/installtest.sh | boot-time offer on a non-empty disk |
@@ -202,11 +207,11 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/wifitest.sh | WPA2 against the virtual access point |
 | tools/selfkernel.sh (KVM) | kernel built on the machine from sources sent through the door |
 | tools/selfbuild.sh, cctrial.sh | kernel built by the machine's compiler on the host |
-| tools/fuzz/run.sh | fuzzing under the sanitizers: the language tools, the certificate checker, the page renderer (`sh tools/fuzz/run.sh <seconds> [lang pki html]`) |
+| tools/fuzz/run.sh | fuzzing under the sanitizers: the language tools, the certificate checker, the page renderer, the wire (frames, the tcp and http client, the door with ssh, the air), the pipe's datagrams sealed and plain, the tls client (`sh tools/fuzz/run.sh <seconds> [lang pki html net pipe tls]`) |
 
-`build/battery.sh` builds once, then runs 28 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`; disk images on `/mnt/c` stall under parallel writes), then renew, update-test and tlstest alone (renew rebuilds the kernel twice; the other two need qemu's one forwarded connection per boot). Logs, screenshots and QEMU stderr come back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (default 480); a failed or stopped test runs once more and is marked "2nd try". Every test sources `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps, `BUILD` points at the test's directory. The summary prints seconds per test. `build/kvm-battery.sh` adds selfkernel.
+`build/battery.sh` builds once, then runs 31 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`; disk images on `/mnt/c` stall under parallel writes), then renew, update-test and tlstest alone (renew rebuilds the kernel twice; the other two run a server on the host). Logs, screenshots and QEMU stderr come back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (default 480); a failed or stopped test runs once more and is marked "2nd try". Every test sources `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps, `BUILD` points at the test's directory. The summary prints seconds per test. `build/kvm-battery.sh` adds selfkernel.
 
-Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes sequential under KVM, 22 minutes under TCG). The longest is pipe-code, which twice waits out a compiled task's deadline.
+Measured on 32 cores under KVM: about 10 minutes for all 34 tests, of which the parallel part is 5 (before the lanes: 38 minutes sequential under KVM, 22 minutes under TCG). The longest is pipe-code, which twice waits out a compiled task's deadline.
 
 ## Using the ISO
 
@@ -221,7 +226,9 @@ Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes
 
 ## Known limits
 
-- USB disks are read and written 64 KiB at a time through the xhci driver, polled; a disk with sectors other than 512 bytes is not driven.
+- USB disks are read and written 64 KiB at a time; a disk with 1024- to 4096-byte blocks is counted in 512-byte sectors, so a partition table another system wrote on such a disk in its own block size is not read.
+- A store's stick unplugged is awaited by its identity; the changes made meanwhile wait in memory and are lost if the machine is turned off before it is back.
+- A pci device with neither msi nor a legacy line the firmware routed is polled, every 10 ms for the network card and every 4 ms for the usb controller; the disk controller then waits by looking.
 - No wireless chip driver.
 - TLS: thirty-four roots from the Mozilla bundle and the intermediates of github.com and its release cdn are built in; a host under another root is unverified unless its authority is written into the settings. No revocation checking, no name constraints. The self-update does not depend on any of it (the package is ed25519-signed).
 - Self-update: the release private key, if lost, means deployed machines can no longer be sent a signed update.
@@ -250,6 +257,7 @@ Measured on 32 cores under KVM: about 280 s for all 27 tests (before: 38 minutes
 - EreBUS 0.8.5: self-update fixes so it works against a real release host -- the fetch carries the long signed redirect URLs a CDN returns (the request and Location buffers were too small and truncated the token), and no further check runs once an install is pending, so a machine updates and restarts exactly once. Verified end to end against the GitHub release.
 - EreBUS 0.8.6: `update check` answers in the terminal. The check runs in the background (the download can take a while), so its outcome -- already current, a newer version installing, or the source unreachable -- is now printed back into the terminal where it was typed, not only into the log.
 - EreBUS 0.8.9: the web verified -- thirty-four roots from the Mozilla bundle join the built-in authorities, with P-384 and RSA-4096 under SHA-256/384/512, so Wikipedia, Google, Amazon, Microsoft, heise and GitHub verify from the machine; `split` works for compiled tasks and under a quorum; `unvouch` withdraws a vouch and the nodes table says how each key came to be there; the self-update reads a one-line `version` file first; usb disks are driven, and a stick made with `tools/mkusb.sh` carries the store.
+- EreBUS 0.9.0: the machine at rest -- the network card, the usb controller and the disk controller interrupt (msi, msi-x, or their legacy line through the 8259, the local APIC now on) and their threads sleep on it, `yield` rests a program until the next tick, the processor halts when nothing happens and `load` says how much of the time; the parsers on the wire fuzzed (frames, the tcp and http client, the door with ssh, the air, the pipe's datagrams, the tls client) with three overruns closed; the store's stick can be unplugged and plugged back in, known by an identity the store now carries, changes waiting meanwhile and another store refused; usb disks with bigger blocks; every disk and wire format has its number in one place, `formats` prints them, and the manual states the promise.
 - EreBUS 0.8.8: a round of fixes across the system. Fetching was 80 times slower than the link: the tcp window was a fixed 32 KiB regardless of the room left in the receive ring, so the peer sent what could not be kept, every cut costing its retransmit timeout (a 2.8 MB package took 93 s; it takes 1.2 s now) -- the window is the room now, a window update goes out when room opens, a fetch stops at Content-Length instead of waiting for the close, and the card's receive ring is four times larger; the scheduler no longer lets the idle thread keep the processor for a whole slice while another thread is ready; a pipe handshake in progress is no longer thrown away when a second address is knocked on (a task across two machines restarted both against each other); tcp no longer ends a stream short when the peer's fin arrives ahead of lost data; dns names ending in a compression pointer; a certificate extension with a malformed boolean read an uninitialized element (found by the new fuzzer); a full-length version name overflowed the update report; bundle and fat32 length checks that could wrap or run on a hostile disk; the fuzzers cover the certificate checker and the page renderer now.
 - EreBUS 0.8.7: the tls client verifies the server. The certificate chain is walked to a trusted authority (ECDSA P-256 and RSA signatures, host names, dates) and the server's signature over the handshake is checked against the leaf's key; github.com and the release cdn verify against authorities built into the kernel, `authority |` adds one of your own, `tls | strict` refuses what does not verify. The browser marks a page `verified` or `sealed, unverified`; the log and journal say why.
 

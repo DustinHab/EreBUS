@@ -74,6 +74,7 @@ KERN_C   := kernel/main.c \
             kernel/hw/serial.c \
             kernel/hw/cpu.c \
             kernel/hw/pic.c \
+            kernel/hw/apic.c \
             kernel/hw/time.c \
             kernel/gfx/fb.c \
             kernel/gfx/shell.c \

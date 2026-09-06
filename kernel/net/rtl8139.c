@@ -96,6 +96,19 @@ static const nic_ops r8139_ops = {
     .recv = r8139_recv,
 };
 
+/* Received, receive error, sent, send error, the buffer overrun: all
+ * acknowledged by writing them back, then the thread looks. */
+#define ISR_WANTED 0x005Fu
+
+static void on_interrupt(trap_frame *f)
+{
+    (void)f;
+    u16 isr = inw((u16)(io + R_ISR));
+    if (!isr) return;
+    outw((u16)(io + R_ISR), isr);
+    nic_signal();
+}
+
 bool rtl8139_init(bool need_link)
 {
     /* As with its bigger relative: the socket is not read here, so
@@ -141,7 +154,7 @@ bool rtl8139_init(bool need_link)
     }
 
     outl((u16)(io + R_RBSTART), (u32)rxp);
-    outw((u16)(io + R_IMR), 0);              /* polled, like the others */
+    outw((u16)(io + R_IMR), 0);
     outl((u16)(io + R_RCR), RCR_BITS);
     outb((u16)(io + R_CMD), CMD_RX_EN | CMD_TX_EN);
 
@@ -149,6 +162,16 @@ bool rtl8139_init(bool need_link)
             "%02x:%02x:%02x:%02x:%02x:%02x\n",
             dev->bus, dev->device, dev->function,
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    pci_irq irq = pci_attach_irq(dev, on_interrupt, false);
+    if (irq.kind != PCI_IRQ_NONE) {
+        outw((u16)(io + R_ISR), 0xFFFF);
+        outw((u16)(io + R_IMR), ISR_WANTED);
+        nic_note_interrupts(true);
+        kprintf("net:  rtl8139: interrupts by %s %u\n", pci_irq_words(irq.kind), irq.number);
+    } else {
+        kprintf("net:  rtl8139: no interrupt to attach; polled\n");
+    }
 
     nic_register(&r8139_ops);
     return true;

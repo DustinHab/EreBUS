@@ -68,6 +68,10 @@ struct thread {
     struct thread *next;       /* run queue, circular */
     struct thread *prev;
     struct thread *wait_next;  /* whatever wait list holds us */
+
+    /* Asleep until this moment (0: not sleeping), on the sleepers list. */
+    u64            wake_at;
+    struct thread *sleep_next;
 };
 
 extern void switch_stack(u64 *save_rsp, u64 load_rsp);
@@ -355,7 +359,138 @@ void sched_block(void)
      * list, so a wakeup cannot slip between the two. */
     current->state = THREAD_BLOCKED;
     queue_remove(current);
+
+    /* Nobody else to run: early in the start-up, before the other
+     * threads exist. Then the wait happens right here, halted with
+     * interrupts on until the wakeup -- which puts us back on the queue
+     * as ready -- and the thread carries on as the running one. A
+     * thread that becomes ready meanwhile is given the processor, and
+     * the wait goes on when it is done. */
+    if (!run_queue) {
+        thread *me = current;
+        for (;;) {
+            if (me->state != THREAD_BLOCKED) break;
+            if (run_queue) { switch_to_next(); continue; }
+            __asm__ volatile ("sti; hlt; cli" ::: "memory");
+        }
+        me->state = THREAD_RUNNING;
+        return;
+    }
     switch_to_next();
+}
+
+/* ------------------------------------------------------------------ */
+/* Sleeping and events                                                 */
+/* ------------------------------------------------------------------ */
+
+/* Threads with a deadline, unordered: there are a handful at most, and
+ * the tick walks them all. */
+static thread *sleepers;
+
+/* Interrupts off. */
+static void sleepers_add(thread *t, u64 wake_at)
+{
+    t->wake_at = wake_at;
+    t->sleep_next = sleepers;
+    sleepers = t;
+}
+
+/* Interrupts off. Absent is fine: whoever woke the thread first may
+ * have taken it off already. */
+static void sleepers_remove(thread *t)
+{
+    thread **p = &sleepers;
+    while (*p) {
+        if (*p == t) { *p = t->sleep_next; break; }
+        p = &(*p)->sleep_next;
+    }
+    t->sleep_next = NULL;
+    t->wake_at = 0;
+}
+
+/* Called from the tick with interrupts off: wakes what is due. */
+static void sleepers_tick(void)
+{
+    if (!sleepers) return;
+    u64 now = time_ns();
+    thread **p = &sleepers;
+    while (*p) {
+        thread *t = *p;
+        if (t->wake_at && t->wake_at <= now) {
+            *p = t->sleep_next;
+            t->sleep_next = NULL;
+            t->wake_at = 0;
+            sched_wake(t);
+        } else {
+            p = &t->sleep_next;
+        }
+    }
+}
+
+void sched_sleep_ns(u64 ns)
+{
+    reap_finished();
+    u64 flags = irq_save();
+    sleepers_add(current, time_ns() + ns);
+    sched_block();
+    sleepers_remove(current);
+    irq_restore(flags);
+}
+
+void event_signal(event *e)
+{
+    if (!e) return;
+    u64 flags = irq_save();
+    e->pending = 1;
+    thread *woken[EVENT_WAITERS];
+    u32 n = e->nwaiters;
+    for (u32 i = 0; i < n; i++) woken[i] = e->waiters[i];
+    e->nwaiters = 0;
+    for (u32 i = 0; i < n; i++) sched_wake(woken[i]);
+    irq_restore(flags);
+}
+
+/* Interrupts off. */
+static void event_forget(event *e, thread *t)
+{
+    for (u32 i = 0; i < e->nwaiters; i++) {
+        if (e->waiters[i] != t) continue;
+        for (u32 k = i + 1; k < e->nwaiters; k++) e->waiters[k - 1] = e->waiters[k];
+        e->nwaiters--;
+        return;
+    }
+}
+
+bool event_wait(event *e, u64 timeout_ns)
+{
+    if (!e) { sched_sleep_ns(timeout_ns); return false; }
+    reap_finished();
+
+    u64 flags = irq_save();
+    if (e->pending) {
+        e->pending = 0;
+        irq_restore(flags);
+        return true;
+    }
+    if (e->nwaiters >= EVENT_WAITERS) {
+        /* More waiters than the event has room for: not a state the
+         * kernel gets into on purpose, so the wait becomes a sleep. */
+        irq_restore(flags);
+        sched_sleep_ns(timeout_ns);
+        return false;
+    }
+    e->waiters[e->nwaiters++] = current;
+    if (timeout_ns) sleepers_add(current, time_ns() + timeout_ns);
+    sched_block();
+
+    /* Awake: by the signal, by the deadline, or to be ended. Off both
+     * lists either way -- whichever woke us left the other one. */
+    sleepers_remove(current);
+    event_forget(e, current);
+    bool signalled = e->pending != 0;
+    e->pending = 0;
+    irq_restore(flags);
+    return signalled;
 }
 
 void sched_wake(thread *t)
@@ -366,6 +501,9 @@ void sched_wake(thread *t)
     u64 flags = irq_save();
     t->state = THREAD_READY;
     queue_add(t);
+    /* The idle thread holds nothing anyone wants: when it is the one
+     * running, the woken thread gets the processor on the way out. */
+    if (boot_idle && current == boot_thread) resched_due = true;
     irq_restore(flags);
 }
 
@@ -389,6 +527,7 @@ bool thread_condemned(const thread *t)
 void sched_tick(void)
 {
     if (!current) return;               /* timer runs before we do */
+    sleepers_tick();
     if (slice_left > 0) slice_left--;
     if (slice_left == 0) resched_due = true;
 }

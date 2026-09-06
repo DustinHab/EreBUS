@@ -39,6 +39,7 @@
 #include <eb/string.h>
 #include <eb/syscall.h>
 #include <eb/pic.h>
+#include <eb/apic.h>
 #include <eb/pmm.h>
 #include <eb/ps2.h>
 #include <eb/xhci.h>
@@ -786,15 +787,13 @@ static void ensure_language(object *root)
     ensure_page(root, "the compiler", compiler_text, sizeof(compiler_text), 4000);
 }
 
-/* Rewrites the activity table once a second. Between rewrites it only
- * yields; the table is not worth waking anyone for. */
+/* Rewrites the activity table once a second and sleeps between. */
 static void activity_thread(void *arg)
 {
     (void)arg;
     for (;;) {
         activity_update();
-        u64 since = time_ns();
-        while (time_ns() - since < 1000000000ULL) sched_yield();
+        sched_sleep_ns(1000000000ULL);
     }
 }
 
@@ -930,6 +929,12 @@ static void persist_thread(void *arg)
                 written = seen;
                 kprintf("snap: generation %llu written, %u objects, %llu bytes\n",
                         snap_generation(), snap_object_count(), snap_bytes());
+            } else if (blk_store_lost()) {
+                /* The store's disk is unplugged: the changes wait in
+                 * memory for it, and are written the moment it is back. */
+                static bool said;
+                if (!said) { kprintf("snap: no store to write to; the changes wait for the disk\n"); said = true; }
+                quiet_since = time_ns();
             } else {
                 kprintf("snap: could not write the graph\n");
                 written = seen;      /* do not spin on a failing disk */
@@ -948,7 +953,9 @@ static void persist_thread(void *arg)
                              : "unreachable objects were collected");
             }
         }
-        sched_yield();
+        /* The quiet time is measured in seconds; a tenth of one is a
+         * fine enough look. */
+        sched_sleep_ns(100000000ULL);
     }
 }
 
@@ -1336,6 +1343,12 @@ void kmain(eb_boot_info *bi)
     kprintf("pmm:  reclaimed ");
     print_size((pmm_free_frames() - before_reclaim) * PAGE_SIZE);
     kprintf(" of loader page tables\n");
+
+    /* The processor's own interrupt controller, for the interrupts pci
+     * devices send as messages; the legacy pair keeps its lines. Only
+     * now, with page tables to map its window. */
+    if (!lapic_init())
+        kprintf("apic: no local controller; devices use their legacy lines or are polled\n");
 
     /* The screen gets its back buffer here, at the first moment there is
      * an allocator to ask -- not at the end of start-up where it used to

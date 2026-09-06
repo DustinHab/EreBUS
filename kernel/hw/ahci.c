@@ -1,6 +1,8 @@
 /*
- * ahci.c -- the block layer: SATA disks through AHCI, polled (works in early start-up and fault handlers),
- *           and disks from other buses (usb, through xhci.c) registered with their own sector movers.
+ * ahci.c -- the block layer: SATA disks through AHCI, and disks from other buses (usb, through xhci.c)
+ *           registered with their own sector movers.
+ * - a command is waited for on the controller's interrupt (msi or the legacy line); polled where there is
+ *   none, or while interrupts are off (early start-up, fault handlers)
  * - up to 8 disks; roles: boot disk (port 0, or a usb stick with a store), store, exchange disk
  * - store: GPT partition of the store type on the boot disk or the next, else a marked or blank next disk
  * - foreign disks are never written
@@ -13,6 +15,11 @@
 #include <eb/io.h>
 #include <eb/fmt.h>
 #include <eb/string.h>
+#include <eb/thread.h>
+#include <eb/time.h>
+#include <eb/formats.h>
+#include <eb/journal.h>
+#include <eb/crypto.h>
 
 /* --- register layout ------------------------------------------------ */
 
@@ -76,6 +83,14 @@ _Static_assert(sizeof(fis_h2d) == 20, "host to device FIS must be 20 bytes");
 #define TFD_DRQ (1u << 3)
 #define TFD_ERR (1u << 0)
 
+#define GHC_IE  (1u << 1)
+#define IS_TFES (1u << 30)
+/* What a port may interrupt for: a register or setup FIS arrived, a
+ * dma setup, a set device bits FIS; the faults: interface fatal, host
+ * bus data and fatal, task file error. */
+#define PORT_IE_WANTED ((1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | \
+                        (1u << 27) | (1u << 28) | (1u << 29) | (1u << 30))
+
 #define ATA_IDENTIFY  0xEC
 #define ATA_READ_DMA  0x25   /* READ DMA EXT, 48-bit */
 #define ATA_WRITE_DMA 0x35   /* WRITE DMA EXT, 48-bit */
@@ -110,12 +125,24 @@ static ahci_disk disks[DISK_MAX];
 static u32       ndisks;
 static ahci_disk *boot_p, *aux_p;
 
+/* The controller's interrupt: whoever waits on a command sleeps here.
+ * The handler clears each port's status and keeps what it saw, so the
+ * waiter still learns of a task file error. */
+static event disk_event;
+static bool  irq_driven;
+static volatile u32 is_seen[32];
+
 /* Where the store lies: on which disk, from which sector, how far. A
  * store is a partition of the store's kind on any disk -- the boot
  * disk included -- or a whole disk that is ours or blank. */
 static ahci_disk *store_p;
 static u64 store_base, store_span;
 static bool present;
+
+/* The store's identity, from its first sector; and, while its disk is
+ * unplugged, the identity the disk has to carry to be taken back. */
+static u64 store_id;
+static u64 lost_id;
 
 /* --- helpers -------------------------------------------------------- */
 
@@ -142,6 +169,44 @@ static void port_start(ahci_disk *d)
     d->port->cmd |= PORT_CMD_ST;
 }
 
+static void on_interrupt(trap_frame *f)
+{
+    (void)f;
+    u32 is = hba->is;
+    if (!is) return;                               /* somebody else's, on a shared line */
+    for (u32 i = 0; i < 32; i++) {
+        if (!(is & (1u << i))) continue;
+        u32 pis = hba->ports[i].is;
+        is_seen[i] |= pis;
+        hba->ports[i].is = pis;
+    }
+    hba->is = is;
+    event_signal(&disk_event);
+}
+
+/* Waits for slot zero of this port to finish: on the interrupt when
+ * there is one and interrupts are on, else by looking. False on a
+ * task file error or when the command never finishes. */
+static bool wait_slot(ahci_disk *d)
+{
+    if (irq_driven && interrupts_enabled()) {
+        u64 since = time_ns();
+        for (;;) {
+            if ((d->port->ci & 1) == 0) break;
+            if ((is_seen[d->index] | d->port->is) & IS_TFES) return false;
+            if (time_ns() - since > 10000000000ULL) break;
+            event_wait(&disk_event, 20000000ULL);
+        }
+    } else {
+        for (u32 i = 0; i < 1000000; i++) {
+            if ((d->port->ci & 1) == 0) break;
+            if (d->port->is & IS_TFES) return false;
+        }
+    }
+    if (d->port->ci & 1) return false;
+    return true;
+}
+
 /* Builds one command and waits for it. Returns false on any error the
  * controller reports, rather than leaving the caller to guess from the
  * data. */
@@ -160,6 +225,7 @@ static bool run_command(ahci_disk *d, u8 ata_command, u64 lba,
 
     d->port->is = (u32)-1;          /* clear stale status */
     d->port->serr = d->port->serr;
+    if (d->index < 32) is_seen[d->index] = 0;
 
     cmd_header *h = &d->cmd_list[0];
     h->flags  = (u8)((sizeof(fis_h2d) / 4) & 0x1F);
@@ -194,11 +260,7 @@ static bool run_command(ahci_disk *d, u8 ata_command, u64 lba,
 
     d->port->ci = 1;                /* slot zero, and we only use slot zero */
 
-    for (u32 i = 0; i < 1000000; i++) {
-        if ((d->port->ci & 1) == 0) break;
-        if (d->port->is & (1u << 30)) return false; /* task file error */
-    }
-    if (d->port->ci & 1) return false;              /* never finished */
+    if (!wait_slot(d)) return false;                /* task file error, or never finished */
     if (d->port->tfd & TFD_ERR) return false;
 
     return true;
@@ -254,6 +316,8 @@ static bool disk_up(ahci_disk *d, hba_port *p, u32 index)
     p->fbu  = (u32)(d->fp >> 32);
     for (u32 i = 0; i < 1024; i++) ((u8 *)d->cmd_list)[i] = 0;
     for (u32 i = 0; i < 256; i++) ((u8 *)d->fis_area)[i] = 0;
+    p->is = (u32)-1;
+    p->ie = irq_driven ? PORT_IE_WANTED : 0;
     port_start(d);
 
     if (!run_command(d, ATA_IDENTIFY, 0, 0, d->sp, 512, false))
@@ -339,8 +403,46 @@ static bool disk_write(ahci_disk *d, u64 lba, u32 count, const void *src)
  * found, read and written by nobody here, and the machine runs
  * without a memory and says so. On a real machine this is the
  * difference between a system and a disk wiper. */
-#define STORE_MARK "EREBUS STORE"
+#define STORE_MARK FORMAT_STORE_MARK
 #define STORE_MIN_SECTORS 40960u      /* 20 MiB: the ring, and a log worth having */
+
+/* The store's first sector: the mark, the format of the store, an
+ * identity that tells it from every other store, and when that was
+ * given. A store older kernels made carries the mark alone (format 0)
+ * and is given the rest when first met. */
+typedef struct {
+    char mark[16];
+    u32  format;
+    u32  reserved;
+    u64  id;
+    u64  made;
+} store_head;
+
+static bool read_head(ahci_disk *d, u64 base, store_head *out)
+{
+    static u8 sector[BLK_SECTOR_SIZE];
+    if (!disk_read(d, base, 1, sector)) return false;
+    if (memcmp(sector, STORE_MARK, sizeof(STORE_MARK) - 1) != 0) return false;
+    memcpy(out, sector, sizeof(*out));
+    return true;
+}
+
+static bool write_head(ahci_disk *d, u64 base, const store_head *h)
+{
+    static u8 sector[BLK_SECTOR_SIZE];
+    memset(sector, 0, BLK_SECTOR_SIZE);
+    memcpy(sector, h, sizeof(*h));
+    return disk_write(d, base, 1, sector);
+}
+
+static void fresh_head(store_head *h)
+{
+    memset(h, 0, sizeof(*h));
+    memcpy(h->mark, STORE_MARK, sizeof(STORE_MARK) - 1);
+    h->format = FORMAT_STORE;
+    do { rand_bytes((u8 *)&h->id, 8); } while (h->id == 0);
+    h->made = time_unix();
+}
 
 static u32 le32(const u8 *p) { return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24); }
 static u64 le64(const u8 *p) { return (u64)le32(p) | ((u64)le32(p + 4) << 32); }
@@ -398,7 +500,6 @@ static const char *where_of(const ahci_disk *d)
 
 static bool claim(ahci_disk *d, u64 base, u64 span, bool take_blank)
 {
-    static u8 sector[BLK_SECTOR_SIZE];
     static u8 probe[64 * BLK_SECTOR_SIZE];
     const char *where = where_of(d);
     const char *what = base ? "the partition" : "the disk";
@@ -407,9 +508,25 @@ static bool claim(ahci_disk *d, u64 base, u64 span, bool take_blank)
         kprintf("blk:  %s on %s is too small for a store\n", what, where);
         return false;
     }
-    if (!disk_read(d, base, 1, sector)) return false;
-    if (memcmp(sector, STORE_MARK, sizeof(STORE_MARK) - 1) == 0) {
-        kprintf("blk:  %s on %s carries the store mark; it is the store\n", what, where);
+    store_head h;
+    if (!disk_read(d, base, 1, probe)) return false;
+    if (read_head(d, base, &h)) {
+        if (h.format > FORMAT_STORE) {
+            kprintf("blk:  %s on %s carries a store of format %u, newer than this kernel's %u; "
+                    "it is left alone\n", what, where, h.format, FORMAT_STORE);
+            return false;
+        }
+        if (h.format == 0 || h.id == 0) {
+            /* an older kernel's store: given its identity now */
+            fresh_head(&h);
+            if (!write_head(d, base, &h)) return false;
+            kprintf("blk:  %s on %s carries the store mark; it is the store, and carries format %u "
+                    "and an identity from now on\n", what, where, FORMAT_STORE);
+        } else {
+            kprintf("blk:  %s on %s carries the store mark; it is the store\n", what, where);
+        }
+        store_id = h.id;
+        kprintf("blk:  the store speaks format %u, id %016llx\n", h.format ? h.format : FORMAT_STORE, h.id);
         return true;
     }
 
@@ -428,11 +545,12 @@ static bool claim(ahci_disk *d, u64 base, u64 span, bool take_blank)
         return false;
     }
 
-    memset(sector, 0, BLK_SECTOR_SIZE);
-    memcpy(sector, STORE_MARK, sizeof(STORE_MARK) - 1);
-    if (!disk_write(d, base, 1, sector)) return false;
+    fresh_head(&h);
+    if (!write_head(d, base, &h)) return false;
+    store_id = h.id;
     kprintf("blk:  a blank %s on %s; it is the store now and carries the store mark\n",
             base ? "partition" : "disk", where);
+    kprintf("blk:  the store speaks format %u, id %016llx\n", FORMAT_STORE, h.id);
     return true;
 }
 
@@ -459,6 +577,19 @@ bool blk_init(void)
     hba = (hba_mem *)phys_to_virt(abar);
 
     hba->ghc |= (1u << 31);          /* AHCI mode rather than legacy IDE */
+
+    /* The interrupt, one for the whole controller: a message when it
+     * can send one, else the pin's line; without either, commands are
+     * waited for by looking. */
+    pci_irq irq = pci_attach_irq(dev, on_interrupt, false);
+    if (irq.kind != PCI_IRQ_NONE) {
+        hba->is = hba->is;
+        hba->ghc |= GHC_IE;
+        irq_driven = true;
+        kprintf("blk:  ahci interrupts by %s %u\n", pci_irq_words(irq.kind), irq.number);
+    } else {
+        kprintf("blk:  ahci without an interrupt to attach; polled\n");
+    }
 
     /* Every plain disk on the bus, brought up and numbered in the
      * order of its port. */
@@ -545,10 +676,20 @@ bool blk_adopt(u32 which, u64 first, u64 count)
 
 i32 blk_add(const char *model, u64 sectors, blk_io io, void *ctx)
 {
-    if (ndisks >= DISK_MAX || !io || sectors == 0) return -1;
-    ahci_disk *d = &disks[ndisks];
+    if (!io || sectors == 0) return -1;
+
+    /* A row: a fresh one, or the row of a usb disk that left, so a
+     * disk plugged and unplugged many times does not use the table up. */
+    ahci_disk *d = NULL;
+    for (u32 i = 0; i < ndisks && !d; i++)
+        if (disks[i].io && !disks[i].ready) d = &disks[i];
+    if (!d) {
+        if (ndisks >= DISK_MAX) return -1;
+        d = &disks[ndisks++];
+    }
+    i32 which = (i32)(d - disks);
     memset(d, 0, sizeof(*d));
-    d->index = 0x100 + ndisks;                  /* past any ahci port */
+    d->index = 0x100 + (u32)which;             /* past any ahci port */
     d->sectors = sectors;
     d->io = io;
     d->io_ctx = ctx;
@@ -556,19 +697,29 @@ i32 blk_add(const char *model, u64 sectors, blk_io io, void *ctx)
     while (model && model[n] && n < 40) { d->model[n] = model[n]; n++; }
     d->model[n] = 0;
     d->ready = true;
-    i32 which = (i32)ndisks;
-    ndisks++;
 
     /* The roles, looked at anew. A stick carrying a store partition
      * on a machine with no store yet is the store -- and the disk the
      * machine booted from, since that is what such a stick is for.
-     * Beside a machine that has its store, such a stick keeps to
-     * itself: it is this system's own, not an exchange disk whose
-     * files would be taken in. A plain disk is the exchange disk
-     * when none stands on sata. */
+     * While the store's own disk is unplugged, only that disk is taken
+     * back: another store, or a blank one, would have the generations
+     * of this machine written over it. Beside a machine that has its
+     * store, such a stick keeps to itself: it is this system's own, not
+     * an exchange disk whose files would be taken in. A plain disk is
+     * the exchange disk when none stands on sata. */
     u64 first = 0, count = 0;
     bool ours = find_store_partition(d, &first, &count);
     if (!present && ours) {
+        if (lost_id) {
+            store_head h;
+            bool same = read_head(d, first, &h) && h.format != 0 && h.id == lost_id;
+            if (!same) {
+                kprintf("blk:  the usb disk carries a store, but not the one that was unplugged; "
+                        "it is left alone\n");
+                attention_note("blk", "a usb disk with another store was plugged in; the unplugged one is still expected");
+                return which;
+            }
+        }
         kprintf("blk:  a store partition on the usb disk, %llu sectors from sector %llu\n",
                 count, first);
         if (claim(d, first, count, true)) {
@@ -577,6 +728,11 @@ i32 blk_add(const char *model, u64 sectors, blk_io io, void *ctx)
             store_span = count;
             present = true;
             if (!boot_p) boot_p = d;
+            if (lost_id) {
+                lost_id = 0;
+                kprintf("blk:  the store's disk is back; saving resumes\n");
+                attention_note("blk", "the store's disk is back; saving resumes");
+            }
             return which;
         }
     }
@@ -591,12 +747,30 @@ i32 blk_add(const char *model, u64 sectors, blk_io io, void *ctx)
 
 bool blk_disk_on_usb(u32 which) { return which < ndisks && disks[which].io != NULL; }
 
+/* A usb disk left. The store's disk leaving leaves the machine without
+ * a store until that disk -- by its identity -- is back; the graph
+ * stays in memory and is written then. */
 void blk_remove(i32 which)
 {
     if (which < 0 || (u32)which >= ndisks) return;
-    disks[which].ready = false;
-    if (aux_p == &disks[which]) aux_p = NULL;
+    ahci_disk *d = &disks[which];
+    d->ready = false;
+    if (aux_p == d) {
+        aux_p = NULL;
+        kprintf("blk:  the exchange disk on usb was unplugged\n");
+    }
+    if (boot_p == d) boot_p = NULL;
+    if (present && store_p == d) {
+        present = false;
+        store_p = NULL;
+        lost_id = store_id;
+        kprintf("blk:  the store's disk was unplugged; nothing is saved until it is back\n");
+        attention_note("blk", "the store's disk was unplugged; nothing is saved until it is back");
+    }
 }
+
+u64  blk_store_id(void)     { return present ? store_id : 0; }
+bool blk_store_lost(void)   { return lost_id != 0; }
 
 const char *blk_disk_where(u32 which)
 {

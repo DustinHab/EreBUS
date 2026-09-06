@@ -82,5 +82,9 @@ const char *blk_disk_where(u32 which);
 /* Whether the store lies on a usb disk; whether a disk is one. */
 bool blk_store_on_usb(void);
 bool blk_disk_on_usb(u32 which);
+/* The store's identity from its first sector (0 without a store), and
+ * whether the store's disk is unplugged and awaited. */
+u64  blk_store_id(void);
+bool blk_store_lost(void);
 
 #endif /* EB_BLK_H */

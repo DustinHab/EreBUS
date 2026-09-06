@@ -16,6 +16,7 @@
 #include <eb/string.h>
 #include <eb/fmt.h>
 #include <eb/time.h>
+#include <eb/formats.h>
 
 extern const char erebus_version[];
 
@@ -116,7 +117,7 @@ static u32 join(char *out, u32 max, const char *base, const char *tail)
  *   kernel.elf        (the rest)
  * The signature covers the version together with the kernel, so neither
  * a forged kernel nor a lied-about version passes. */
-#define PKG_MAGIC   "EBUPDATE"
+#define PKG_MAGIC   FORMAT_PACKAGE_MAGIC
 #define PKG_MAGIC_N 8
 #define PKG_SIG_AT  8
 #define PKG_SIGNED  72          /* version+kernel begin here; the signature covers from here */

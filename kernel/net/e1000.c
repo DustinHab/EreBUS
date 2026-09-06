@@ -1,6 +1,6 @@
 /*
  * e1000.c -- Intel cabled cards with legacy descriptors: 8254x, the PCIe parts, chipset-integrated ones.
- * - two descriptor rings, polled by the network thread; no interrupts
+ * - two descriptor rings, read by the network thread; the card's interrupt (msi, or its legacy line) wakes it
  * - three families in one ID table: EEPROM read register differs, the chipset family is never reset
  * - PCIe family: GIO master disable before reset
  * - frames only; protocols live in net.c
@@ -21,6 +21,7 @@
 #define R_STATUS  0x0008
 #define R_EERD    0x0014
 #define R_ICR     0x00C0
+#define R_IMS     0x00D0
 #define R_IMC     0x00D8
 #define R_RCTL    0x0100
 #define R_TCTL    0x0400
@@ -48,6 +49,15 @@
 #define RCTL_SECRC   (1u << 26)     /* strip the crc */
 #define TCTL_EN      (1u << 1)
 #define TCTL_PSP     (1u << 3)
+
+/* What the card may interrupt for: a frame sent, the link changed, the
+ * ring running low, the ring overrun, a frame received. */
+#define IMS_TXDW     (1u << 0)
+#define IMS_LSC      (1u << 2)
+#define IMS_RXDMT0   (1u << 4)
+#define IMS_RXO      (1u << 6)
+#define IMS_RXT0     (1u << 7)
+#define IMS_WANTED   (IMS_TXDW | IMS_LSC | IMS_RXDMT0 | IMS_RXO | IMS_RXT0)
 
 #define TX_CMD_EOP   0x01
 #define TX_CMD_IFCS  0x02
@@ -187,8 +197,15 @@ static const known *look_up(u16 id)
 
 static void wait_ms(u64 ms)
 {
-    u64 since = time_ns();
-    while (time_ns() - since < ms * 1000000ULL) sched_yield();
+    sched_sleep_ns(ms * 1000000ULL);
+}
+
+/* Reading the cause register clears it and lowers the line; on a
+ * shared line a zero says the interrupt was somebody else's. */
+static void on_interrupt(trap_frame *f)
+{
+    (void)f;
+    if (rr(R_ICR)) nic_signal();
 }
 
 /* One word of the little serial memory, for cards whose address
@@ -356,6 +373,18 @@ static bool bring_up(const pci_device *dev, const known *k, bool need_link)
             k->name, dev->bus, dev->device, dev->function,
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
             (rr(R_STATUS) & STATUS_LU) ? "link up" : "no link");
+
+    /* The interrupt: a message when the card can send one, else the
+     * pin's line; without either the thread looks in on its own. */
+    pci_irq irq = pci_attach_irq(dev, on_interrupt, false);
+    if (irq.kind != PCI_IRQ_NONE) {
+        (void)rr(R_ICR);
+        wr(R_IMS, IMS_WANTED);
+        nic_note_interrupts(true);
+        kprintf("net:  %s: interrupts by %s %u\n", k->name, pci_irq_words(irq.kind), irq.number);
+    } else {
+        kprintf("net:  %s: no interrupt to attach; polled\n", k->name);
+    }
 
     up = true;
     nic_register(&e1000_ops);

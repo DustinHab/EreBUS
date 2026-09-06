@@ -97,6 +97,19 @@ static const nic_ops r8169_ops = {
     .recv = r8169_recv,
 };
 
+/* Received, receive error, sent, send error, descriptors run out, the
+ * link changed, the fifo overrun; acknowledged by writing them back. */
+#define ISR_WANTED 0x007Fu
+
+static void on_interrupt(trap_frame *f)
+{
+    (void)f;
+    u16 isr = inw((u16)(io + R_ISR));
+    if (!isr) return;
+    outw((u16)(io + R_ISR), isr);
+    nic_signal();
+}
+
 bool rtl8169_init(bool need_link)
 {
     /* This driver does not read the socket, so it cannot pass over a
@@ -171,7 +184,7 @@ bool rtl8169_init(bool need_link)
     outb((u16)(io + R_CMD), CMD_RX_EN | CMD_TX_EN);
     outl((u16)(io + R_TCR), (7u << 8) | (3u << 24));
     outl((u16)(io + R_RCR), 0x0F | (7u << 8) | (7u << 13));
-    outw((u16)(io + R_IMR), 0);              /* polled, like the others */
+    outw((u16)(io + R_IMR), 0);
 
     outb((u16)(io + R_9346CR), 0x00);        /* lock it again */
 
@@ -180,6 +193,16 @@ bool rtl8169_init(bool need_link)
             "hardware\n",
             dev->device_id, dev->bus, dev->device, dev->function,
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    pci_irq irq = pci_attach_irq(dev, on_interrupt, false);
+    if (irq.kind != PCI_IRQ_NONE) {
+        outw((u16)(io + R_ISR), 0xFFFF);
+        outw((u16)(io + R_IMR), ISR_WANTED);
+        nic_note_interrupts(true);
+        kprintf("net:  rtl8169: interrupts by %s %u\n", pci_irq_words(irq.kind), irq.number);
+    } else {
+        kprintf("net:  rtl8169: no interrupt to attach; polled\n");
+    }
 
     nic_register(&r8169_ops);
     return true;

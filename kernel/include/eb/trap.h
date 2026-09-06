@@ -20,10 +20,19 @@ typedef void (*irq_handler)(trap_frame *f);
 /* Builds and loads the interrupt descriptor table. */
 void trap_init(void);
 
-/* Attaches a handler to one of the 16 legacy interrupt lines. */
+/* Attaches a handler to one of the 16 legacy interrupt lines. A line
+ * may carry several devices (pci pins are shared); each handler looks
+ * at its own device and does nothing when it was not the one. */
 void irq_install(u8 irq, irq_handler fn);
 
-/* Total number of hardware interrupts serviced, for reporting. */
+/* A vector of the processor's own, for a message-signalled interrupt:
+ * the handler is attached and the vector number returned, or -1 when
+ * there is no local controller or no vector left. */
+i32  irq_alloc_vector(irq_handler fn);
+
+/* Total number of hardware interrupts serviced, for reporting; and of
+ * those, the message-signalled ones. */
 u64 trap_irq_count(void);
+u64 trap_msi_count(void);
 
 #endif /* EB_TRAP_H */

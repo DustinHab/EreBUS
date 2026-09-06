@@ -5706,6 +5706,8 @@ void shell_run(void *arg)
             draw_all();
             fb_present();
         }
-        sched_yield();
+        /* Until the next key or movement, or a tick: the journal, the
+         * terminal and the clock are looked at again then. */
+        ps2_input_wait(10000000ULL);
     }
 }

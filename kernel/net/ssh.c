@@ -167,7 +167,9 @@ static u32 rd_u32(reader *r)
 static const u8 *rd_str(reader *r, u32 *n)
 {
     u32 len = rd_u32(r);
-    if (r->bad || r->at + len > r->len) { r->bad = true; *n = 0; return r->p; }
+    /* len is the wire's word: compared against the room left rather
+     * than added to the position, which a length near 2^32 wraps. */
+    if (r->bad || len > r->len - r->at) { r->bad = true; *n = 0; return r->p; }
     const u8 *s = r->p + r->at;
     r->at += len;
     *n = len;
