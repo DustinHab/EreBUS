@@ -30,8 +30,7 @@ Targets:
     make debug    # halted, gdb on port 1234
     make clean
     sh tools/mkiso.sh          # build/erebus.iso
-    sh build/battery.sh        # all regression tests; KVM when /dev/kvm is writable, 6 lanes, about 4 minutes
-    sh build/kvm-battery.sh    # the same, plus the self-built kernel
+    sh tools/<test>.sh         # one regression test (the table under Tests); KVM when /dev/kvm is writable
 
 From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 
@@ -53,7 +52,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
       user/          ring-3 programs (runner, foreman, standard programs)
       include/eb/    headers
     tools/           test scripts, image builders, helpers
-    build/           outputs; battery.sh, kvm.sh, commit.sh, doorcheck.sh
+    build/           outputs (not in the repository)
 
 ## Design decisions
 
@@ -209,9 +208,9 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/selfbuild.sh, cctrial.sh | kernel built by the machine's compiler on the host |
 | tools/fuzz/run.sh | fuzzing under the sanitizers: the language tools, the certificate checker, the page renderer, the wire (frames, the tcp and http client, the door with ssh, the air), the pipe's datagrams sealed and plain, the tls client (`sh tools/fuzz/run.sh <seconds> [lang pki html net pipe tls]`) |
 
-`build/battery.sh` builds once, then runs 31 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`; disk images on `/mnt/c` stall under parallel writes), then renew, update-test and tlstest alone (renew rebuilds the kernel twice; the other two run a server on the host). Logs, screenshots and QEMU stderr come back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (default 480); a failed or stopped test runs once more and is marked "2nd try". Every test sources `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps, `BUILD` points at the test's directory. The summary prints seconds per test. `build/kvm-battery.sh` adds selfkernel.
+Every test is a script under `tools/`: `sh tools/<test>.sh` after `make`, or `BUILD=<dir> sh tools/<test>.sh` to keep its images and logs in a directory of its own, which is how several run side by side (on the Linux file system; disk images on `/mnt/c` stall under parallel writes). All of them source `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps. renew, update-test and tlstest run alone (renew rebuilds the kernel twice; the other two run a server on the host).
 
-Measured on 32 cores under KVM: about 10 minutes for all 34 tests, of which the parallel part is 5 (before the lanes: 38 minutes sequential under KVM, 22 minutes under TCG). The longest is pipe-code, which twice waits out a compiled task's deadline.
+Measured on 32 cores under KVM, six at a time: about 10 minutes for all 34 tests, of which the parallel part is 5 (before that: 38 minutes sequential under KVM, 22 minutes under TCG). The longest is pipe-code, which twice waits out a compiled task's deadline.
 
 ## Using the ISO
 
