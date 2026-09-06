@@ -30,6 +30,14 @@
 #define HTML_SPOTS_MAX  128
 #define HTML_FORMS_MAX  12
 #define HTML_FIELDS_MAX 32
+#define HTML_IMAGES_MAX 24
+#define HTML_TITLE_MAX  96
+
+/* A decoded picture, as the browser lends it to the renderer. */
+typedef struct {
+    const u32 *px;                  /* 0x00RRGGBB, w * h of them */
+    u32 w, h;
+} html_image;
 
 /* What a form field is for. */
 #define FIELD_TEXT   0
@@ -92,6 +100,25 @@ typedef struct {
 
     const char (*field_values)[HTML_VALUE_MAX];   /* in: draw these */
     char       (*field_init)[HTML_VALUE_MAX];     /* out: the defaults */
+
+    /* Pictures: the urls the page names go out; for each the renderer
+     * asks the lender for the decoded picture and draws it in place,
+     * or a frame with the alternative text while there is none. */
+    char      (*images)[HTML_URL_MAX];
+    u32        *image_count;
+    const html_image *(*image)(void *ctx, const char *url);
+    void       *image_ctx;
+
+    /* The page's title, when it has one. */
+    char       *title;
+    u32         title_max;
+
+    /* A word to find: every word holding it is drawn marked, and the
+     * first such row at or past find_from is answered in find_row
+     * (left as it came when there is none). */
+    const char *find;
+    u32         find_from;
+    u32        *find_row;
 } html_sink;
 
 u32 html_render(const html_view *v, html_sink *sink);

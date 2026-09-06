@@ -32,6 +32,7 @@ typedef enum {
     SHELL_INDEX,     /* everything reachable, one line each */
     SHELL_SPLIT,     /* two independent walks, side by side */
     SHELL_TERM,      /* the system spoken to in lines */
+    SHELL_WEB,       /* the web, looked at directly */
     SHELL_MODE_COUNT
 } shell_mode;
 

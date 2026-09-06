@@ -314,6 +314,37 @@ void fb_glyph(i32 x, i32 y, u8 ch, color fg, color bg, bool opaque)
     draw_glyph_cp(x, y, ch, fg, bg, opaque, 1);
 }
 
+void fb_glyph_cp(i32 x, i32 y, u32 cp, color fg, color bg, bool opaque)
+{
+    draw_glyph_cp(x, y, cp, fg, bg, opaque, 1);
+}
+
+void fb_image(i32 x, i32 y, i32 dw, i32 dh, const u32 *px, u32 iw, u32 ih,
+              i32 clip_y0, i32 clip_y1)
+{
+    if (!fb.ready || !px || dw <= 0 || dh <= 0 || iw == 0 || ih == 0) return;
+    if (clip_y0 < 0) clip_y0 = 0;
+    if (clip_y1 > (i32)fb.height) clip_y1 = (i32)fb.height;
+    i32 y0 = y > clip_y0 ? y : clip_y0;
+    i32 y1 = y + dh < clip_y1 ? y + dh : clip_y1;
+    i32 x0 = x > 0 ? x : 0;
+    i32 x1 = x + dw < (i32)fb.width ? x + dw : (i32)fb.width;
+    if (y0 >= y1 || x0 >= x1) return;
+
+    fb_damage(x0, y0, x1 - x0, y1 - y0);
+    for (i32 yy = y0; yy < y1; yy++) {
+        u32 sy = (u32)((u64)(yy - y) * ih / (u64)dh);
+        if (sy >= ih) sy = ih - 1;
+        const u32 *src = px + (u64)sy * iw;
+        u32 *row = fb.base + (u32)yy * fb.stride;
+        for (i32 xx = x0; xx < x1; xx++) {
+            u32 sx = (u32)((u64)(xx - x) * iw / (u64)dw);
+            if (sx >= iw) sx = iw - 1;
+            row[xx] = to_native(src[sx]);
+        }
+    }
+}
+
 /* Pull the next code point out of a UTF-8 string and advance the
  * pointer. A malformed sequence yields the raw byte -- the kernel
  * should keep going on broken text, not stop. */

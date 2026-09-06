@@ -465,8 +465,9 @@ static bool parse_server_hello(const u8 *m, u32 len, u8 server_pub[32])
 
 /* The whole errand: connect, handshake, request, read, and hand back
  * the decrypted http response in out[]. */
-bool tls_get(const u8 addr[4], const char *host, u32 hlen,
-             const char *path, u32 plen, u8 *out, u32 max, u32 *got)
+bool tls_exchange(const u8 addr[4], const char *host, u32 hlen,
+                  const u8 *req, u32 reqlen, const u8 *body, u32 blen,
+                  u8 *out, u32 max, u32 *got)
 {
     verified = false;
     why[0] = 0;
@@ -647,20 +648,14 @@ bool tls_get(const u8 addr[4], const char *host, u32 hlen,
     epoch_from(s_ap, &s_app);
     epoch_from(c_ap, &c_app);
 
-    char req[1400];
-    u32 at = 0;
-    const char *a = "GET ";
-    while (*a) req[at++] = *a++;
-    if (plen == 0) req[at++] = '/';
-    for (u32 i = 0; i < plen && at < 1280; i++) req[at++] = path[i];
-    a = " HTTP/1.0\r\nHost: ";
-    while (*a) req[at++] = *a++;
-    for (u32 i = 0; i < hlen && at < 1340; i++) req[at++] = (char)host[i];
-    a = "\r\nUser-Agent: erebus/0.1\r\nConnection: close\r\n\r\n";
-    while (*a) req[at++] = *a++;
-
-    if (!write_encrypted(&c_app, REC_APPDATA, (const u8 *)req, at)) {
-        tcp_close(); return false;
+    /* The request head, then the body in records of its own. */
+    for (u32 off = 0; off < reqlen; off += 1400) {
+        u32 n = reqlen - off < 1400 ? reqlen - off : 1400;
+        if (!write_encrypted(&c_app, REC_APPDATA, req + off, n)) { tcp_close(); return false; }
+    }
+    for (u32 off = 0; off < blen; off += 1400) {
+        u32 n = blen - off < 1400 ? blen - off : 1400;
+        if (!write_encrypted(&c_app, REC_APPDATA, body + off, n)) { tcp_close(); return false; }
     }
 
     u32 total = 0;

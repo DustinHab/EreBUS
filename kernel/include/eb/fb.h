@@ -44,7 +44,14 @@ void fb_gradient(i32 x, i32 y, i32 w, i32 h, color top, color bottom);
 #define GLYPH_H 16
 
 void fb_glyph(i32 x, i32 y, u8 ch, color fg, color bg, bool opaque);
+void fb_glyph_cp(i32 x, i32 y, u32 cp, color fg, color bg, bool opaque);   /* any code point the font has */
 void fb_text(i32 x, i32 y, const char *s, color fg, color bg, bool opaque);
+
+/* A picture of iw x ih pixels (0x00RRGGBB) drawn at x, y as dw x dh,
+ * the nearest source pixel for each; only the rows between clip_y0
+ * and clip_y1 (exclusive) of the screen are touched. */
+void fb_image(i32 x, i32 y, i32 dw, i32 dh, const u32 *px, u32 iw, u32 ih,
+              i32 clip_y0, i32 clip_y1);
 
 /* Like fb_text, but each pixel drawn as a scale x scale block. A bitmap
  * font can only be enlarged by whole factors -- anything else would

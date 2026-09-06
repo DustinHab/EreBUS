@@ -16,7 +16,11 @@ import sys
 # (first, last) code point, both inclusive.
 RANGES = [
     (0x0020, 0x02FF),  # Latin, Latin-1 and the extended blocks
+    (0x0370, 0x03FF),  # Greek
+    (0x0400, 0x04FF),  # Cyrillic
     (0x2010, 0x203A),  # dashes, quotation marks, ellipsis
+    (0x20A0, 0x20BF),  # currency signs
+    (0x2100, 0x214F),  # letterlike symbols (trade mark, ohm, numero)
     (0x2190, 0x21BF),  # arrows
     (0x2500, 0x257F),  # box drawing
     (0x2580, 0x259F),  # block elements (bars, shading)

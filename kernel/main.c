@@ -36,6 +36,7 @@
 #include <eb/net.h>
 #include <eb/pipe.h>
 #include <eb/nodes.h>
+#include <eb/web.h>
 #include <eb/string.h>
 #include <eb/syscall.h>
 #include <eb/pic.h>
@@ -1980,6 +1981,38 @@ void kmain(eb_boot_info *bi)
                 }
             }
             if (pg) { obj_set_fleeting(pg, true); pipe_page_set(pg); }
+        }
+
+        /* The browser's two texts: the bookmarks the person keeps (read
+         * and write: a line per bookmark, theirs to edit), and the
+         * cookies it was given that outlast the session -- held with
+         * no rights, like the door key: they exist where everything
+         * exists, and nobody reads them. */
+        {
+            object *bm = find_petnamed(root, "bookmarks", TYPE_TEXT, NULL, NULL);
+            if (!bm) {
+                object *made = obj_create(TYPE_TEXT, 8192, 0);
+                if (made) {
+                    obj_set_name(made, "bookmarks");
+                    if (list_append(sys_shelf ? sys_shelf : root, made,
+                                    CAP_READ | CAP_WRITE, "bookmarks"))
+                        bm = made;
+                    obj_release(made);
+                }
+            }
+            if (bm) web_bookmarks_set(bm);
+
+            object *ck = find_petnamed(root, "the cookies", TYPE_TEXT, NULL, NULL);
+            if (!ck) {
+                object *made = obj_create(TYPE_TEXT, 8192, 0);
+                if (made) {
+                    obj_set_name(made, "the cookies");
+                    if (list_append(sys_shelf ? sys_shelf : root, made, 0, "the cookies"))
+                        ck = made;
+                    obj_release(made);
+                }
+            }
+            if (ck) web_cookies_adopt(ck);
         }
 
         /* The door's key: the host's ed25519 pair, made once and kept

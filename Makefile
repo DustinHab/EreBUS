@@ -79,6 +79,10 @@ KERN_C   := kernel/main.c \
             kernel/gfx/fb.c \
             kernel/gfx/shell.c \
             kernel/gfx/html.c \
+            kernel/gfx/png.c \
+            kernel/gfx/jpeg.c \
+            kernel/lib/inflate.c \
+            kernel/net/web.c \
             kernel/hw/ps2.c \
             kernel/hw/xhci.c \
             kernel/net/sha1.c \

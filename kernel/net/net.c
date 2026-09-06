@@ -5,6 +5,7 @@
  * - reachable only through a capability to its port; writes only where that capability may write
  */
 #include <eb/net.h>
+#include <eb/web.h>
 #include <eb/wifi.h>
 #include <eb/pipe.h>
 #include <eb/ssh.h>
@@ -955,7 +956,7 @@ static u32 web_bmp(object *pic, u8 *out, u32 max)
 }
 
 /* Builds the answer for one asked path into web_all. */
-static u32 web_answer(const char *path)
+static u32 served_answer(const char *path)
 {
     object *served = system_served();
     const char *ctype = "text/plain";
@@ -1114,7 +1115,7 @@ static void web_input(const u8 src[4], const u8 *seg, u32 len)
     path[pn] = 0;
     if (pn == 0) { web.active = false; return; }
 
-    u32 total = web_answer(path);
+    u32 total = served_answer(path);
     kprintf("web:  served %s to %u.%u.%u.%u, %u bytes\n",
             path, src[0], src[1], src[2], src[3], total);
 
@@ -1499,37 +1500,63 @@ bool http_response_complete(http_progress *p, const u8 *buf, u32 len)
     return p->have_length && (u64)len >= (u64)p->header_end + p->want;
 }
 
-static bool http_fetch(const u8 *addr, const char *host, u32 hlen,
-                       const char *path, u32 plen,
-                       u8 *body, u32 body_max, u32 *body_len)
+static u32 putw(char *d, u32 at, u32 max, const char *s)
+{
+    while (*s && at + 1 < max) d[at++] = *s++;
+    return at;
+}
+
+/* The request head: the method and the path, the host, what this
+ * machine takes, the cookies it holds for the place, and the body's
+ * shape when there is one. */
+static u32 http_request(char *req, u32 max, u8 method, const char *host, u32 hlen,
+                        const char *path, u32 plen, const char *cookie, u32 clen,
+                        u32 blen, bool gzip)
+{
+    u32 at = 0;
+    at = putw(req, at, max, method == 1 ? "POST " : "GET ");
+    if (plen == 0 && at + 1 < max) req[at++] = '/';
+    for (u32 i = 0; i < plen && at + 200 < max; i++) req[at++] = path[i];
+    at = putw(req, at, max, " HTTP/1.0\r\nHost: ");
+    for (u32 i = 0; i < hlen && at + 150 < max; i++) req[at++] = host[i];
+    at = putw(req, at, max, "\r\nUser-Agent: erebus/0.9\r\nConnection: close\r\n");
+    if (gzip) at = putw(req, at, max, "Accept-Encoding: gzip\r\n");
+    if (clen && at + clen + 12 < max) {
+        at = putw(req, at, max, "Cookie: ");
+        for (u32 i = 0; i < clen; i++) req[at++] = cookie[i];
+        at = putw(req, at, max, "\r\n");
+    }
+    if (method == 1) {
+        at = putw(req, at, max, "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: ");
+        char num[12]; u32 n = 0;
+        u32 v = blen;
+        if (v == 0) num[n++] = '0';
+        while (v) { num[n++] = (char)('0' + v % 10); v /= 10; }
+        while (n && at + 1 < max) req[at++] = num[--n];
+        at = putw(req, at, max, "\r\n");
+    }
+    at = putw(req, at, max, "\r\n");
+    return at;
+}
+
+/* Plain http: the head and the body out, the answer in until it is
+ * whole, they finish, or the well runs dry. */
+static bool http_exchange(const u8 *addr, const u8 *req, u32 rlen,
+                          const u8 *body, u32 blen, u8 *out, u32 max, u32 *got)
 {
     if (!tcp_open(addr, 80)) return false;
+    if (!tcp_write(req, rlen)) { tcp_close(); return false; }
+    if (blen && !tcp_write(body, blen)) { tcp_close(); return false; }
 
-    char req[1400];
-    u32 at = 0;
-    const char *a = "GET ";
-    while (*a) req[at++] = *a++;
-    if (plen == 0) req[at++] = '/';
-    for (u32 i = 0; i < plen && at < 1280; i++) req[at++] = path[i];
-    a = " HTTP/1.0\r\nHost: ";
-    while (*a) req[at++] = *a++;
-    for (u32 i = 0; i < hlen && at < 1340; i++) req[at++] = host[i];
-    a = "\r\nUser-Agent: erebus/0.1\r\nConnection: close\r\n\r\n";
-    while (*a) req[at++] = *a++;
-
-    if (!tcp_write((const u8 *)req, at)) { tcp_close(); return false; }
-
-    /* Their answer, until it is whole, they finish, or the well runs dry. */
     u32 len = 0;
     http_progress pr = { 0, 0, 0, false };
-    while (len < body_max) {
-        i32 got = tcp_read(body + len, body_max - len);
-        if (got <= 0) break;
-        len += (u32)got;
-        if (http_response_complete(&pr, body, len)) break;
+    while (len < max) {
+        i32 n = tcp_read(out + len, max - len);
+        if (n <= 0) break;
+        len += (u32)n;
+        if (http_response_complete(&pr, out, len)) break;
     }
-
-    *body_len = len;
+    *got = len;
     tcp_close();
     return len > 0;
 }
@@ -1576,31 +1603,81 @@ static void split_ask(const char *ask, u32 alen,
         path[(*plen)++] = ask[at++];
 }
 
-bool net_fetch(const char *url, u32 ulen, u8 *out, u32 max,
-               u32 *body_off, u32 *body_len, bool *secure_out)
+/* One header line's value, by name in any case of letters, out of the
+ * head of a response; false when there is none. Called with a running
+ * `from` to find every line of the same name. */
+static bool header_line(const u8 *d, u32 head, const char *name, u32 *from,
+                        const u8 **value, u32 *vlen)
+{
+    u32 nl = 0;
+    while (name[nl]) nl++;
+    for (u32 at = *from; at + nl + 1 < head; at++) {
+        if (at && d[at - 1] != '\n') continue;
+        u32 k = 0;
+        while (k < nl) {
+            u8 c = d[at + k];
+            if (c >= 'A' && c <= 'Z') c = (u8)(c + 32);
+            if (c != (u8)name[k]) break;
+            k++;
+        }
+        if (k < nl || d[at + nl] != ':') continue;
+        u32 j = at + nl + 1;
+        while (j < head && d[j] == ' ') j++;
+        u32 e = j;
+        while (e < head && d[e] != '\r' && d[e] != '\n') e++;
+        *value = d + j;
+        *vlen = e - j;
+        *from = e;
+        return true;
+    }
+    return false;
+}
+
+bool net_fetch_ex(const char *url, u32 ulen, u8 *out, u32 max, net_request *r)
 {
     char host[128];
     char path[1024];             /* signed redirect urls carry long query strings */
     u32 hlen = 0, plen = 0;
     bool secure = false;
+    u8 method = r->method;
+    const u8 *body = r->body;
+    u32 blen = r->blen;
+    r->status = 0;
+    r->body_off = r->body_len = 0;
+    r->verified = false;
+    r->cut = false;
+    r->reason = NULL;
+    r->final_url[0] = 0;
+
     split_ask(url, ulen, host, sizeof(host), &hlen,
               path, sizeof(path), &plen, &secure);
     if (hlen == 0) return false;
-    if (!nic_up() || !gateway_find()) return false;
+    if (!nic_up() || !gateway_find()) { r->reason = "no way out to the network"; return false; }
 
     u8 addr[4];
-    u32 got = 0, body = 0;
+    u32 got = 0, head = 0;
+    static char req[2048];
+    static char cookie[1024];
 
     /* Fetch, and follow where it points: a moved page answers with a
      * number and a Location line (this is how a stable "latest" url ends
      * up at the newest release's file). A secure ask goes through tls. */
     for (u32 hop = 0; hop < 6; hop++) {
-        if (secure_out) *secure_out = secure;    /* known before the hop, so a refusal can be explained */
-        if (!dns_resolve(host, hlen, addr)) return false;
+        r->secure = secure;                      /* known before the hop, so a refusal can be explained */
+        if (!dns_resolve(host, hlen, addr)) { r->reason = "the name did not resolve"; return false; }
+
+        u32 clen = r->cookies ? r->cookies(r->ctx, host, hlen, path, plen, secure, cookie, sizeof(cookie)) : 0;
+        u32 rlen = http_request(req, sizeof(req), method, host, hlen, path, plen,
+                                cookie, clen, blen, r->accept_gzip);
         bool ok = secure
-                ? tls_get(addr, host, hlen, path, plen, out, max, &got)
-                : http_fetch(addr, host, hlen, path, plen, out, max, &got);
-        if (!ok) return false;
+                ? tls_exchange(addr, host, hlen, (const u8 *)req, rlen, body, blen, out, max, &got)
+                : http_exchange(addr, (const u8 *)req, rlen, body, blen, out, max, &got);
+        if (!ok) {
+            if (secure && tls_last_reason()[0]) r->reason = tls_last_reason();
+            else r->reason = "the server did not answer";
+            return false;
+        }
+        if (secure) r->verified = tls_last_verified();
 
         /* The status line: HTTP/1.x NNN */
         u32 code = 0;
@@ -1608,45 +1685,63 @@ bool net_fetch(const char *url, u32 ulen, u8 *out, u32 max,
             code = (u32)(out[9] - '0') * 100 +
                    (u32)(out[10] - '0') * 10 + (u32)(out[11] - '0');
 
-        body = 0;
+        head = 0;
         for (u32 i = 0; i + 3 < got; i++) {
             if (out[i]=='\r' && out[i+1]=='\n' &&
-                out[i+2]=='\r' && out[i+3]=='\n') { body = i + 4; break; }
+                out[i+2]=='\r' && out[i+3]=='\n') { head = i + 4; break; }
+        }
+        if (head == 0) { r->reason = "the answer had no head"; return false; }
+
+        /* Every cookie the hop set, redirects included: a sign-in
+         * answers with a cookie and a move. */
+        if (r->cookie) {
+            u32 from = 0;
+            const u8 *v; u32 vl;
+            while (header_line(out, head, "set-cookie", &from, &v, &vl))
+                r->cookie(r->ctx, host, hlen, path, plen, secure, (const char *)v, vl);
         }
 
         bool moved = (code == 301 || code == 302 || code == 303 ||
                       code == 307 || code == 308);
         if (!moved) {
-            if (code != 200 || body == 0) return false;
-            if (body_off)  *body_off = body;
-            if (body_len)  *body_len = got - body;
-            if (secure_out) *secure_out = secure;
+            r->status = code;
+            r->body_off = head;
+            r->body_len = got - head;
+            r->cut = got >= max;
+            u32 at = 0;
+            at = putw(r->final_url, at, sizeof(r->final_url), secure ? "https://" : "http://");
+            for (u32 i = 0; i < hlen && at + 1 < sizeof(r->final_url); i++) r->final_url[at++] = host[i];
+            if (plen == 0 && at + 1 < sizeof(r->final_url)) r->final_url[at++] = '/';
+            for (u32 i = 0; i < plen && at + 1 < sizeof(r->final_url); i++) r->final_url[at++] = path[i];
+            r->final_url[at] = 0;
+            if (secure && !r->verified && tls_last_reason()[0]) r->reason = tls_last_reason();
             return true;
         }
 
         /* Location: ... somewhere in the headers. */
         char where[1024];
         u32 wlen = 0;
-        for (u32 i = 0; i + 9 < body; i++) {
-            if ((out[i]=='l' || out[i]=='L') &&
-                (out[i+1]=='o' || out[i+1]=='O') &&
-                out[i+2]=='c' && out[i+3]=='a' && out[i+4]=='t' &&
-                out[i+5]=='i' && out[i+6]=='o' && out[i+7]=='n' &&
-                out[i+8]==':') {
-                u32 j = i + 9;
-                while (j < body && out[j] == ' ') j++;
-                while (j < body && out[j] != '\r' && out[j] != '\n' &&
-                       wlen < sizeof(where) - 1)
-                    where[wlen++] = (char)out[j++];
-                break;
+        {
+            u32 from = 0;
+            const u8 *v; u32 vl;
+            if (header_line(out, head, "location", &from, &v, &vl)) {
+                for (u32 i = 0; i < vl && wlen < sizeof(where) - 1; i++) where[wlen++] = (char)v[i];
             }
         }
-        if (wlen == 0) return false;             /* moved, but mute */
+        if (wlen == 0) { r->reason = "moved, but to nowhere"; return false; }
 
-        if (where[0] == '/') {                    /* same house, new room */
+        /* A move after a post is followed as a get, unless the server
+         * asks for the same request again (307, 308). */
+        if (method == 1 && code != 307 && code != 308) { method = 0; body = NULL; blen = 0; }
+
+        if (where[0] == '/' && where[1] != '/') {   /* same house, new room */
             plen = 0;
             for (u32 i = 0; i < wlen && plen < sizeof(path) - 1; i++)
                 path[plen++] = where[i];
+        } else if (where[0] == '/') {               /* the same scheme, another host */
+            split_ask(where + 2, wlen - 2, host, sizeof(host), &hlen,
+                      path, sizeof(path), &plen, NULL);
+            if (hlen == 0) return false;
         } else {
             split_ask(where, wlen, host, sizeof(host), &hlen,
                       path, sizeof(path), &plen, &secure);
@@ -1654,7 +1749,21 @@ bool net_fetch(const char *url, u32 ulen, u8 *out, u32 max,
         }
         got = 0;
     }
+    r->reason = "moved too many times";
     return false;
+}
+
+bool net_fetch(const char *url, u32 ulen, u8 *out, u32 max,
+               u32 *body_off, u32 *body_len, bool *secure_out)
+{
+    net_request r;
+    memset(&r, 0, sizeof(r));
+    bool ok = net_fetch_ex(url, ulen, out, max, &r);
+    if (secure_out) *secure_out = r.secure;
+    if (!ok || r.status != 200 || r.body_off == 0) return false;
+    if (body_off) *body_off = r.body_off;
+    if (body_len) *body_len = r.body_len;
+    return true;
 }
 
 static void fetch_into(object *o)
@@ -1781,6 +1890,7 @@ static void net_thread(void *arg)
         door_service();
         ssh_service();
         update_tick();
+        web_service();
         net_breathe();
     }
 }

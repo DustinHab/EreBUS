@@ -1,6 +1,6 @@
 # EreBUS Manual
 
-For EreBUS 0.9.0. This manual is updated with every release; the version it describes is the one on the releases page.
+For EreBUS 0.9.1. This manual is updated with every release; the version it describes is the one on the releases page.
 
 Contents: 1 What EreBUS is · 2 Getting it running · 3 The screen · 4 The graph · 5 The terminal · 6 Settings · 7 System pages · 8 Programs · 9 Scripts and far work · 10 Building programs and the kernel · 11 Storage · 12 Network · 13 Nodes and the pipe · 14 Real hardware · 15 Building from source and testing · 16 Versions · 17 Formats
 
@@ -82,6 +82,7 @@ There are no windows, no task bar and no menus. Every visible control is clickab
 | index | everything reachable as a list with id, kind, size, holder, way, name; typing filters by name and text; enter goes to the first hit; escape clears |
 | split | two walks side by side: the left one writes, the right one reads |
 | terminal | the words of chapter 5; keys go to the terminal |
+| browser | the web looked at directly: an address line, links, forms, pictures, bookmarks; keys go to the browser (12.6) |
 
 ### 3.3 Keys and mouse
 
@@ -95,7 +96,7 @@ There are no windows, no task bar and no menus. Every visible control is clickab
 | page up / page down | one generation back / forward (time travel) |
 | escape | back to now; close the machine chooser; clear the index search |
 | control + digit | switch lens |
-| letters | go into the focused text at the caret; in the index they search; in the terminal they form the line |
+| letters | go into the focused text at the caret; in the index they search; in the terminal they form the line; in the browser they form an address |
 
 Mouse: click anything you can see; drag in a text to mark; the wheel scrolls and, in the graph, zooms. `take` lifts the marked letters into a held buffer (shown in the header), `put` inserts them at the caret, `x` drops them. Typing replaces marked letters.
 
@@ -244,6 +245,8 @@ All on the `system` shelf; all ordinary objects, saved with the graph.
 | `the line` | read | the conversation with other nodes (`say`) |
 | `the machine`, `the compiler`, `the language` | read | what the kernel, the C compiler and the script language understand, refreshed at every boot |
 | `the door key` | none | the ed25519 pair the door and the pipe identify with; letting it go makes a fresh one at the next start |
+| `bookmarks` | read, write | the browser's bookmarks, a line each: `url | title`; the browser's start page lists them, `keep` adds one, the text is yours to edit (12.6) |
+| `the cookies` | none | the cookies the browser was given that outlast the session (12.6); letting it go forgets them |
 | `the disk` | read, write | the exchange disk's files, when a FAT disk stands beside the store (chapter 11) |
 | `the served` | -- | a list you make by that name; while it exists, its texts and pictures are served on port 80 (12.3) |
 
@@ -421,6 +424,22 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 - The clock matters: dates are judged against the machine's clock, which comes from the real-time clock at start and from the net once a time server answered (`net: the clock was set from the net`).
 - Limits: a host under a root not in the list is unverified until its authority is written into the settings; no revocation checking; no name constraints. The self-update does not depend on any of this: its package is ed25519-signed (13.8).
 
+### 12.6 The browser
+
+A view of its own (tab to it, or click `browser` in the footer): the web looked at directly, with no object in between. The page lives in memory the browser owns; nothing is saved by looking, and what you keep -- a bookmark -- you keep on purpose.
+
+- **The strip:** `<` and `>` step back and forward through where you have been this session; the address line; `go`; `keep` puts the page among the bookmarks; `find` opens the search for a word on the page. Under it: how the page came (`plain`, `verified`, `sealed, unverified`), the status when it is not 200, and the page's title.
+- **Keys:** letters start an address, enter fetches it, escape leaves the line. `n` and `p` step through the links and fields on the page (the one in hand is framed), enter follows the link, puts the writing into the field, or presses the button; in a field, enter sends the form and escape steps out. `/` opens the search: letters form the word, enter walks to the next row holding it, escape closes it. `b` keeps the page. Backspace goes back. Arrows, page up and down, home and end scroll.
+- **Mouse:** links, fields, buttons, the strip and the page's edge, as everywhere.
+- **Forms:** text and password fields, buttons; sent by GET as a query or by POST as a body (`application/x-www-form-urlencoded`), as the form says. A move after a post is followed as a get (303, and 301/302); 307 and 308 repeat the post.
+- **Cookies:** what a server sets is kept and sent back the way RFC 6265 says -- by domain (the host, or the `Domain` given when the host lies under it), by path, `Secure` only over https, `Max-Age` before `Expires`. Cookies with an expiry outlast the session: they are written to `the cookies` on the system shelf and read back at the next start; the rest live until the restart. Up to 64. Letting `the cookies` go forgets them all.
+- **Bookmarks:** the start page (an empty address) lists them as links, out of the `bookmarks` text: a line each, `url | title`. `keep` adds the page shown; the text is yours to edit, reorder or empty.
+- **Pictures:** png (every colour type and depth, not interlaced) and baseline jpeg (not progressive), fetched one by one after the page and drawn in their colours, scaled to the window's width and at most 480 pixels tall; the largest decoded is 1600 x 1200. Up to 24 per page. Until a picture is there, a frame with its alternative text stands in its place; a picture inside a link is the link.
+- **What comes down the wire:** chunked transfer coding is joined; gzip is unpacked (the browser asks for it); utf-8 is read, and the font covers Latin, Greek and Cyrillic -- other scripts show as boxes. A page may be 2 MiB; longer ones are cut and say so.
+- **Not there, on purpose:** no scripts and no stylesheets; the page decides what it says, not how the screen is painted or what runs. The browser holds nothing but the network: a page can reach no object.
+- **Where it stands at the next start:** the session remembers the view, so a machine left in the browser comes back in it, on the start page.
+- The log says what was fetched (`web: get http://... -> 200, 532 bytes, text/html, gzip`), every picture decoded, every cookie taken, and every bookmark kept.
+
 ### 12.4 Wireless
 
 - `networks` lists what is in the air; `join <name> with <passphrase>` joins (WPA2-PSK or open); the passphrase is asked for when not given and never echoed; `leave`; `wifi` shows the station.
@@ -523,7 +542,8 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 - `sh build/battery.sh` runs the regression tests: one build, 31 tests in parallel lanes (`LANES`, default 6), each in its own directory on the Linux file system (`PAR`, default `/tmp/erebus-par`), then renew, update-test and tlstest alone (renew rebuilds the kernel; the other two run a server on the host). Logs, screenshots and QEMU stderr are copied back to `build/par/<test>/`. A test is stopped after `TEST_LIMIT` seconds (480); a failed or stopped test runs once more, marked "2nd try" in the summary. KVM is used when `/dev/kvm` is writable (`NOKVM=1` forces TCG). The summary lists seconds per test; the full output is in `build/battery.log`. About 4 minutes on 32 cores. `sh build/kvm-battery.sh` adds the kernel built on the machine itself.
 - `sh build/battery.sh --one <test>` runs a single test that way; `BUILD=<dir> sh tools/<test>.sh` does the same by hand.
 - The tests drive the real screen through QEMU's monitor and wait on serial log lines (`tools/testlib.sh`: `waitlog`, `waitcount`, `waitfile`, `bootwait`); see the table in README.md. `tools/pkitest.sh` runs on the host: it builds the certificate checker from the kernel's own files and tries it against openssl-made chains and the live github chains kept in `tools/pki/fixtures`.
-- `sh tools/fuzz/run.sh <seconds> [lang pki html net pipe tls]` fuzzes, under the address and undefined-behaviour sanitizers, the language tools, the certificate checker, the page renderer, the wire (frames into the pump, the tcp and http client, the door with ssh, the air), the pipe's datagrams (sealed and plain) and the tls client; the ciphers and signatures are stubbed to pass in the last three, so the parsers behind authentication see the input. Corpora and crash files land in `build/fuzz/<tool>/`.
+- `sh tools/fuzz/run.sh <seconds> [lang pki html net pipe tls img]` fuzzes, under the address and undefined-behaviour sanitizers, the language tools, the certificate checker, the page renderer (pictures, title and search included), the wire (frames into the pump, the tcp and http client, the door with ssh, the air), the pipe's datagrams (sealed and plain), the tls client, and the picture decoders with inflate; the ciphers and signatures are stubbed to pass where the parsers stand behind authentication, so they see the input. Corpora and crash files land in `build/fuzz/<tool>/`.
+- `tools/webtest.sh` runs the browser against a server on the host: a page with utf-8 prose, links, a png and a jpeg, a form that posts and sets a cookie, a gzip page and a chunked page; the second boot finds the bookmark and the cookie again.
 - The built-in authorities come from `tools/pki/authorities.txt` (a certificate file and a name per line); `sh tools/mkauthorities.sh` regenerates `kernel/net/authorities.h` from them.
 - The kernel's version comes from `git describe`; a tag `X.Y.Z` on the commit makes the boot line `EreBUS X.Y.Z (x86_64)`.
 
@@ -550,6 +570,7 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 | 0.8.8 | 2026-09-05 | fixes across the system, no new words. Fetching ran at a fraction of the link: the tcp window was a fixed 32 KiB whatever room the receive ring had left, so the peer sent what could not be kept and every cut cost its retransmit timeout -- the release package (2.8 MB) took 93 s and takes 1.2 s now. The window is the room in the ring, a window update goes out when room opens again (the door too), a fetch stops when Content-Length is reached instead of waiting for the peer's close, and the card's receive ring holds 128 frames. Scheduler: the idle thread yields after every interrupt and is passed over while another thread is ready. Pipe: a handshake in progress is no longer replaced by one for another address (a task sent across two machines restarted both handshakes against each other every round; the slow scheduler had hidden it). TCP: a fin arriving ahead of lost data no longer ends the stream short (the late data was then dropped and the page or package came truncated); a retransmission that begins before the expected byte is taken from that byte on; malformed header offsets are refused; the log counts what arrived out of order. DNS: names that end in a compression pointer. Certificates: an extension with a malformed boolean read an uninitialized element (the fuzzer found it). Self-update: a version name of full length overflowed the report line. Bundles and FAT32: length checks that could wrap; a volume whose tables lie past its end or whose root cluster is out of range is refused. The fuzzers (15) now cover the certificate checker and the page renderer. |
 | 0.8.9 | 2026-09-06 | the web verified: thirty-four roots from the Mozilla bundle join the built-in authorities, with ECDSA over P-384 and RSA up to 4096 bits under SHA-256, SHA-384 and SHA-512 -- Wikipedia, Google, Amazon, Microsoft, heise and GitHub verify from the machine (12.5). Far work: `split` works for compiled tasks (the range comes as a `RANG` message, 9.3) and under a quorum (every piece on N machines, majority per piece, 9.5). `unvouch <node>` withdraws a vouch; the nodes table's new `via` column says how each key came to be there (13.2). Self-update reads a one-line `version` file first and fetches the package only when it names something newer (13.8). USB disks: sticks and card readers are driven through xhci, and a stick made with `tools/mkusb.sh` carries the store (11). |
 | 0.9.0 | 2026-09-06 | the machine at rest: the network card, the usb controller and the disk controller interrupt (msi, msi-x, or their legacy line) and their threads sleep on it; `yield` rests a program until the next tick; the processor halts when nothing happens, and `load` says how much of the time (12.1). The parsers on the wire fuzzed: frames, the tcp and http client, the door with ssh, the air, the pipe's datagrams and the tls client, with three overruns found and closed (a length near 2^32 in an ssh name-list, a ServerHello length past its record, an echo request whose total length was shorter than its header). The store's stick can be unplugged and plugged back in: the store carries an identity, the changes wait, another store is refused (11). USB disks with bigger blocks are driven. Every format written to a disk or put on a wire has its number in one place, `formats` prints them, and chapter 17 states the promise. |
+| 0.9.1 | 2026-09-06 | the browser (12.6): a view of its own on the web, no object in between -- an address line, links and forms followed by mouse or keyboard, forms sent by GET or POST, cookies kept the way RFC 6265 says (those with an expiry on the system shelf as `the cookies`), bookmarks in a `bookmarks` text with the start page listing them, pictures (png, baseline jpeg) drawn in colour, a search for a word on the page, chunked and gzip answers, utf-8 with Greek and Cyrillic in the font, and an unverified server marked rather than refused. The http client grew a method, a body and cookies for the browser; the tls client sends any request. Fuzzers for the decoders and the renderer's new parts. |
 
 ---
 

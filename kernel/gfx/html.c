@@ -1,14 +1,17 @@
 /*
  * html.c -- text browser lens: one pass over markup.
- * - headings, paragraphs, lists, quotes, pre, tables, links, forms (text fields, submit)
+ * - headings, paragraphs, lists, quotes, pre, tables, links, forms (text fields, submit), pictures
+ * - utf-8 decoded to code points; named and numeric entities
  * - scripts, styles, comments and unknown tags are dropped
- * - no CSS, no JavaScript, no images; width from the window
+ * - no CSS, no JavaScript; width from the window; a picture is drawn when its lender has it decoded,
+ *   a frame with the alternative text until then
  */
 #include <eb/html.h>
 
 #define WORD_MAX  96
 #define IND_STEP  2                 /* columns per level of indent */
 #define FIELD_COLS 22               /* width of a text field, in glyphs */
+#define IMAGE_MAX_H 480             /* pixels a picture may stand tall */
 
 typedef struct {
     const html_view *v;
@@ -38,7 +41,7 @@ typedef struct {
     /* The form being filled, if any. */
     i32  cur_form;
 
-    char word[WORD_MAX];
+    u32  word[WORD_MAX];            /* code points */
     u32  wlen;
 } flow;
 
@@ -103,6 +106,23 @@ static void link_note(flow *f, i32 x, u32 row, u32 chars)
 /* Words                                                               */
 /* ------------------------------------------------------------------ */
 
+static u32 lower_cp(u32 c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+
+/* Whether the word holds the phrase being looked for, letters compared
+ * without case. */
+static bool word_has(const flow *f, const char *find)
+{
+    u32 n = 0;
+    while (find[n]) n++;
+    if (n == 0 || n > f->wlen) return false;
+    for (u32 at = 0; at + n <= f->wlen; at++) {
+        u32 k = 0;
+        while (k < n && lower_cp(f->word[at + k]) == lower_cp((u8)find[k])) k++;
+        if (k == n) return true;
+    }
+    return false;
+}
+
 static void word_flush(flow *f)
 {
     if (f->wlen == 0) return;
@@ -118,11 +138,20 @@ static void word_flush(flow *f)
     u32 shown = f->wlen;
     if ((i32)shown > f->cols - f->col) shown = (u32)(f->cols - f->col);
 
+    /* A word that is being looked for is drawn marked, and its row
+     * is answered when it is the first at or past the row asked from. */
+    bool found = f->sink && f->sink->find && word_has(f, f->sink->find);
+    if (found && f->sink->find_row && f->row >= f->sink->find_from &&
+        *f->sink->find_row == (u32)-1)
+        *f->sink->find_row = f->row;
+
     if (visible(f, f->row)) {
         i32 y = pixel_y(f, f->row);
+        if (found) fb_rect(x, y, (i32)shown * GLYPH_W, GLYPH_H, f->v->col.accent);
         for (u32 i = 0; i < shown; i++)
-            fb_glyph(x + (i32)i * GLYPH_W, y, (u8)f->word[i], c, 0, false);
-        if (f->link >= 0)
+            fb_glyph_cp(x + (i32)i * GLYPH_W, y, f->word[i],
+                        found ? f->v->col.text : c, 0, false);
+        if (f->link >= 0 && !found)
             fb_rect(x, y + GLYPH_H - 2, (i32)shown * GLYPH_W, 1, c);
     }
     link_note(f, x, f->row, shown);
@@ -135,10 +164,28 @@ static void word_flush(flow *f)
     else line_break(f);
 }
 
-static void word_add(flow *f, char c)
+static void word_add(flow *f, u32 c)
 {
     if (f->wlen < WORD_MAX - 1) f->word[f->wlen++] = c;
     if (f->col + (i32)f->wlen >= f->cols) word_flush(f);
+}
+
+/* One code point from the utf-8 at s, and how many bytes it took. A
+ * malformed sequence yields the byte itself, so nothing is skipped. */
+static u32 utf8_take(const u8 *s, u64 left, u32 *cp)
+{
+    u8 c = s[0];
+    u32 more = 0, v = c;
+    if      ((c & 0xE0) == 0xC0) { v = c & 0x1Fu; more = 1; }
+    else if ((c & 0xF0) == 0xE0) { v = c & 0x0Fu; more = 2; }
+    else if ((c & 0xF8) == 0xF0) { v = c & 0x07u; more = 3; }
+    if (more == 0 || more >= left) { *cp = c; return 1; }
+    for (u32 i = 1; i <= more; i++) {
+        if ((s[i] & 0xC0) != 0x80) { *cp = c; return 1; }
+        v = (v << 6) | (s[i] & 0x3Fu);
+    }
+    *cp = v;
+    return more + 1;
 }
 
 static void want_break(flow *f, u32 gap)
@@ -260,9 +307,30 @@ static char to_lower(char c)
     return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
 }
 
+static bool tag_is(const char *t, const char *want);
+
+/* The named entities a page is likely to use; the rest are numbers. */
+static const struct { const char *name; u32 cp; } ENTITIES[] = {
+    { "amp", '&' }, { "lt", '<' }, { "gt", '>' }, { "quot", '"' }, { "apos", '\'' },
+    { "nbsp", 0xA0 }, { "mdash", 0x2014 }, { "ndash", 0x2013 }, { "hellip", 0x2026 },
+    { "laquo", 0xAB }, { "raquo", 0xBB }, { "lsquo", 0x2018 }, { "rsquo", 0x2019 },
+    { "ldquo", 0x201C }, { "rdquo", 0x201D }, { "bull", 0x2022 }, { "middot", 0xB7 },
+    { "copy", 0xA9 }, { "reg", 0xAE }, { "trade", 0x2122 }, { "deg", 0xB0 },
+    { "euro", 0x20AC }, { "pound", 0xA3 }, { "yen", 0xA5 }, { "cent", 0xA2 },
+    { "sect", 0xA7 }, { "para", 0xB6 }, { "times", 0xD7 }, { "divide", 0xF7 },
+    { "plusmn", 0xB1 }, { "frac12", 0xBD }, { "frac14", 0xBC }, { "sup2", 0xB2 },
+    { "larr", 0x2190 }, { "rarr", 0x2192 }, { "uarr", 0x2191 }, { "darr", 0x2193 },
+    { "auml", 0xE4 }, { "ouml", 0xF6 }, { "uuml", 0xFC }, { "Auml", 0xC4 },
+    { "Ouml", 0xD6 }, { "Uuml", 0xDC }, { "szlig", 0xDF }, { "eacute", 0xE9 },
+    { "egrave", 0xE8 }, { "ecirc", 0xEA }, { "agrave", 0xE0 }, { "aacute", 0xE1 },
+    { "acirc", 0xE2 }, { "ccedil", 0xE7 }, { "ntilde", 0xF1 }, { "oacute", 0xF3 },
+    { "uacute", 0xFA }, { "iacute", 0xED }, { "Eacute", 0xC9 }, { "aring", 0xE5 },
+    { "oslash", 0xF8 }, { "aelig", 0xE6 }, { "iexcl", 0xA1 }, { "iquest", 0xBF },
+};
+
 static u32 entity(flow *f, const u8 *s, u64 left)
 {
-    char name[10];
+    char name[12];
     u32 n = 0;
     while (n + 1 < left && n < sizeof(name) - 1 && s[n + 1] != ';' &&
            s[n + 1] != '&' && s[n + 1] != '<' && s[n + 1] != ' ')
@@ -270,24 +338,31 @@ static u32 entity(flow *f, const u8 *s, u64 left)
     if (n + 1 >= left || s[n + 1] != ';') { word_add(f, '&'); return 1; }
     name[n] = 0;
 
-    char out = 0;
+    u32 out = 0;
     if (n >= 2 && name[0] == '#') {
         u32 v = 0;
-        for (u32 i = 1; i < n; i++)
-            if (name[i] >= '0' && name[i] <= '9')
-                v = v * 10 + (u32)(name[i] - '0');
-        out = (v >= 0x20 && v < 0x7F) ? (char)v : 0;
+        if (name[1] == 'x' || name[1] == 'X') {
+            for (u32 i = 2; i < n; i++) {
+                char c = to_lower(name[i]);
+                if (c >= '0' && c <= '9') v = v * 16 + (u32)(c - '0');
+                else if (c >= 'a' && c <= 'f') v = v * 16 + (u32)(c - 'a' + 10);
+                else { v = 0; break; }
+                if (v > 0x10FFFF) { v = 0; break; }
+            }
+        } else {
+            for (u32 i = 1; i < n; i++) {
+                if (name[i] >= '0' && name[i] <= '9') v = v * 10 + (u32)(name[i] - '0');
+                else { v = 0; break; }
+                if (v > 0x10FFFF) { v = 0; break; }
+            }
+        }
+        out = (v >= 0x20 && v != 0x7F) ? v : 0;
+    } else {
+        for (u32 i = 0; i < sizeof(ENTITIES) / sizeof(ENTITIES[0]); i++)
+            if (tag_is(name, ENTITIES[i].name)) { out = ENTITIES[i].cp; break; }
     }
-    else if (n == 3 && name[0]=='a' && name[1]=='m' && name[2]=='p') out = '&';
-    else if (n == 2 && name[0]=='l' && name[1]=='t') out = '<';
-    else if (n == 2 && name[0]=='g' && name[1]=='t') out = '>';
-    else if (n == 4 && name[0]=='q') out = '"';
-    else if (n == 4 && name[0]=='n' && name[1]=='b') out = ' ';
-    else if (n == 5 && name[0]=='a' && name[1]=='p') out = '\'';
-    else if (n == 5 && name[0]=='m' && name[1]=='d') out = '-';  /* mdash */
-    else if (n == 5 && name[0]=='n' && name[1]=='d') out = '-';  /* ndash */
 
-    if (out == ' ') { if (f->pre) word_add(f, ' '); else word_flush(f); }
+    if (out == 0xA0 || out == ' ') { if (f->pre) word_add(f, ' '); else word_flush(f); }
     else if (out) word_add(f, out);
     return n + 2;
 }
@@ -369,6 +444,19 @@ static void parse_tag(const u8 *s, u64 left, parsed_tag *t)
             while (p < left && s[p] != '>' &&
                    (q ? (char)s[p] != q : (s[p] != ' ' && s[p] != '\t' &&
                                            s[p] != '\n' && s[p] != '\r'))) {
+                /* the entities a link carries: &amp; above all */
+                if (s[p] == '&') {
+                    static const struct { const char *name; char c; } E[] = {
+                        { "&amp;", '&' }, { "&quot;", '"' }, { "&apos;", '\'' },
+                        { "&lt;", '<' }, { "&gt;", '>' }, { "&#39;", '\'' }, { "&#38;", '&' } };
+                    u32 hit = 0;
+                    for (u32 e = 0; e < sizeof(E) / sizeof(E[0]) && !hit; e++) {
+                        u32 n = 0;
+                        while (E[e].name[n] && p + n < left && s[p + n] == (u8)E[e].name[n]) n++;
+                        if (E[e].name[n] == 0) { if (vn < sizeof(val) - 1) val[vn++] = E[e].c; p += n; hit = 1; }
+                    }
+                    if (hit) continue;
+                }
                 if (vn < sizeof(val) - 1) val[vn++] = (char)s[p];
                 p++;
             }
@@ -389,6 +477,88 @@ static void parse_tag(const u8 *s, u64 left, parsed_tag *t)
     }
     if (p < left) p++;                        /* the '>' */
     t->end = p;
+}
+
+/* A picture: its url goes to the lender's list; drawn when the lender
+ * has it, a frame with the alternative text until then. It stands on
+ * a line of its own, as wide as it is up to the window, and inside a
+ * link the whole of it is the link. */
+static void picture(flow *f, const parsed_tag *t)
+{
+    const char *src = attr(t, "src");
+    const char *alt = attr(t, "alt");
+    html_sink *sk = f->sink;
+    const html_image *img = NULL;
+
+    if (sk && sk->images && sk->image_count && src && src[0] &&
+        src[0] != 'd' /* data: urls are not fetched */) {
+        u32 i = 0;
+        for (; i < *sk->image_count; i++) if (tag_is(sk->images[i], src)) break;
+        if (i == *sk->image_count && i < HTML_IMAGES_MAX) {
+            u32 c = 0;
+            while (src[c] && c < HTML_URL_MAX - 1) { sk->images[i][c] = src[c]; c++; }
+            sk->images[i][c] = 0;
+            (*sk->image_count)++;
+        }
+        if (sk->image) img = sk->image(sk->image_ctx, src);
+    }
+
+    if (!img && !(alt && alt[0])) {
+        if (!src || !sk || !sk->images) return;       /* nothing to say for it */
+    }
+
+    want_break(f, 1);
+    settle_blanks(f);
+    if (f->line_dirty) line_break(f);
+
+    i32 avail = (f->cols - f->indent) * GLYPH_W;
+    i32 dw, dh;
+    if (img && img->w && img->h) {
+        dw = (i32)img->w; dh = (i32)img->h;
+        if (dw > avail) { dh = (i32)((i64)dh * avail / dw); dw = avail; }
+        if (dh > IMAGE_MAX_H) { dw = (i32)((i64)dw * IMAGE_MAX_H / dh); dh = IMAGE_MAX_H; }
+        if (dw < 1) dw = 1;
+        if (dh < 1) dh = 1;
+    } else {
+        u32 al = 0;
+        if (alt) while (alt[al]) al++;
+        dw = (i32)((al ? al : 7) + 2) * GLYPH_W;
+        if (dw > avail) dw = avail;
+        dh = GLYPH_H + 4;
+    }
+    u32 rows = (u32)((dh + GLYPH_H - 1) / GLYPH_H);
+    i32 x = f->v->x + f->indent * GLYPH_W;
+
+    /* Drawn where the rows fall on the screen, clipped to the window. */
+    i32 win_top = f->v->y, win_bottom = f->v->y + f->rows * GLYPH_H;
+    i32 y = f->v->y + ((i32)f->row - (i32)f->v->scroll) * GLYPH_H;
+    if (y + dh > win_top && y < win_bottom) {
+        if (img) {
+            fb_image(x, y, dw, dh, img->px, img->w, img->h, win_top, win_bottom);
+        } else {
+            i32 cy = y > win_top ? y : win_top;
+            i32 ch = (y + dh < win_bottom ? y + dh : win_bottom) - cy;
+            if (ch > 0) fb_rect(x, cy, dw, ch, f->v->col.faint);
+            if (y >= win_top && y + GLYPH_H + 4 <= win_bottom) {
+                i32 tx = x + GLYPH_W;
+                const char *say = (alt && alt[0]) ? alt : "picture";
+                for (u32 i = 0; say[i] && tx + GLYPH_W <= x + dw; i++, tx += GLYPH_W)
+                    fb_glyph(tx, y + 2, (u8)say[i], f->v->col.dim, 0, false);
+            }
+        }
+        if (f->link >= 0 && sk && sk->link_spots && sk->link_spot_count &&
+            *sk->link_spot_count < HTML_SPOTS_MAX) {
+            i32 sy = y > win_top ? y : win_top;
+            i32 sh = (y + dh < win_bottom ? y + dh : win_bottom) - sy;
+            if (sh > 0)
+                sk->link_spots[(*sk->link_spot_count)++] = (html_spot){ x, sy, dw, sh, (u32)f->link };
+        }
+    }
+
+    f->row += rows;
+    f->col = f->indent;
+    f->line_dirty = false;
+    f->blanks = 0;
 }
 
 /* Swallow to a named closing tag, returning the source offset past it. */
@@ -428,10 +598,30 @@ static u64 tag(flow *f, const u8 *s, u64 left)
     bool close = t.closing;
 
     if (tag_is(name, "script") || tag_is(name, "style") ||
-        tag_is(name, "head") || tag_is(name, "svg") ||
-        tag_is(name, "noscript")) {
+        tag_is(name, "svg") || tag_is(name, "noscript") ||
+        tag_is(name, "template")) {
         if (close) return t.end;
         return swallow_to(s, left, t.end, name);
+    }
+
+    /* The title is the page's name, not its prose: kept for the
+     * lender, never drawn. */
+    if (tag_is(name, "title")) {
+        if (close) return t.end;
+        u64 p = t.end;
+        u32 n = 0;
+        html_sink *sk = f->sink;
+        while (p < left && s[p] != '<') {
+            u8 c = s[p++];
+            if (c == '\n' || c == '\t' || c == '\r') c = ' ';
+            if (sk && sk->title && n + 1 < sk->title_max && (n || c != ' '))
+                sk->title[n++] = (char)c;
+        }
+        if (sk && sk->title && sk->title_max) {
+            while (n && sk->title[n - 1] == ' ') n--;
+            sk->title[n] = 0;
+        }
+        return swallow_to(s, left, t.end, "title");
     }
 
     if (tag_is(name, "br")) { want_break(f, 1); return t.end; }
@@ -555,17 +745,7 @@ static u64 tag(flow *f, const u8 *s, u64 left)
     }
 
     if (tag_is(name, "img")) {
-        const char *alt = attr(&t, "alt");
-        if (alt && alt[0]) {
-            word_flush(f);
-            word_add(f, '[');
-            for (u32 i = 0; alt[i]; i++) {
-                if (alt[i] == ' ') word_flush(f);
-                else word_add(f, alt[i]);
-            }
-            word_add(f, ']');
-            word_flush(f);
-        }
+        picture(f, &t);
         return t.end;
     }
 
@@ -662,6 +842,9 @@ u32 html_render(const html_view *v, html_sink *sink)
         if (sink->form_count) *sink->form_count = 0;
         if (sink->field_count) *sink->field_count = 0;
         if (sink->field_spot_count) *sink->field_spot_count = 0;
+        if (sink->image_count) *sink->image_count = 0;
+        if (sink->title && sink->title_max) sink->title[0] = 0;
+        if (sink->find_row) *sink->find_row = (u32)-1;
     }
     if (f.cols < 8) return 0;
 
@@ -675,16 +858,24 @@ u32 html_render(const html_view *v, html_sink *sink)
         if (f.skip) { i++; continue; }
         if (c == '&') { i += entity(&f, s + i, v->len - i); continue; }
 
+        if (c >= 0x80) {
+            u32 cp;
+            i += utf8_take(s + i, v->len - i, &cp);
+            if (cp == 0xA0) { if (f.pre) word_add(&f, ' '); else word_flush(&f); }
+            else if (cp >= 0xA0) word_add(&f, cp);
+            continue;
+        }
+
         if (f.pre) {
             if (c == '\n') { word_flush(&f); want_break(&f, 1); }
             else if (c == '\t') { word_add(&f, ' '); word_add(&f, ' '); }
             else if (c == ' ') word_add(&f, ' ');
-            else if (c >= 0x20 && c < 0x7F) word_add(&f, (char)c);
+            else if (c >= 0x20 && c < 0x7F) word_add(&f, c);
         } else {
             if (c == ' ' || c == '\n' || c == '\t' || c == '\r')
                 word_flush(&f);
             else if (c >= 0x20 && c < 0x7F)
-                word_add(&f, (char)c);
+                word_add(&f, c);
         }
         i++;
     }

@@ -2,7 +2,7 @@
 # run.sh -- fuzz the parsers for a while under the address and undefined-behaviour sanitizers.
 # - tools: lang (compiler, assembler, linker), pki (certificates, keys, signatures), html (the page renderer),
 #   net (frames, the tcp client, the http client, the door with ssh, the air), pipe (the object pipe's
-#   datagrams, sealed and plain), tls (the tls client fed a server's bytes)
+#   datagrams, sealed and plain), tls (the tls client fed a server's bytes), img (png, jpeg, inflate)
 # - seeds: the kernel's own sources and objects for lang, the certificate fixtures for pki, the manual for html,
 #   hand-made frames, datagrams and records for the rest
 # - the net, pipe and tls tools link the kernel's own files with the ciphers and signatures stubbed to pass, so
@@ -14,7 +14,7 @@
 cd "$(dirname "$0")/../.."
 SECS=${1:-60}
 shift 2>/dev/null
-TOOLS=${*:-"lang pki html net pipe tls"}
+TOOLS=${*:-"lang pki html net pipe tls img"}
 CC="clang -O1 -g -std=c11 -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
     -Wno-unused-function -Wno-incompatible-library-redeclaration -I. -Ikernel/include"
 
@@ -130,6 +130,33 @@ open(f"{C}/sealed1", "wb").write(b"\x05" + dg(offer, chunk, have, say))
 PY
 }
 
+seed_img() {
+    python3 - build/fuzz/img/corpus <<'PY'
+import sys, zlib, struct, gzip, io
+C = sys.argv[1]
+w = h = 8
+rows = b""
+for y in range(h):
+    rows += b"\x01" + b"".join(bytes((x * 30, y * 30, 100)) for x in range(w))
+def chunk(t, d): return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+open(f"{C}/png0", "wb").write(b"\x00" + png)
+pal = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 4, 8, 3, 0, 0, 0)) + chunk(b"PLTE", bytes(range(48))) + chunk(b"IDAT", zlib.compress(b"".join(b"\x00" + bytes((y, y+1, y+2, y+3)) for y in range(4)))) + chunk(b"IEND", b"")
+open(f"{C}/png1", "wb").write(b"\x00" + pal)
+try:
+    from PIL import Image
+    im = Image.new("RGB", (16, 16))
+    for x in range(16):
+        for y in range(16): im.putpixel((x, y), (x * 16, y * 16, 128))
+    b = io.BytesIO(); im.save(b, "JPEG", quality=85); open(f"{C}/jpg0", "wb").write(b"\x01" + b.getvalue())
+    b = io.BytesIO(); im.convert("L").save(b, "JPEG", quality=50); open(f"{C}/jpg1", "wb").write(b"\x01" + b.getvalue())
+except Exception:
+    pass
+open(f"{C}/gz0", "wb").write(b"\x02" + gzip.compress(b"hello hello hello " * 100))
+open(f"{C}/zl0", "wb").write(b"\x03" + zlib.compress(bytes(range(256)) * 20))
+PY
+}
+
 seed_tls() {
     python3 - build/fuzz/tls/corpus <<'PY'
 import sys, struct
@@ -170,6 +197,7 @@ for t in $TOOLS; do
         net)  build net kernel/net/net.c kernel/net/ssh.c kernel/net/wifi.c kernel/net/nodes.c kernel/net/sha256.c kernel/net/x25519.c kernel/lib/base64.c && seed_net && run net 65536 ;;
         pipe) build pipe kernel/net/pipe.c kernel/net/nodes.c kernel/net/sha256.c kernel/lib/base64.c && seed_pipe && run pipe 65536 ;;
         tls)  build tls kernel/net/tls.c kernel/net/asn1.c kernel/net/bn.c kernel/net/ec.c kernel/net/rsa.c kernel/net/x509.c kernel/net/pki_selftest.c kernel/net/sha512.c kernel/net/x25519.c && seed_tls && run tls 65536 ;;
+        img)  build img kernel/gfx/png.c kernel/gfx/jpeg.c kernel/lib/inflate.c && seed_img && run img 65536 ;;
         *) echo "no such tool: $t" ;;
     esac
 done

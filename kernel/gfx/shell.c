@@ -27,6 +27,9 @@
 #include <eb/ld.h>
 #include <eb/lang.h>
 #include <eb/html.h>
+#include <eb/web.h>
+#include <eb/image.h>
+#include <eb/mm.h>
 #include <eb/string.h>
 #include <eb/time.h>
 
@@ -230,7 +233,9 @@ typedef enum {
     HOT_COMPILE,     /* turn the focused text of c into assembly and an image */
     HOT_BUILD,       /* compile, assemble and link everything in the focused list */
     HOT_INSTALL,     /* make the focused kernel the one the next start runs */
-    HOT_RESTART      /* save everything and start the machine again */
+    HOT_RESTART,     /* save everything and start the machine again */
+    HOT_KEEP,        /* the browser: remember the page as a bookmark */
+    HOT_FIND         /* the browser: open the search for a word on the page */
 } hot_kind;
 
 typedef struct {
@@ -288,6 +293,7 @@ enum {
     SCR_INDEX,       /* the index listing */
     SCR_TEXT2,       /* the second pane's text, in the split */
     SCR_TERM,        /* the terminal's transcript */
+    SCR_WEB,         /* the browser's page */
     SCR_COUNT
 };
 
@@ -1366,6 +1372,756 @@ static void submit_form(u32 field_index)
     browse_remember();
     browse_fwd_count = 0;
     browse_to(dest);
+}
+
+/* ------------------------------------------------------------------ */
+/* The browser: the web looked at directly, no object in between      */
+/* ------------------------------------------------------------------ */
+/*
+ * A mode of its own, like the terminal. The page lives in memory the
+ * browser owns, not in the graph: nothing is saved by looking, and
+ * what the person keeps -- a bookmark -- they keep on purpose. The
+ * network thread fetches while this keeps drawing; pictures follow
+ * one by one once the page is there.
+ */
+#define WEB_URL_MAX       512
+#define WEB_HIST          24
+#define WEB_BUF_PAGES     512               /* 2 MiB: the answer, the page unpacked in place */
+#define WEB_PIC_PAGES     256               /* 1 MiB for a picture as it came */
+#define WEB_SCRATCH_PAGES 2048              /* 8 MiB of decoding room */
+#define WEB_PIC_PIXELS    (1600u * 1200u)   /* the largest picture decoded */
+#define WEB_BODY_MAX      2048
+
+typedef struct {
+    char url[HTML_URL_MAX];                 /* as the page named it */
+    u32 *px; u32 w, h, pages;
+    u8   state;                             /* 0 wanted, 1 loading, 2 ready, 3 failed */
+} web_pic;
+
+static struct {
+    u8  *buf, *pic_buf, *scratch;
+    char url[WEB_URL_MAX];                  /* the page shown */
+    char addr[WEB_URL_MAX];                 /* the address line */
+    u32  addr_len;
+    bool addr_edit;
+    char title[HTML_TITLE_MAX];
+    u8  *body; u32 len;
+    u32  status;
+    bool have, secure, verified, gzip, chunked, cut, failed;
+    char reason[96];
+    u32  req; bool loading;
+    char pending[WEB_URL_MAX]; u8 pending_method; u8 pending_body[WEB_BODY_MAX]; u32 pending_blen; bool has_pending;
+    char back[WEB_HIST][WEB_URL_MAX]; u32 nback;
+    char fwd[WEB_HIST][WEB_URL_MAX];  u32 nfwd;
+    web_pic pic[HTML_IMAGES_MAX]; u32 npic;
+    i32  pic_loading; u32 pic_req;
+    char find[48]; u32 find_len; bool find_edit; u32 find_from, find_row;
+    i32  spot;                              /* keyboard focus over the spots; -1 none */
+    u32  rows, vis;
+} web = { .pic_loading = -1, .spot = -1 };
+static char web_images[HTML_IMAGES_MAX][HTML_URL_MAX];
+static u32  web_image_count;
+static u8   web_start[16384];               /* the start page, built from the bookmarks */
+
+static bool web_prepare(void)
+{
+    if (web.buf) return true;
+    phys_addr b = pmm_alloc_contig(WEB_BUF_PAGES);
+    phys_addr p = pmm_alloc_contig(WEB_PIC_PAGES);
+    phys_addr s = pmm_alloc_contig(WEB_SCRATCH_PAGES);
+    if (b == PMM_NO_FRAME || p == PMM_NO_FRAME || s == PMM_NO_FRAME) return false;
+    web.buf = (u8 *)phys_to_virt(b);
+    web.pic_buf = (u8 *)phys_to_virt(p);
+    web.scratch = (u8 *)phys_to_virt(s);
+    return true;
+}
+
+static void web_pics_drop(void)
+{
+    for (u32 i = 0; i < web.npic; i++) {
+        if (web.pic[i].px && web.pic[i].pages)
+            pmm_free_contig(virt_to_phys(web.pic[i].px), web.pic[i].pages);
+        web.pic[i].px = NULL;
+    }
+    web.npic = 0;
+    web.pic_loading = -1;
+}
+
+static u32 web_scheme(const char *u)
+{
+    if (u[0]=='h' && u[1]=='t' && u[2]=='t' && u[3]=='p' && u[4]==':' && u[5]=='/' && u[6]=='/') return 7;
+    if (u[0]=='h' && u[1]=='t' && u[2]=='t' && u[3]=='p' && u[4]=='s' && u[5]==':' && u[6]=='/' && u[7]=='/') return 8;
+    return 0;
+}
+
+/* A link against the page it stands on, the scheme kept: absolute,
+ * scheme-relative, host-relative, a query alone, or relative to the
+ * page's directory with ../ walked. Empty for what is not a page. */
+static void web_resolve(const char *base, const char *href, char *out, u32 max)
+{
+    out[0] = 0;
+    if (!href || !href[0] || href[0] == '#') return;
+    if ((href[0]=='m' && href[1]=='a' && href[2]=='i' && href[3]=='l' && href[4]=='t' && href[5]=='o' && href[6]==':') ||
+        (href[0]=='j' && href[1]=='a' && href[2]=='v' && href[3]=='a')) return;
+
+    u32 n = 0;
+    if (web_scheme(href)) {
+        while (href[n] && n < max - 1) { out[n] = href[n]; n++; }
+        out[n] = 0;
+        return;
+    }
+    u32 sl = web_scheme(base);
+    if (!sl) { u32 i = 0; while (href[i] && i < max - 1) { out[i] = href[i]; i++; } out[i] = 0; return; }
+
+    /* the base, in parts: scheme, host, path, query */
+    u32 hs = sl, he = hs;
+    while (base[he] && base[he] != '/' && base[he] != '?') he++;
+    u32 ps = he, pe = ps;
+    while (base[pe] && base[pe] != '?') pe++;
+
+    if (href[0] == '/' && href[1] == '/') {
+        for (u32 i = 0; i < sl && n < max - 1; i++) out[n++] = base[i];
+        for (u32 i = 2; href[i] && n < max - 1; i++) out[n++] = href[i];
+    } else if (href[0] == '/') {
+        for (u32 i = 0; i < he && n < max - 1; i++) out[n++] = base[i];
+        for (u32 i = 0; href[i] && n < max - 1; i++) out[n++] = href[i];
+    } else if (href[0] == '?') {
+        for (u32 i = 0; i < pe && n < max - 1; i++) out[n++] = base[i];
+        if (pe == ps && n < max - 1) out[n++] = '/';
+        for (u32 i = 0; href[i] && n < max - 1; i++) out[n++] = href[i];
+    } else {
+        /* the directory of the path, then the link, with ./ and ../ */
+        u32 dir = ps;
+        for (u32 i = ps; i < pe; i++) if (base[i] == '/') dir = i + 1;
+        char path[WEB_URL_MAX];
+        u32 pl = 0;
+        for (u32 i = ps; i < dir && pl < sizeof(path) - 1; i++) path[pl++] = base[i];
+        if (pl == 0) path[pl++] = '/';
+        const char *h = href;
+        for (;;) {
+            if (h[0] == '.' && h[1] == '/') { h += 2; continue; }
+            if (h[0] == '.' && h[1] == '.' && (h[2] == '/' || h[2] == 0)) {
+                h += h[2] ? 3 : 2;
+                if (pl > 1) { pl--; while (pl > 1 && path[pl - 1] != '/') pl--; }
+                continue;
+            }
+            break;
+        }
+        for (u32 i = 0; h[i] && pl < sizeof(path) - 1; i++) path[pl++] = h[i];
+        path[pl] = 0;
+        for (u32 i = 0; i < he && n < max - 1; i++) out[n++] = base[i];
+        for (u32 i = 0; path[i] && n < max - 1; i++) out[n++] = path[i];
+    }
+    out[n] = 0;
+}
+
+/* Asks for a page: remembered as the next thing to fetch, started by
+ * the tick when the network thread is free. */
+static void web_begin(const char *url, u8 method, const u8 *body, u32 blen)
+{
+    u32 n = 0;
+    if (!web_scheme(url)) { const char *s = "http://"; while (s[n]) { web.pending[n] = s[n]; n++; } }
+    for (u32 i = 0; url[i] && n < WEB_URL_MAX - 1; i++) web.pending[n++] = url[i];
+    web.pending[n] = 0;
+    web.pending_method = method;
+    web.pending_blen = blen > WEB_BODY_MAX ? WEB_BODY_MAX : blen;
+    if (web.pending_blen) memcpy(web.pending_body, body, web.pending_blen);
+    web.has_pending = true;
+    web.loading = true;
+    web.failed = false;
+    web.spot = -1;
+    field_focus = -1;
+    web.addr_edit = false;
+    u32 a = 0;
+    while (web.pending[a] && a < WEB_URL_MAX - 1) { web.addr[a] = web.pending[a]; a++; }
+    web.addr[a] = 0; web.addr_len = a;
+    nav.redraw = true;
+}
+
+static void web_go(const char *url, u8 method, const u8 *body, u32 blen, bool remember)
+{
+    if (remember && web.url[0]) {
+        if (web.nback >= WEB_HIST) {
+            for (u32 i = 1; i < WEB_HIST; i++) memcpy(web.back[i - 1], web.back[i], WEB_URL_MAX);
+            web.nback--;
+        }
+        memcpy(web.back[web.nback++], web.url, WEB_URL_MAX);
+        web.nfwd = 0;
+    }
+    web_begin(url, method, body, blen);
+}
+
+static void web_decode_pic(web_pic *p, const u8 *data, u32 len)
+{
+    u32 w, h;
+    p->state = 3;
+    if (!image_size(data, len, &w, &h) || (u64)w * h > WEB_PIC_PIXELS) return;
+    u32 pages = (u32)(((u64)w * h * 4 + PAGE_SIZE - 1) / PAGE_SIZE);
+    phys_addr pa = pmm_alloc_contig(pages);
+    if (pa == PMM_NO_FRAME) return;
+    u32 *px = (u32 *)phys_to_virt(pa);
+    bool ok = image_kind(data, len) == IMAGE_PNG
+            ? png_decode(data, len, px, WEB_PIC_PIXELS, &w, &h, web.scratch, WEB_SCRATCH_PAGES * PAGE_SIZE)
+            : jpeg_decode(data, len, px, WEB_PIC_PIXELS, &w, &h, web.scratch, WEB_SCRATCH_PAGES * PAGE_SIZE);
+    if (!ok) { pmm_free_contig(pa, pages); return; }
+    p->px = px; p->w = w; p->h = h; p->pages = pages;
+    p->state = 2;
+    kprintf("web:  picture %s: %s %ux%u\n", p->url, image_kind(data, len) == IMAGE_PNG ? "png" : "jpeg", w, h);
+}
+
+/* Once a loop of the shell: the answer taken when it came, the next
+ * picture asked for when the wire is free. */
+static void web_tick(void)
+{
+    if (!web.buf) return;
+    web_answer a;
+
+    if (web.has_pending && !web_busy()) {
+        web_pics_drop();
+        web.req = web_ask(web.pending, web.pending_method,
+                          web.pending_blen ? web.pending_body : NULL, web.pending_blen,
+                          web.buf, WEB_BUF_PAGES * PAGE_SIZE);
+        if (web.req) web.has_pending = false;
+        else if (!net_up()) { web.has_pending = false; web.loading = false; web.failed = true;
+                              memcpy(web.reason, "no network", 11); nav.redraw = true; }
+    }
+
+    if (web.loading && !web.has_pending && web_finished(web.req, &a)) {
+        web.loading = false;
+        web.have = a.ok;
+        web.failed = !a.ok;
+        web.status = a.status;
+        web.secure = a.secure; web.verified = a.verified;
+        web.gzip = a.gzip; web.chunked = a.chunked; web.cut = a.cut;
+        u32 n = 0;
+        while (a.reason && a.reason[n] && n < sizeof(web.reason) - 1) { web.reason[n] = a.reason[n]; n++; }
+        web.reason[n] = 0;
+        web.body = a.data; web.len = a.len;
+        if (a.ok) {
+            u32 u = 0;
+            while (a.final_url[u] && u < WEB_URL_MAX - 1) { web.url[u] = a.final_url[u]; u++; }
+            web.url[u] = 0;
+            memcpy(web.addr, web.url, WEB_URL_MAX);
+            web.addr_len = u;
+        }
+        web.title[0] = 0;
+        scrolls[SCR_WEB] = 0;
+        web.find_from = 0;
+        web.spot = -1;
+        field_focus = -1;
+        web_image_count = 0;
+        web_pics_drop();                 /* the old page's pictures, noted while it was still shown */
+        nav.redraw = true;
+    }
+
+    if (web.loading || web.has_pending) return;
+
+    if (web.pic_loading >= 0) {
+        if (web_finished(web.pic_req, &a)) {
+            web_pic *p = &web.pic[web.pic_loading];
+            if (a.ok && a.status == 200 && a.len) web_decode_pic(p, a.data, a.len);
+            else p->state = 3;
+            web.pic_loading = -1;
+            nav.redraw = true;
+        }
+        return;
+    }
+    for (u32 i = 0; i < web.npic; i++) {
+        if (web.pic[i].state != 0) continue;
+        char url[WEB_URL_MAX];
+        web_resolve(web.url, web.pic[i].url, url, sizeof(url));
+        if (!url[0] || web_busy()) { web.pic[i].state = 3; continue; }
+        web.pic_req = web_ask(url, WEB_GET, NULL, 0, web.pic_buf, WEB_PIC_PAGES * PAGE_SIZE);
+        if (!web.pic_req) { web.pic[i].state = 3; continue; }
+        web.pic[i].state = 1;
+        web.pic_loading = (i32)i;
+        return;
+    }
+}
+
+/* What the renderer asks for: the picture, when it is there. The
+ * urls it names are noted, so the tick can go and get them. */
+static const html_image *web_image_lookup(void *ctx, const char *url)
+{
+    (void)ctx;
+    static html_image img;
+    for (u32 i = 0; i < web.npic; i++) {
+        if (strcmp(web.pic[i].url, url) != 0) continue;
+        if (web.pic[i].state != 2) return NULL;
+        img.px = web.pic[i].px; img.w = web.pic[i].w; img.h = web.pic[i].h;
+        return &img;
+    }
+    if (web.npic < HTML_IMAGES_MAX && !web.loading && !web.has_pending) {
+        web_pic *p = &web.pic[web.npic++];
+        memset(p, 0, sizeof(*p));
+        u32 n = 0;
+        while (url[n] && n < HTML_URL_MAX - 1) { p->url[n] = url[n]; n++; }
+        p->url[n] = 0;
+    }
+    return NULL;
+}
+
+/* The start page: the bookmarks as links, out of the bookmarks text
+ * ("url | title", a line each). */
+static u32 web_start_page(void)
+{
+    u32 at = 0;
+    const char *s;
+    s = "<html><body><h1>bookmarks</h1>"; while (*s) web_start[at++] = (u8)*s++;
+    object *bm = web_bookmarks_object();
+    const char *d = bm ? (const char *)obj_data(bm) : NULL;
+    u64 size = bm ? obj_size(bm) : 0;
+    u32 count = 0;
+    u64 i = 0;
+    while (d && i < size && d[i] && at + 700 < sizeof(web_start)) {
+        char url[WEB_URL_MAX], title[HTML_TITLE_MAX];
+        u32 ul = 0, tl = 0;
+        while (i < size && d[i] && d[i] != '\n' && d[i] != '|') { if (ul < sizeof(url) - 1 && d[i] != ' ') url[ul++] = d[i]; i++; }
+        url[ul] = 0;
+        if (i < size && d[i] == '|') { i++; while (i < size && d[i] == ' ') i++; }
+        while (i < size && d[i] && d[i] != '\n') { if (tl < sizeof(title) - 1) title[tl++] = d[i]; i++; }
+        while (tl && title[tl - 1] == ' ') tl--;
+        title[tl] = 0;
+        if (i < size && d[i] == '\n') i++;
+        if (!ul) continue;
+        s = "<p><a href=\""; while (*s) web_start[at++] = (u8)*s++;
+        for (u32 k = 0; k < ul; k++) web_start[at++] = (u8)(url[k] == '"' ? '\'' : url[k]);
+        s = "\">"; while (*s) web_start[at++] = (u8)*s++;
+        const char *say = tl ? title : url;
+        for (u32 k = 0; say[k]; k++) web_start[at++] = (u8)(say[k] == '<' ? '(' : say[k] == '&' ? '+' : say[k]);
+        s = "</a></p>"; while (*s) web_start[at++] = (u8)*s++;
+        count++;
+    }
+    if (!count) {
+        s = "<p>no bookmarks yet. type an address and press enter; 'keep' remembers the page here.</p>";
+        while (*s) web_start[at++] = (u8)*s++;
+    }
+    s = "</body></html>"; while (*s) web_start[at++] = (u8)*s++;
+    web_start[at] = 0;
+    return at;
+}
+
+/* The page kept: a line in the bookmarks text, once. */
+static void web_keep(void)
+{
+    object *bm = web_bookmarks_object();
+    if (!bm || !web.url[0] || !web.have) return;
+    char *d = (char *)obj_data(bm);
+    u64 size = obj_size(bm);
+    if (!d) return;
+    u64 len = 0;
+    while (len < size && d[len]) len++;
+    /* already there? */
+    u64 i = 0;
+    while (i < len) {
+        u32 k = 0;
+        while (i + k < len && web.url[k] && d[i + k] == web.url[k]) k++;
+        if (web.url[k] == 0 && (i + k >= len || d[i + k] == ' ' || d[i + k] == '\n' || d[i + k] == '|')) {
+            journal_says("web", "already a bookmark");
+            return;
+        }
+        while (i < len && d[i] != '\n') i++;
+        i++;
+    }
+    u32 ul = 0; while (web.url[ul]) ul++;
+    u32 tl = 0; while (web.title[tl]) tl++;
+    if (len + ul + tl + 5 >= size) { journal_says("web", "the bookmarks are full"); return; }
+    for (u32 k = 0; k < ul; k++) d[len++] = web.url[k];
+    if (tl) { d[len++] = ' '; d[len++] = '|'; d[len++] = ' '; for (u32 k = 0; k < tl; k++) d[len++] = web.title[k] == '\n' ? ' ' : web.title[k]; }
+    d[len++] = '\n';
+    for (u64 k = len; k < size; k++) d[k] = 0;
+    obj_touch(bm);
+    nav.changes++;
+    kprintf("web:  kept %s as a bookmark\n", web.url);
+    journal_says("web", "a bookmark was kept");
+    nav.redraw = true;
+}
+
+/* A form sent from the browser: the fields gathered, by post as a
+ * body or by get as a query. */
+static void web_submit(u32 field_index)
+{
+    if (field_index >= field_count) return;
+    u32 form = field_defs[field_index].form;
+    static char query[WEB_BODY_MAX];
+    u32 q = 0;
+    bool first = true;
+    for (u32 i = 0; i < field_count && q < sizeof(query) - 8; i++) {
+        if (field_defs[i].form != form) continue;
+        if (field_defs[i].kind == FIELD_SUBMIT && field_defs[i].name[0] == 0) continue;
+        if (field_defs[i].name[0] == 0) continue;
+        if (!first) query[q++] = '&';
+        first = false;
+        for (u32 j = 0; field_defs[i].name[j] && q < sizeof(query) - 4; j++) query[q++] = field_defs[i].name[j];
+        query[q++] = '=';
+        const char *val = field_defs[i].kind == FIELD_SUBMIT ? field_init[i] : field_val[i];
+        for (u32 j = 0; val[j] && q < sizeof(query) - 4; j++) {
+            char c = val[j];
+            bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                         (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~';
+            if (plain) query[q++] = c;
+            else if (c == ' ') query[q++] = '+';
+            else {
+                static const char hex[] = "0123456789ABCDEF";
+                query[q++] = '%'; query[q++] = hex[(u8)c >> 4]; query[q++] = hex[(u8)c & 15];
+            }
+        }
+    }
+    query[q] = 0;
+
+    const char *action = form < form_count ? form_defs[form].action : "";
+    char dest[WEB_URL_MAX];
+    if (action[0]) web_resolve(web.url, action, dest, sizeof(dest));
+    else memcpy(dest, web.url, WEB_URL_MAX);
+    if (!dest[0]) return;
+
+    if (form < form_count && form_defs[form].method == METHOD_POST) {
+        web_go(dest, WEB_POST, (const u8 *)query, q, true);
+        return;
+    }
+    u32 dl = 0;
+    while (dest[dl] && dest[dl] != '?') dl++;
+    if (dl < sizeof(dest) - 1) {
+        dest[dl++] = '?';
+        for (u32 i = 0; query[i] && dl < sizeof(dest) - 1; i++) dest[dl++] = query[i];
+        dest[dl] = 0;
+    }
+    web_go(dest, WEB_GET, NULL, 0, true);
+}
+
+static void web_follow_link(u32 spot_index)
+{
+    if (spot_index >= link_spot_count) return;
+    u32 li = link_spots[spot_index].ref;
+    if (li >= link_count) return;
+    char dest[WEB_URL_MAX];
+    web_resolve(web.url[0] ? web.url : "http://x/", link_urls[li], dest, sizeof(dest));
+    if (!dest[0]) return;
+    web_go(dest, WEB_GET, NULL, 0, true);
+}
+
+static void web_back(void)
+{
+    if (!web.nback) return;
+    if (web.url[0] && web.nfwd < WEB_HIST) memcpy(web.fwd[web.nfwd++], web.url, WEB_URL_MAX);
+    char to[WEB_URL_MAX];
+    memcpy(to, web.back[--web.nback], WEB_URL_MAX);
+    web_begin(to, WEB_GET, NULL, 0);
+}
+
+static void web_forward(void)
+{
+    if (!web.nfwd) return;
+    if (web.url[0] && web.nback < WEB_HIST) memcpy(web.back[web.nback++], web.url, WEB_URL_MAX);
+    char to[WEB_URL_MAX];
+    memcpy(to, web.fwd[--web.nfwd], WEB_URL_MAX);
+    web_begin(to, WEB_GET, NULL, 0);
+}
+
+/* Enter on the keyboard's spot: a link is followed, a field takes the
+ * writing, a button sends. */
+static void web_press_spot(void)
+{
+    if (web.spot < 0) return;
+    u32 s = (u32)web.spot;
+    if (s < link_spot_count) { web_follow_link(s); return; }
+    s -= link_spot_count;
+    if (s >= field_spot_count) return;
+    u32 fi = field_spots[s].ref;
+    if (fi < field_count && field_defs[fi].kind == FIELD_SUBMIT) web_submit(fi);
+    else field_focus = (i32)s;
+    nav.redraw = true;
+}
+
+static void draw_web_shell(i32 sw, i32 sh, i32 top, i32 bottom)
+{
+    (void)sh;
+    i32 x = PAD * 2;
+    i32 y = top + 10;
+    i32 w = sw - PAD * 4;
+
+    if (!web_prepare()) {
+        text_at(x, y, x + w, "no memory for the browser.", C_FAINT);
+        return;
+    }
+
+    /* The strip: back, forward, the address, go, keep, and how the
+     * page came. */
+    i32 sx = x;
+    sx = strip_word(sx, y, "<", web.nback > 0, HOT_BACK);
+    sx = strip_word(sx, y, ">", web.nfwd > 0, HOT_FWD);
+    i32 right = x + w;
+    i32 keep_w = 4 * GLYPH_W + 8, go_w = 2 * GLYPH_W + 8, find_w = 4 * GLYPH_W + 8;
+    i32 addr_w = right - sx - keep_w - go_w - find_w - 3 * GLYPH_W;
+    if (addr_w < 10 * GLYPH_W) addr_w = 10 * GLYPH_W;
+    if (web.addr_edit) fb_rect(sx - 3, y - 3, addr_w, ROW, C_PANEL_HI);
+    const char *shown = web.addr;
+    u32 al = web.addr_len;
+    u32 cols = (u32)(addr_w / GLYPH_W) - 1;
+    if (al > cols) shown = web.addr + (al - cols);       /* the tail, where typing goes */
+    text_at(sx, y, sx + addr_w, shown, web.addr_edit ? C_TEXT : (web.url[0] ? C_ACCENT : C_FAINT));
+    if (web.addr_edit) {
+        u32 vl = al > cols ? cols : al;
+        fb_rect(sx + (i32)vl * GLYPH_W, y, 2, GLYPH_H, C_ACCENT);
+    } else if (!web.url[0] && !web.loading && web.addr_len == 0) {
+        text_at(sx, y, sx + addr_w, "an address, then enter", C_FAINT);
+    }
+    hot_add(sx - 3, y - 3, addr_w, ROW, HOT_ADDR, 0);
+    sx += addr_w + GLYPH_W;
+
+    bool lit = is_hovered(HOT_GO, 0);
+    if (lit) fb_rect(sx - 4, y - 3, go_w, ROW, C_EDGE);
+    text_at(sx, y, right, "go", lit ? C_TEXT : C_WRITE);
+    hot_add(sx - 4, y - 3, go_w, ROW, HOT_GO, 0);
+    sx += go_w + GLYPH_W;
+
+    lit = is_hovered(HOT_KEEP, 0);
+    bool can_keep = web.have && web.url[0];
+    if (lit && can_keep) fb_rect(sx - 4, y - 3, keep_w, ROW, C_EDGE);
+    text_at(sx, y, right, "keep", can_keep ? (lit ? C_TEXT : C_WRITE) : C_FAINT);
+    if (can_keep) hot_add(sx - 4, y - 3, keep_w, ROW, HOT_KEEP, 0);
+    sx += keep_w + GLYPH_W;
+
+    lit = is_hovered(HOT_FIND, 0);
+    if (lit || web.find_edit) fb_rect(sx - 4, y - 3, find_w, ROW, C_EDGE);
+    text_at(sx, y, right, "find", (lit || web.find_edit) ? C_TEXT : C_WRITE);
+    hot_add(sx - 4, y - 3, find_w, ROW, HOT_FIND, 0);
+
+    fb_rect(x, y + ROW - 4, w, 1, C_EDGE);
+
+    /* The second line: how it came, the title, what is being looked for. */
+    i32 iy = y + ROW;
+    char info[200];
+    u32 at = 0;
+    if (web.loading) at = put(info, at, "loading ...");
+    else if (web.failed) { at = put(info, at, "not fetched: "); at = put(info, at, web.reason[0] ? web.reason : "no answer"); }
+    else if (web.have) {
+        if (web.status != 200) { at = put(info, at, "status "); at = put_dec(info, at, web.status); at = put(info, at, "  "); }
+        at = put(info, at, !web.secure ? "plain" : web.verified ? "verified" : "sealed, unverified");
+        if (web.cut) at = put(info, at, "  cut short");
+        if (web.title[0]) { at = put(info, at, "  --  "); for (u32 i = 0; web.title[i] && at < sizeof(info) - 2; i++) info[at++] = web.title[i]; }
+    } else if (!web.url[0]) at = put(info, at, "bookmarks");
+    info[at] = 0;
+    /* The title is utf-8: drawn by code points, up to the search's column. */
+    {
+        i32 tx = x, limit = x + w - 30 * GLYPH_W;
+        color ic = web.have && web.secure && !web.verified ? C_FAINT : C_DIM;
+        const char *s = info;
+        while (*s && tx + GLYPH_W <= limit) {
+            u8 c = (u8)*s;
+            u32 cp = c, more = 0;
+            if      ((c & 0xE0) == 0xC0) { cp = c & 0x1Fu; more = 1; }
+            else if ((c & 0xF0) == 0xE0) { cp = c & 0x0Fu; more = 2; }
+            else if ((c & 0xF8) == 0xF0) { cp = c & 0x07u; more = 3; }
+            s++;
+            while (more-- && ((u8)*s & 0xC0) == 0x80) cp = (cp << 6) | ((u8)*s++ & 0x3Fu);
+            fb_glyph_cp(tx, iy, cp, ic, 0, false);
+            tx += GLYPH_W;
+        }
+    }
+    if (web.find_edit || web.find_len) {
+        char fl[64];
+        u32 f = put(fl, 0, "find: ");
+        for (u32 i = 0; i < web.find_len && f < sizeof(fl) - 2; i++) fl[f++] = web.find[i];
+        if (web.find_edit) fl[f++] = '_';
+        fl[f] = 0;
+        text_at(x + w - 30 * GLYPH_W, iy, x + w, fl, C_TEXT);
+    }
+    fb_rect(x, iy + ROW - 4, w, 1, C_EDGE);
+
+    i32 by = iy + ROW + 2;
+    i32 bh = bottom - by - 6;
+    if (bh < GLYPH_H) return;
+
+    /* The page: the one fetched, or the bookmarks. */
+    const u8 *src; u64 len;
+    if (web.have && web.url[0]) { src = web.body; len = web.len; }
+    else { len = web_start_page(); src = web_start; }
+
+    char find_low[48];
+    for (u32 i = 0; i < web.find_len; i++) find_low[i] = to_lower(web.find[i]);
+    find_low[web.find_len] = 0;
+
+    html_sink sink = {
+        .urls = link_urls, .url_count = &link_count,
+        .link_spots = link_spots, .link_spot_count = &link_spot_count,
+        .forms = form_defs, .form_count = &form_count,
+        .fields = field_defs, .field_count = &field_count,
+        .field_spots = field_spots, .field_spot_count = &field_spot_count,
+        .field_values = field_val, .field_init = field_init,
+        .images = web_images, .image_count = &web_image_count,
+        .image = web_image_lookup, .image_ctx = NULL,
+        .title = web.title, .title_max = sizeof(web.title),
+        .find = web.find_len ? find_low : NULL, .find_from = web.find_from, .find_row = &web.find_row,
+    };
+    html_view v = {
+        .src = src, .len = len,
+        .x = x, .y = by, .w = w - 2 * GLYPH_W, .h = bh,
+        .scroll = scrolls[SCR_WEB],
+        .col = { C_TEXT, C_DIM, C_FAINT, C_ACCENT, C_EDGE },
+    };
+    web.rows = html_render(&v, &sink);
+    web.vis = (u32)(bh / GLYPH_H);
+
+    u32 print = fields_print();
+    if (print != field_shape) {
+        field_shape = print;
+        field_focus = -1;
+        for (u32 i = 0; i < field_count; i++) memcpy(field_val[i], field_init[i], HTML_VALUE_MAX);
+    }
+
+    for (u32 i = 0; i < link_spot_count; i++)
+        hot_add(link_spots[i].x, link_spots[i].y - 2, link_spots[i].w, link_spots[i].h + 4, HOT_LINK, i);
+    for (u32 i = 0; i < field_spot_count; i++) {
+        html_spot *sp = &field_spots[i];
+        u32 fi = sp->ref;
+        bool submit = fi < field_count && field_defs[fi].kind == FIELD_SUBMIT;
+        hot_add(sp->x, sp->y, sp->w, sp->h, submit ? HOT_SUBMIT : HOT_FIELD, i);
+        if (!submit && (i32)i == field_focus) {
+            u32 vl = 0;
+            while (field_val[fi][vl]) vl++;
+            i32 cx = sp->x + 2 + (i32)vl * GLYPH_W;
+            if (cx < sp->x + sp->w - 2) fb_rect(cx, sp->y + 3, 2, GLYPH_H, C_ACCENT);
+        }
+    }
+
+    /* The keyboard's spot, framed. */
+    if (web.spot >= 0) {
+        u32 s = (u32)web.spot;
+        const html_spot *sp = NULL;
+        if (s < link_spot_count) sp = &link_spots[s];
+        else if (s - link_spot_count < field_spot_count) sp = &field_spots[s - link_spot_count];
+        else web.spot = -1;
+        if (sp) fb_frame(sp->x - 2, sp->y - 2, sp->w + 4, sp->h + 4, 1, C_ACCENT);
+    }
+
+    scroll_area(SCR_WEB, x, by, w, bh, web.rows, web.vis);
+}
+
+/* The keys, in the browser. True when the key was taken. */
+static bool web_key(const key_event *k)
+{
+    u32 c = k->codepoint;
+
+    if (web.addr_edit) {
+        if (c == KEY_ESCAPE) { web.addr_edit = false; nav.redraw = true; return true; }
+        if (c == KEY_ENTER) {
+            web.addr_edit = false;
+            if (web.addr_len) web_go(web.addr, WEB_GET, NULL, 0, true);
+            return true;
+        }
+        if (c == '\b') { if (web.addr_len) web.addr[--web.addr_len] = 0; nav.redraw = true; return true; }
+        if (c >= 0x20 && c < 0x7F && !k->ctrl && web.addr_len < WEB_URL_MAX - 1) {
+            web.addr[web.addr_len++] = (char)c; web.addr[web.addr_len] = 0;
+            nav.redraw = true;
+        }
+        return true;
+    }
+
+    if (web.find_edit) {
+        if (c == KEY_ESCAPE) { web.find_edit = false; web.find_len = 0; web.find[0] = 0; nav.redraw = true; return true; }
+        if (c == KEY_ENTER) {
+            /* to the next row holding it, from below the last one */
+            if (web.find_row != (u32)-1) {
+                web.find_from = web.find_row + 1;
+                scrolls[SCR_WEB] = web.find_row;
+            } else {
+                web.find_from = 0;
+            }
+            nav.redraw = true;
+            return true;
+        }
+        if (c == '\b') { if (web.find_len) web.find[--web.find_len] = 0; web.find_from = 0; nav.redraw = true; return true; }
+        if (c >= 0x20 && c < 0x7F && !k->ctrl && web.find_len < sizeof(web.find) - 1) {
+            web.find[web.find_len++] = (char)c; web.find[web.find_len] = 0;
+            web.find_from = 0;
+            nav.redraw = true;
+        }
+        return true;
+    }
+
+    if (field_focus >= 0 && (u32)field_focus < field_spot_count) {
+        u32 fi = field_spots[field_focus].ref;
+        if (fi >= field_count || field_defs[fi].kind == FIELD_SUBMIT) { field_focus = -1; return true; }
+        if (c == KEY_ESCAPE) { field_focus = -1; nav.redraw = true; return true; }
+        if (c == KEY_ENTER) { u32 saved = fi; field_focus = -1; web_submit(saved); return true; }
+        if (c == '\b') { u32 l = 0; while (field_val[fi][l]) l++; if (l) field_val[fi][l - 1] = 0; nav.redraw = true; return true; }
+        if (c >= 0x20 && c < 0x7F && !k->ctrl) {
+            u32 l = 0; while (field_val[fi][l]) l++;
+            if (l < HTML_VALUE_MAX - 1) { field_val[fi][l] = (char)c; field_val[fi][l + 1] = 0; }
+            nav.redraw = true;
+            return true;
+        }
+        return true;
+    }
+
+    u32 spots = link_spot_count + field_spot_count;
+    switch (c) {
+    case KEY_ENTER:
+        if (web.spot >= 0) web_press_spot();
+        else { web.addr_edit = true; nav.redraw = true; }
+        return true;
+    case KEY_ESCAPE:
+        web.spot = -1; nav.redraw = true; return true;
+    case '\b':
+        web_back(); return true;
+    case KEY_PGUP:  scroll_by(SCR_WEB, -(i32)(web.vis > 4 ? web.vis - 2 : 3)); return true;
+    case KEY_PGDN:  scroll_by(SCR_WEB, (i32)(web.vis > 4 ? web.vis - 2 : 3)); return true;
+    case KEY_UP:    scroll_by(SCR_WEB, -3); return true;
+    case KEY_DOWN:  scroll_by(SCR_WEB, 3); return true;
+    case KEY_HOME:  scrolls[SCR_WEB] = 0; nav.redraw = true; return true;
+    case KEY_END:   scroll_by(SCR_WEB, (i32)web.rows); return true;
+    case 'n': case 'j':
+        if (spots) web.spot = (web.spot + 1) % (i32)spots;
+        nav.redraw = true; return true;
+    case 'p': case 'k':
+        if (spots) web.spot = web.spot <= 0 ? (i32)spots - 1 : web.spot - 1;
+        nav.redraw = true; return true;
+    case '/':
+        web.find_edit = true; web.find_from = 0; nav.redraw = true; return true;
+    case 'b':
+        web_keep(); return true;
+    default:
+        break;
+    }
+    if (c >= 0x20 && c < 0x7F && !k->ctrl) {
+        /* letters with nothing else to take them start a fresh address */
+        web.addr_edit = true;
+        web.addr_len = 0;
+        web.addr[web.addr_len++] = (char)c;
+        web.addr[web.addr_len] = 0;
+        nav.redraw = true;
+        return true;
+    }
+    return false;
+}
+
+/* A press in the browser. True when it was the browser's to take. */
+static bool web_hot(const hot_region *r)
+{
+    switch (r->kind) {
+    case HOT_ADDR:
+        web.addr_edit = true; web.find_edit = false; field_focus = -1;
+        nav.redraw = true; return true;
+    case HOT_GO:
+        web.addr_edit = false;
+        if (web.addr_len) web_go(web.addr, WEB_GET, NULL, 0, true);
+        return true;
+    case HOT_BACK: web_back(); return true;
+    case HOT_FWD:  web_forward(); return true;
+    case HOT_KEEP: web_keep(); return true;
+    case HOT_FIND: web.find_edit = !web.find_edit; web.addr_edit = false; nav.redraw = true; return true;
+    case HOT_LINK: web_follow_link(r->index); return true;
+    case HOT_FIELD:
+        if (r->index < field_spot_count) field_focus = (i32)r->index;
+        web.addr_edit = false; web.find_edit = false;
+        nav.redraw = true; return true;
+    case HOT_SUBMIT:
+        if (r->index < field_spot_count) web_submit(field_spots[r->index].ref);
+        return true;
+    default:
+        return false;
+    }
 }
 
 static void lens_html(object *o, i32 x, i32 y, i32 w, i32 h, bool live)
@@ -3003,6 +3759,7 @@ static const char *mode_name(shell_mode m)
     case SHELL_INDEX: return "index";
     case SHELL_SPLIT: return "split";
     case SHELL_TERM:  return "terminal";
+    case SHELL_WEB:   return "browser";
     default:          return "?";
     }
 }
@@ -3627,6 +4384,7 @@ static void draw_all(void)
     case SHELL_INDEX: draw_index_shell(sw, sh, top, bottom); break;
     case SHELL_SPLIT: draw_split_shell(sw, sh, top, bottom); break;
     case SHELL_TERM:  draw_term_shell(sw, sh, top, bottom); break;
+    case SHELL_WEB:   draw_web_shell(sw, sh, top, bottom); break;
     default: break;
     }
 
@@ -3754,6 +4512,9 @@ static void draw_all(void)
         else if (nav.mode == SHELL_TERM)
             at = put(line, at, "keys go to the terminal; "
                                "'help' lists the words.");
+        else if (nav.mode == SHELL_WEB)
+            at = put(line, at, "type an address, enter fetches; n and p step through links; "
+                               "/ finds; b keeps; backspace goes back.");
         else if (nav.mode == SHELL_INDEX)
             at = put(line, at, "typing filters the index.");
         else if (obj_type(focus()) == TYPE_PROGRAM && proc_is_running(focus()))
@@ -4061,6 +4822,11 @@ static void handle_keys(void)
                 term_key(ts, (char)k.codepoint);
             nav.redraw = true;
             continue;
+        }
+
+        /* The browser takes its keys whole, tab excepted. */
+        if (nav.mode == SHELL_WEB && k.codepoint != KEY_TAB) {
+            if (web_key(&k)) continue;
         }
 
         /* Typing a new address. The first line of the page is the ask;
@@ -4439,6 +5205,9 @@ static void act_on(const hot_region *r)
         nav.redraw = true;
         if (r->kind == HOT_SEND || r->kind == HOT_ASK) return;
     }
+
+    /* In the browser the address, the links and the fields are its. */
+    if (nav.mode == SHELL_WEB && web_hot(r)) return;
 
     switch (r->kind) {
     case HOT_REFERENCE:
@@ -5699,6 +6468,9 @@ void shell_run(void *arg)
             char rep[112];
             if (update_report(rep, sizeof rep)) { term_note(rep); nav.redraw = true; }
         }
+
+        /* The browser's answers, and the next picture it wants. */
+        web_tick();
 
         if (nav.redraw) {
             nav.redraw = false;

@@ -132,14 +132,15 @@ bool net_crypto_ok(void);
 bool net_own_address(u8 ip[4]);
 
 /* TLS 1.3 over that stream: connect to addr:443, run the handshake,
- * send the http request sealed, and hand back the decrypted response
- * exactly as http_fetch would hand back a plain one. The channel is
- * sealed against reading and tampering, and the server's certificate
- * chain is checked against the trusted authorities for the host; a
- * server that is not verified is spoken to and marked, or refused when
- * the settings say "tls | strict". */
-bool tls_get(const u8 addr[4], const char *host, u32 hlen,
-             const char *path, u32 plen, u8 *out, u32 max, u32 *got);
+ * send the http request (head and body) sealed, and hand back the
+ * decrypted response exactly as the plain exchange would. The channel
+ * is sealed against reading and tampering, and the server's
+ * certificate chain is checked against the trusted authorities for the
+ * host; a server that is not verified is spoken to and marked, or
+ * refused when the settings say "tls | strict". */
+bool tls_exchange(const u8 addr[4], const char *host, u32 hlen,
+                  const u8 *req, u32 rlen, const u8 *body, u32 blen,
+                  u8 *out, u32 max, u32 *got);
 bool tls_last_verified(void);       /* the server's identity was proven */
 const char *tls_last_reason(void);  /* when it was not: why, in a sentence; empty otherwise */
 bool tls_pki_selftest(void);        /* the certificate arithmetic's known answers; run once at start */
@@ -159,5 +160,28 @@ bool net_last_verified(void);
  * self-update both go through here. */
 bool net_fetch(const char *url, u32 ulen, u8 *out, u32 max,
                u32 *body_off, u32 *body_len, bool *secure);
+
+/* The fuller form the browser uses: a method and a body, cookies
+ * exchanged through two callbacks (the jar lives above net.c), the
+ * status of the final hop and where it was. The response lands raw:
+ * status line, headers, the body as it came. Any status that is not
+ * a redirect is an answer; ok says one came at all. */
+typedef struct {
+    u8        method;              /* WEB_GET (0) or WEB_POST (1) */
+    const u8 *body; u32 blen;      /* application/x-www-form-urlencoded */
+    bool      accept_gzip;
+    u32  (*cookies)(void *ctx, const char *host, u32 hlen, const char *path, u32 plen,
+                    bool secure, char *out, u32 max);
+    void (*cookie)(void *ctx, const char *host, u32 hlen, const char *path, u32 plen,
+                   bool secure, const char *value, u32 len);
+    void *ctx;
+    /* answered */
+    u32  status;
+    u32  body_off, body_len;
+    bool secure, verified, cut;
+    const char *reason;
+    char final_url[512];
+} net_request;
+bool net_fetch_ex(const char *url, u32 ulen, u8 *out, u32 max, net_request *r);
 
 #endif /* EB_NET_H */
