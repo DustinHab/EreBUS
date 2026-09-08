@@ -1,18 +1,13 @@
 /*
- * EreBUS Gate -- a Windows front-end that packages a task and feeds it into
- * an EreBUS node over ssh, where the desk distributes it among the machines.
- *
- * Builds a .ebtask package (a "key | value" manifest, a "--" line, then the
- * payload) from the fields and the editor, and pipes it into the node's
- * terminal over the built-in OpenSSH client: "receive <n> bytes as job", the
- * package, "submit job", then reads the task back so the folded result shows.
+ * EreBUS Gate -- a Windows front-end and machine interface for an EreBUS
+ * far-work cluster. Seven views over the node's control channel: overview,
+ * nodes, tasks, jobs, logs, cluster and settings; and "api <verb>" for a
+ * program (json on stdout).
  *
  * No SDK: build with the .NET Framework compiler.
  *   tools\gate\build.cmd            -> build\gate\EreBUS-Gate.exe
- * No arguments opens the window; --headless drives the core from a command
- * line; --shot <file.png> renders the window to an image; "api <verb>" is the
- * machine interface (one json object on stdout), and "api watch" streams json
- * events, one per line.
+ * No arguments opens the window; --headless builds/feeds a package from a
+ * command line; --shot <file.png> [--view <name>] renders a view.
  */
 using System;
 using System.Collections.Generic;
@@ -29,12 +24,12 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyTitle("EreBUS Gate")]
 [assembly: System.Reflection.AssemblyProduct("EreBUS Gate")]
 [assembly: System.Reflection.AssemblyCompany("github.com/DustinHab/EreBUS")]
-[assembly: System.Reflection.AssemblyVersion("0.1.3.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.3.0")]
+[assembly: System.Reflection.AssemblyVersion("0.2.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.2.0.0")]
 
 namespace EreBUSGate
 {
-    static class Ver { public const string V = "0.1.3"; }
+    static class Ver { public const string V = "0.2"; }
 
     static class Look
     {
@@ -52,13 +47,10 @@ namespace EreBUSGate
         public static Font Small = new Font("Consolas", 8.25f, FontStyle.Regular, GraphicsUnit.Point);
         public static Font Head  = new Font("Consolas", 22f,   FontStyle.Bold,    GraphicsUnit.Point);
         public static Font Res   = new Font("Consolas", 12f,   FontStyle.Bold,    GraphicsUnit.Point);
+        public static Font Nav   = new Font("Consolas", 10.5f, FontStyle.Regular, GraphicsUnit.Point);
+        public static Font Big   = new Font("Consolas", 19f,   FontStyle.Bold,    GraphicsUnit.Point);
 
-        public static string Spaced(string s)
-        {
-            var sb = new StringBuilder();
-            for (int i = 0; i < s.Length; i++) { if (i > 0) sb.Append(' '); sb.Append(char.ToUpperInvariant(s[i])); }
-            return sb.ToString();
-        }
+        public static string Spaced(string s) { return s; }   /* labels stay plain lowercase, no caps, no letter-spacing */
     }
 
     class Spec
@@ -291,98 +283,236 @@ namespace EreBUSGate
         void Render() { Text = (on ? "[x] " : "[ ] ") + label; ForeColor = on ? Look.Accent : Look.Dim; }
     }
 
+    /* A dark, drawn table: columns and string-row data, optional per-cell
+     * colour, hover to scroll, click to select. No white chrome. */
+    class Grid : Panel
+    {
+        public class Column { public string Name; public int W; public Column(string n, int w) { Name = n; W = w; } }
+        public delegate Color Painter(int row, int col, string text);
+
+        List<Column> cols = new List<Column>();
+        List<string[]> rows = new List<string[]>();
+        public Painter Tint;
+        int top, sel = -1;
+        public event EventHandler Chosen;
+        const int RowH = 22, HeadH = 24, Pad = 12;
+
+        public Grid()
+        {
+            BackColor = Look.Panel;
+            this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            this.TabStop = false;
+            this.MouseEnter += delegate { try { this.Focus(); } catch { } };
+        }
+
+        public void Columns(Column[] c) { cols = new List<Column>(c); Invalidate(); }
+        public void SetRows(List<string[]> r) { rows = r ?? new List<string[]>(); if (sel >= rows.Count) sel = -1; Clamp(); Invalidate(); }
+        public string[] Current { get { return (sel >= 0 && sel < rows.Count) ? rows[sel] : null; } }
+        public int Count { get { return rows.Count; } }
+
+        void Clamp() { int vis = Math.Max(1, (Height - HeadH) / RowH); int max = Math.Max(0, rows.Count - vis); if (top > max) top = max; if (top < 0) top = 0; }
+
+        protected override void OnMouseWheel(MouseEventArgs e) { top -= (e.Delta > 0 ? 3 : -3); Clamp(); Invalidate(); base.OnMouseWheel(e); }
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            try { this.Focus(); } catch { }
+            if (e.Y < HeadH) return;
+            int i = top + (e.Y - HeadH) / RowH;
+            if (i >= 0 && i < rows.Count) { sel = i; Invalidate(); if (Chosen != null) Chosen(this, EventArgs.Empty); }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.Clear(Look.Panel);
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            int x = Pad;
+            using (var hb = new SolidBrush(Look.Accent))
+                foreach (var c in cols) { g.DrawString(Look.Spaced(c.Name), Look.Small, hb, x, 5); x += c.W; }
+            using (var pen = new Pen(Look.Edge)) g.DrawLine(pen, Pad, HeadH - 2, Width - Pad, HeadH - 2);
+
+            int vis = (Height - HeadH) / RowH;
+            for (int r = 0; r < vis; r++)
+            {
+                int ri = top + r; if (ri >= rows.Count) break;
+                int y = HeadH + r * RowH;
+                if (ri == sel) using (var sb = new SolidBrush(Look.Field)) g.FillRectangle(sb, Pad - 5, y, Width - 2 * Pad + 10, RowH);
+                var row = rows[ri]; x = Pad;
+                for (int c = 0; c < cols.Count; c++)
+                {
+                    string t = (c < row.Length) ? (row[c] ?? "") : "";
+                    Color col = Tint != null ? Tint(ri, c, t) : Look.Ink;
+                    using (var cb = new SolidBrush(col)) g.DrawString(t, Look.Mono, cb, x, y + 3);
+                    x += cols[c].W;
+                }
+            }
+            if (rows.Count == 0)
+                using (var db = new SolidBrush(Look.Faint)) g.DrawString("(nothing yet)", Look.Mono, db, Pad, HeadH + 4);
+
+            if (rows.Count > vis)
+            {
+                int trackH = Height - HeadH;
+                int thumbH = Math.Max(20, trackH * vis / rows.Count);
+                int thumbY = HeadH + (trackH - thumbH) * top / Math.Max(1, rows.Count - vis);
+                using (var tb = new SolidBrush(Look.Edge)) g.FillRectangle(tb, Width - 5, thumbY, 3, thumbH);
+            }
+        }
+    }
+
+    /* A stat tile: a big value over a spaced-caps label, in a drawn box. */
+    class Tile : Panel
+    {
+        public string Label = "", Value = "-";
+        public Color ValueColor = Look.Ink;
+        public Tile()
+        {
+            BackColor = Look.Ground;
+            this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+        }
+        public void Set(string v, Color c) { Value = v; ValueColor = c; Invalidate(); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.Clear(Look.Ground);
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            using (var pen = new Pen(Look.Edge)) g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+            using (var vb = new SolidBrush(ValueColor)) g.DrawString(Value, Look.Big, vb, 12, 11);
+            using (var lb = new SolidBrush(Look.Dim)) g.DrawString(Look.Spaced(Label), Look.Small, lb, 13, Height - 20);
+        }
+    }
+
+    /* A dark, drawn, read-only text pane: renders its lines itself (so it
+     * shows in a screenshot, unlike a native text box), pins to the last
+     * line, hover to scroll. "= ", "---" and "..." lines take the accent. */
+    class TextPane : Panel
+    {
+        List<string> lines = new List<string>(); int top;
+        public TextPane()
+        {
+            BackColor = Look.Panel;
+            this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            this.TabStop = false;
+            this.MouseEnter += delegate { try { this.Focus(); } catch { } };
+        }
+        int Vis() { return Math.Max(1, (Height - 6) / 17); }
+        void ToEnd() { top = Math.Max(0, lines.Count - Vis()); }
+        public void SetText(string s) { lines = new List<string>((s ?? "").Replace("\r", "").Split('\n')); ToEnd(); Invalidate(); }
+        public void Append(string line) { lines.Add(line); if (lines.Count > 800) lines.RemoveRange(0, lines.Count - 800); ToEnd(); Invalidate(); }
+        protected override void OnMouseWheel(MouseEventArgs e) { top -= (e.Delta > 0 ? 3 : -3); top = Math.Max(0, Math.Min(top, Math.Max(0, lines.Count - Vis()))); Invalidate(); base.OnMouseWheel(e); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.Clear(Look.Panel);
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            int vis = Vis(), y = 4;
+            for (int i = 0; i < vis; i++)
+            {
+                int li = top + i; if (li >= lines.Count) break;
+                string t = lines[li];
+                bool hot = t.StartsWith("=") || t.StartsWith("---") || t.StartsWith("...");
+                using (var b = new SolidBrush(hot ? Look.Accent : Look.Ink)) g.DrawString(t, Look.Mono, b, 6, y);
+                y += 17;
+            }
+        }
+    }
+
     class GateForm : Form
     {
         [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
         static extern int SetWindowTheme(IntPtr h, string app, string id);
 
-        TextBox tSource, tNode, tKey, tLo, tHi, tPieces, tAcross, tBudget, tInputName, tName, tEditor, tPort, tWait, tResult;
-        Toggle kSplit, kRecipe;
-        Button[] combineBtns; string combineSel = "sum";
-        ListBox nodeList;
-        RichTextBox log;
-        Label planLabel, gaugeLabel;
-        Button send;
-        ToolTip tips = new ToolTip();
-        List<Control> bordered = new List<Control>();
+        readonly bool demo;
         List<NodeEntry> nodes = new List<NodeEntry>();
         Dictionary<string, string> last = new Dictionary<string, string>();
-        Point dragFrom; bool dragging; bool loading;
+        NodeEntry target;
 
-        public GateForm()
+        Point dragFrom; bool dragging;
+        Panel content;
+        Dictionary<string, Panel> views = new Dictionary<string, Panel>();
+        List<Label> navItems = new List<Label>();
+        string active = "overview";
+        Label statusLbl, targetLbl;
+        List<Control> bordered = new List<Control>();
+        ToolTip tips = new ToolTip();
+
+        static readonly string[] Views = { "overview", "nodes", "tasks", "jobs", "logs", "cluster", "settings" };
+
+        const int NavW = 156, HeadH = 66, StatH = 26;
+
+        public GateForm() : this(false) { }
+        public GateForm(bool demo)
         {
+            this.demo = demo;
             Store.Load(nodes, last);
+            if (demo && nodes.Count == 0) SeedDemo();
+            target = PickTarget();
+
             this.Text = "EreBUS Gate";
             this.FormBorderStyle = FormBorderStyle.None;
             this.StartPosition = FormStartPosition.CenterScreen;
             this.BackColor = Look.Ground; this.ForeColor = Look.Ink; this.Font = Look.Body;
-            this.ClientSize = new Size(1000, 760);
-            this.AllowDrop = true; this.KeyPreview = true;
+            this.ClientSize = new Size(1140, 760);
+            this.KeyPreview = true;
             this.Paint += delegate(object o, PaintEventArgs e)
             {
-                var g = e.Graphics;
                 using (var pen = new Pen(Look.Edge))
                 {
-                    g.DrawRectangle(pen, 0, 0, this.Width - 1, this.Height - 1);
-                    g.DrawLine(pen, 492, 116, 492, this.Height - 16);
+                    e.Graphics.DrawRectangle(pen, 0, 0, this.Width - 1, this.Height - 1);
+                    e.Graphics.DrawLine(pen, NavW, HeadH, NavW, this.Height - StatH);
+                    e.Graphics.DrawLine(pen, 1, HeadH, this.Width - 2, HeadH);
+                    e.Graphics.DrawLine(pen, 1, this.Height - StatH, this.Width - 2, this.Height - StatH);
                     foreach (Control c in bordered)
-                        if (c.Visible) g.DrawRectangle(pen, c.Left - 1, c.Top - 1, c.Width + 1, c.Height + 1);
+                        if (c.Visible) e.Graphics.DrawRectangle(pen, c.Left - 1, c.Top - 1, c.Width + 1, c.Height + 1);
                 }
             };
-            this.DragEnter += delegate(object o, DragEventArgs e) { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy; };
-            this.DragDrop += delegate(object o, DragEventArgs e)
-            {
-                string[] f = (string[])e.Data.GetData(DataFormats.FileDrop);
-                if (f != null && f.Length > 0) LoadSource(f[0]);
-            };
-            this.KeyDown += delegate(object o, KeyEventArgs e)
-            {
-                if (e.KeyCode == Keys.Escape) this.Close();
-                if (e.Control && e.KeyCode == Keys.Enter) DoSend();
-            };
+            this.KeyDown += delegate(object o, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) this.Close(); };
             this.FormClosing += delegate { Persist(); };
 
             BuildHeader();
-            BuildLeft();
-            BuildRight();
-            LoadLast();
-            RefreshPreview();
+            BuildNav();
+            BuildStatus();
+
+            content = new Panel();
+            content.Location = new Point(NavW + 1, HeadH + 1);
+            content.Size = new Size(this.ClientSize.Width - NavW - 2, this.ClientSize.Height - HeadH - StatH - 2);
+            content.BackColor = Look.Ground;
+            this.Controls.Add(content);
+
+            BuildOverview(); BuildNodes(); BuildTasks(); BuildJobs(); BuildLogs(); BuildCluster(); BuildSettings();
+            ShowView(active);
         }
 
         void Dark(Control c) { try { SetWindowTheme(c.Handle, "DarkMode_Explorer", null); } catch { } }
 
+        /* ---- chrome ---------------------------------------------------- */
+
         void BuildHeader()
         {
             var head = new Panel();
-            head.Bounds = new Rectangle(1, 1, this.ClientSize.Width - 2, 100);
+            head.Bounds = new Rectangle(1, 1, this.ClientSize.Width - 2, HeadH - 1);
             head.BackColor = Look.Ground;
             head.Paint += delegate(object o, PaintEventArgs e)
             {
-                var g = e.Graphics;
-                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-                using (var b = new SolidBrush(Look.Accent)) g.DrawString("EreBUS Gate", Look.Head, b, 22, 20);
-                using (var b = new SolidBrush(Look.Dim)) g.DrawString("v " + Ver.V, Look.Small, b, 25, 66);
-                using (var pen = new Pen(Look.Edge)) g.DrawLine(pen, 22, 92, head.Width - 22, 92);
+                var g = e.Graphics; g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                using (var b = new SolidBrush(Look.Accent)) g.DrawString("EreBUS Gate", Look.Head, b, 20, 12);
+                using (var b = new SolidBrush(Look.Dim)) g.DrawString("v " + Ver.V, Look.Small, b, 23, 44);
             };
             head.MouseDown += delegate(object o, MouseEventArgs e) { dragging = true; dragFrom = e.Location; };
             head.MouseUp += delegate { dragging = false; };
             head.MouseMove += delegate(object o, MouseEventArgs e)
             { if (dragging) this.Location = new Point(this.Location.X + e.X - dragFrom.X, this.Location.Y + e.Y - dragFrom.Y); };
             this.Controls.Add(head);
-            head.Controls.Add(Glyph("\u00D7", head.Width - 34, 16, delegate { this.Close(); }));
-            head.Controls.Add(Glyph("\u2013", head.Width - 66, 16, delegate { this.WindowState = FormWindowState.Minimized; }));
-            head.Controls.Add(Glyph("?", head.Width - 98, 16, delegate { ShowAbout(); }));
 
-            var cl = new Label();
-            cl.Text = "cluster"; cl.Font = Look.Small; cl.ForeColor = Look.Dim; cl.AutoSize = true;
-            cl.Location = new Point(head.Width - 172, 21); cl.Cursor = Cursors.Hand;
-            cl.MouseEnter += delegate { cl.ForeColor = Look.Accent; };
-            cl.MouseLeave += delegate { cl.ForeColor = Look.Dim; };
-            cl.Click += delegate { ShowCluster(); };
-            head.Controls.Add(cl);
+            head.Controls.Add(Glyph("\u00D7", head.Width - 34, 20, delegate { this.Close(); }));
+            head.Controls.Add(Glyph("\u2013", head.Width - 66, 20, delegate { this.WindowState = FormWindowState.Minimized; }));
+
+            targetLbl = new Label();
+            targetLbl.AutoSize = false; targetLbl.Size = new Size(300, 26); targetLbl.TextAlign = ContentAlignment.MiddleRight;
+            targetLbl.Location = new Point(head.Width - 300 - 84, 20); targetLbl.Font = Look.Body; targetLbl.ForeColor = Look.Dim;
+            targetLbl.Cursor = Cursors.Hand;
+            targetLbl.Click += delegate { CycleTarget(); };
+            tips.SetToolTip(targetLbl, "the node the views act on; click to cycle through saved nodes");
+            head.Controls.Add(targetLbl);
+            RenderTarget();
         }
-
-        void ShowCluster() { var f = new ClusterForm(nodes); try { f.Show(this); } catch { f.Show(); } }
 
         Label Glyph(string ch, int x, int y, Action onClick)
         {
@@ -396,41 +526,115 @@ namespace EreBUSGate
             return l;
         }
 
-        void Section(string text, int x, int y)
+        void BuildNav()
+        {
+            int y = HeadH + 22;
+            foreach (var name in Views)
+            {
+                string vn = name;
+                var l = new Label();
+                l.Text = "  " + Look.Spaced(name); l.Font = Look.Nav; l.ForeColor = Look.Dim;
+                l.AutoSize = false; l.Size = new Size(NavW - 6, 30); l.TextAlign = ContentAlignment.MiddleLeft;
+                l.Location = new Point(4, y); l.Cursor = Cursors.Hand;
+                l.Paint += delegate(object o, PaintEventArgs e)
+                {
+                    if (active == vn)
+                        using (var b = new SolidBrush(Look.Accent)) e.Graphics.FillRectangle(b, 0, 4, 3, l.Height - 8);
+                };
+                l.MouseEnter += delegate { if (active != vn) l.ForeColor = Look.Ink; };
+                l.MouseLeave += delegate { if (active != vn) l.ForeColor = Look.Dim; };
+                l.Click += delegate { ShowView(vn); };
+                this.Controls.Add(l);
+                navItems.Add(l);
+                y += 34;
+            }
+        }
+
+        void BuildStatus()
+        {
+            statusLbl = new Label();
+            statusLbl.AutoSize = false; statusLbl.Location = new Point(12, this.ClientSize.Height - StatH + 4);
+            statusLbl.Size = new Size(this.ClientSize.Width - 24, 18); statusLbl.Font = Look.Small; statusLbl.ForeColor = Look.Dim;
+            this.Controls.Add(statusLbl);
+            Say("ready.");
+        }
+
+        void Say(string s)
+        {
+            if (statusLbl == null) return;
+            if (statusLbl.InvokeRequired) { statusLbl.BeginInvoke((MethodInvoker)delegate { Say(s); }); return; }
+            statusLbl.Text = s;
+        }
+
+        void ShowView(string name)
+        {
+            active = name;
+            foreach (var kv in views) kv.Value.Visible = (kv.Key == name);
+            foreach (var l in navItems) { bool on = ("  " + Look.Spaced(name)) == l.Text; l.ForeColor = on ? Look.Accent : Look.Dim; l.Invalidate(); }
+            if (!demo) OnEnterView(name);
+        }
+        public void Show(string name) { ShowView(name); }  /* for the shot driver */
+
+        /* ---- the target node ------------------------------------------ */
+
+        NodeEntry PickTarget()
+        {
+            string want = last.ContainsKey("target") ? last["target"] : null;
+            if (want != null) foreach (var n in nodes) if (n.Host == want || n.Name == want) return n;
+            return nodes.Count > 0 ? nodes[0] : null;
+        }
+        void RenderTarget()
+        {
+            if (targetLbl == null) return;
+            targetLbl.Text = "target \u00b7 " + (target != null ? target.ToString() : "(none)") + "   ";
+        }
+        void SetTarget(NodeEntry n) { target = n; if (n != null) last["target"] = n.Host; RenderTarget(); }
+        void CycleTarget()
+        {
+            if (nodes.Count == 0) return;
+            int i = target != null ? nodes.IndexOf(target) : -1;
+            SetTarget(nodes[(i + 1) % nodes.Count]);
+            if (!demo) OnEnterView(active);
+        }
+        Spec SpecOf(NodeEntry n)
+        {
+            var s = new Spec();
+            if (n != null) { s.Node = n.Host; s.Port = n.Port < 1 ? 22 : n.Port; s.Key = n.Key; }
+            return s;
+        }
+
+        /* ---- styled controls ------------------------------------------ */
+
+        Label Section(Control host, string text, int x, int y, int w)
         {
             var l = new Label();
             l.Text = Look.Spaced(text); l.Font = Look.Small; l.ForeColor = Look.Accent;
-            l.AutoSize = true; l.Location = new Point(x, y);
-            this.Controls.Add(l);
+            l.AutoSize = true; l.Location = new Point(x, y); host.Controls.Add(l);
             var rule = new Label(); rule.AutoSize = false; rule.BackColor = Look.Edge;
-            rule.Bounds = new Rectangle(x, y + 18, (x < 490 ? 468 : 984) - x, 1);
-            this.Controls.Add(rule);
+            rule.Bounds = new Rectangle(x, y + 18, w, 1); host.Controls.Add(rule);
+            return l;
         }
 
-        Label Field(string text, int x, int y, int w)
+        Label Field(Control host, string text, int x, int y, int w)
         {
             var l = new Label();
             l.Text = text; l.Font = Look.Small; l.ForeColor = Look.Dim;
             l.AutoSize = false; l.Location = new Point(x, y); l.Size = new Size(w, 15);
-            this.Controls.Add(l);
-            return l;
+            host.Controls.Add(l); return l;
         }
 
-        TextBox Text_(int x, int y, int w, string tip)
+        TextBox Text_(Control host, int x, int y, int w, string tip)
         {
             var t = new TextBox();
             t.BorderStyle = BorderStyle.None; t.BackColor = Look.Field; t.ForeColor = Look.Ink;
             t.Font = Look.Body; t.Location = new Point(x + 3, y + 4); t.Size = new Size(w - 6, 20);
-            var host = new Panel();
-            host.BackColor = Look.Field; host.Location = new Point(x, y); host.Size = new Size(w, 26);
-            host.Controls.Add(t);
-            this.Controls.Add(host); bordered.Add(host);
-            t.TextChanged += delegate { RefreshPreview(); };
+            var box = new Panel(); box.BackColor = Look.Field; box.Location = new Point(x, y); box.Size = new Size(w, 26);
+            box.Controls.Add(t); host.Controls.Add(box); bordered.Add(box);
             if (tip != null) tips.SetToolTip(t, tip);
             return t;
         }
 
-        Button Btn(string text, int x, int y, int w, int h, bool strong)
+        Button Btn(Control host, string text, int x, int y, int w, int h, bool strong)
         {
             var b = new Button();
             b.Text = text; b.Font = strong ? Look.Body : Look.Mono;
@@ -440,84 +644,358 @@ namespace EreBUSGate
             b.FlatAppearance.MouseOverBackColor = Color.FromArgb(0x2C, 0x23, 0x1B);
             b.Location = new Point(x, y); b.Size = new Size(w, h); b.Cursor = Cursors.Hand;
             b.UseCompatibleTextRendering = true;
-            this.Controls.Add(b);
-            return b;
+            host.Controls.Add(b); return b;
         }
 
-        void BuildLeft()
+        Grid MakeGrid(Control host, int x, int y, int w, int h)
         {
-            int x = 24, y = 116, w = 444;
-            Section("task", x, y); y += 30;
+            var grid = new Grid();
+            grid.Location = new Point(x, y); grid.Size = new Size(w, h);
+            var box = new Panel(); box.Location = new Point(x - 1, y - 1); box.Size = new Size(w + 2, h + 2); box.BackColor = Look.Panel;
+            host.Controls.Add(box); box.Controls.Add(grid); grid.Location = new Point(1, 1);
+            bordered.Add(box);
+            return grid;
+        }
 
-            Field("source file", x, y, w);
-            tSource = Text_(x, y + 15, w - 84, "a file to load into the editor; or type in the editor below");
-            var browse = Btn("browse", x + w - 78, y + 14, 78, 26, false);
-            browse.Click += delegate
+        Panel View(string name)
+        {
+            var p = new Panel();
+            p.Location = new Point(0, 0); p.Size = content.Size; p.BackColor = Look.Ground; p.Visible = false;
+            content.Controls.Add(p); views[name] = p;
+            return p;
+        }
+
+        /* ---- background helpers --------------------------------------- */
+
+        void Bg(ThreadStart work) { var t = new Thread(work); t.IsBackground = true; t.Start(); }
+        void UI(MethodInvoker m) { if (this.IsDisposed) return; if (this.InvokeRequired) { try { this.BeginInvoke(m); } catch { } } else m(); }
+
+        Ctl.Frm OneShot(NodeEntry n, string method, byte[] body, out string err)
+        {
+            err = null;
+            if (n == null) { err = "no target node"; return null; }
+            var c = Ctl.Open(SpecOf(n), out err);
+            if (c == null) return null;
+            var f = c.Req(method, body); c.Close();
+            return f;
+        }
+        static string KV(byte[] body, string k) { return Ctl.KV(body, k); }
+
+        /* Split a "k=v k=v ... text=rest" control line into a dictionary. */
+        static Dictionary<string, string> Parse(string line)
+        {
+            var d = new Dictionary<string, string>();
+            string head = line, text = null;
+            int ti = line.IndexOf(" text=");
+            if (ti >= 0) { text = line.Substring(ti + 6); head = line.Substring(0, ti); }
+            foreach (var tok in head.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
+            { int eq = tok.IndexOf('='); if (eq > 0) d[tok.Substring(0, eq)] = tok.Substring(eq + 1); }
+            if (text != null) d["text"] = text;
+            return d;
+        }
+        static string Get(Dictionary<string, string> d, string k) { return d.ContainsKey(k) ? d[k] : ""; }
+
+        void OnEnterView(string name)
+        {
+            if (name == "overview") RefreshOverview();
+            else if (name == "jobs") RefreshJobs();
+            else if (name == "logs") RefreshLog();
+            else if (name == "cluster") RefreshCluster();
+        }
+
+        /* ================= OVERVIEW ===================================== */
+
+        Tile tNodes, tOnline, tJobs, tGate;
+        Grid ovGrid; Toggle ovAuto; System.Windows.Forms.Timer ovTimer;
+
+        void BuildOverview()
+        {
+            var p = View("overview");
+            Section(p, "cluster overview", 22, 16, p.Width - 44);
+            int tw = (p.Width - 44 - 3 * 14) / 4, ty = 48, th = 66;
+            tNodes = Tl(p, 22, ty, tw, th, "nodes");
+            tOnline = Tl(p, 22 + (tw + 14), ty, tw, th, "online");
+            tJobs = Tl(p, 22 + 2 * (tw + 14), ty, tw, th, "jobs in flight");
+            tGate = Tl(p, 22 + 3 * (tw + 14), ty, tw, th, "target");
+
+            Btn(p, "refresh", 22, ty + th + 14, 100, 26, false).Click += delegate { RefreshOverview(); };
+            ovAuto = new Toggle("auto"); ovAuto.Location = new Point(134, ty + th + 18); p.Controls.Add(ovAuto);
+            ovAuto.Changed += delegate { if (ovAuto.Checked) ovTimer.Start(); else ovTimer.Stop(); };
+
+            ovGrid = MakeGrid(p, 22, ty + th + 50, p.Width - 44, p.Height - (ty + th + 50) - 16);
+            ovGrid.Columns(new Grid.Column[] { new Grid.Column("node", 200), new Grid.Column("state", 100), new Grid.Column("version", 220), new Grid.Column("uptime", 120), new Grid.Column("jobs", 80) });
+            ovGrid.Tint = delegate(int r, int c, string t) { return (c == 1) ? (t == "online" ? Look.Accent : Look.Dim) : Look.Ink; };
+            ovGrid.Chosen += delegate { var row = ovGrid.Current; if (row != null) { var n = ByName(row[0]); if (n != null) { SetTarget(n); OnEnterView(active); } } };
+
+            ovTimer = new System.Windows.Forms.Timer(); ovTimer.Interval = 6000; ovTimer.Tick += delegate { RefreshOverview(); };
+            this.FormClosing += delegate { ovTimer.Stop(); };
+            if (demo) SeedOverview();
+        }
+
+        Tile Tl(Control host, int x, int y, int w, int h, string label)
+        {
+            var t = new Tile(); t.Label = label; t.Location = new Point(x, y); t.Size = new Size(w, h); host.Controls.Add(t); return t;
+        }
+
+        void RefreshOverview()
+        {
+            if (demo) return;
+            var list = new List<NodeEntry>(nodes);
+            Say("polling " + list.Count + " node(s) ...");
+            Bg(delegate
             {
-                var d = new OpenFileDialog(); d.Filter = "programs and recipes|*.c;*.recipe;*.txt|all files|*.*";
-                if (d.ShowDialog() == DialogResult.OK) LoadSource(d.FileName);
-            };
+                var rows = new List<string[]>();
+                int online = 0; long jobs = 0;
+                foreach (var n in list)
+                {
+                    string err; var f = OneShot(n, "status", null, out err);
+                    if (f != null && f.Kind == 2)
+                    {
+                        online++;
+                        string ver = KV(f.Body, "version"); string up = KV(f.Body, "uptime_s"); string jb = KV(f.Body, "jobs");
+                        long jv; if (long.TryParse(jb ?? "", out jv)) jobs += jv;
+                        rows.Add(new string[] { n.ToString(), "online", ver ?? "-", Uptime(up), jb ?? "-" });
+                    }
+                    else rows.Add(new string[] { n.ToString(), "offline", "-", "-", "-" });
+                }
+                long jf = jobs; int on = online;
+                UI(delegate
+                {
+                    ovGrid.SetRows(rows);
+                    tNodes.Set(list.Count.ToString(), Look.Ink);
+                    tOnline.Set(on.ToString(), on > 0 ? Look.Accent : Look.Dim);
+                    tJobs.Set(jf.ToString(), jf > 0 ? Look.Accent : Look.Ink);
+                    tGate.Set(target != null ? target.ToString() : "-", Look.Ink);
+                    Say("overview: " + on + " of " + list.Count + " online.");
+                });
+            });
+        }
+
+        static string Uptime(string secs)
+        {
+            long s; if (!long.TryParse(secs ?? "", out s)) return "-";
+            if (s < 60) return s + "s";
+            if (s < 3600) return (s / 60) + "m";
+            if (s < 86400) return (s / 3600) + "h " + ((s % 3600) / 60) + "m";
+            return (s / 86400) + "d " + ((s % 86400) / 3600) + "h";
+        }
+
+        void SeedOverview()
+        {
+            ovGrid.SetRows(new List<string[]> {
+                new string[]{"alpha","online","0.9.6","2h 14m","0"},
+                new string[]{"beta","online","0.9.6","2h 09m","1"},
+                new string[]{"gamma","online","0.9.6","41m","0"},
+                new string[]{"delta","offline","-","-","-"},
+            });
+            tNodes.Set("4", Look.Ink); tOnline.Set("3", Look.Accent); tJobs.Set("1", Look.Accent); tGate.Set("beta", Look.Ink);
+        }
+
+        /* ================= NODES ======================================== */
+
+        Grid ndGrid; TextBox ndName, ndHost, ndPort, ndKey; Label ndReadout;
+
+        void BuildNodes()
+        {
+            var p = View("nodes");
+            Section(p, "nodes", 22, 16, 520);
+            ndGrid = MakeGrid(p, 22, 48, 520, 260);
+            ndGrid.Columns(new Grid.Column[] { new Grid.Column("name", 160), new Grid.Column("host", 240), new Grid.Column("port", 80) });
+            ndGrid.Chosen += delegate { LoadSelectedNode(); };
+            RefillNodes();
+
+            Btn(p, "use as target", 22, 320, 130, 26, true).Click += delegate { var n = SelectedNode(); if (n != null) { SetTarget(n); Say("target is " + n + "."); } };
+            Btn(p, "test", 160, 320, 80, 26, false).Click += delegate { TestNode(); };
+            Btn(p, "remove", 248, 320, 90, 26, false).Click += delegate { RemoveNode(); };
+
+            int fx = 566, fw = p.Width - fx - 22;
+            Section(p, "edit", fx, 16, fw);
+            Field(p, "name", fx, 46, fw); ndName = Text_(p, fx, 61, fw, "a label for this node");
+            Field(p, "host", fx, 92, fw); ndHost = Text_(p, fx, 107, fw - 96, "user@host or an ssh alias");
+            Field(p, "port", fx + fw - 88, 92, 88); ndPort = Text_(p, fx + fw - 88, 107, 88, "ssh port");
+            Field(p, "key", fx, 138, fw); ndKey = Text_(p, fx, 153, fw - 96, "private key file; blank = default keys / agent");
+            Btn(p, "choose", fx + fw - 90, 152, 90, 26, false).Click += delegate { var d = new OpenFileDialog(); d.Filter = "ssh key|*|all|*.*"; if (d.ShowDialog() == DialogResult.OK) ndKey.Text = d.FileName; };
+            Btn(p, "save node", fx, 190, 120, 28, true).Click += delegate { SaveNode(); };
+            Btn(p, "scan for peers", fx + 130, 190, 140, 28, false).Click += delegate { ScanNode(); };
+            Btn(p, "door line", fx + 280, 190, 110, 28, false).Click += delegate { DoorLine(); };
+
+            Field(p, "readout", fx, 232, fw);
+            ndReadout = new Label(); ndReadout.AutoSize = false; ndReadout.Location = new Point(fx, 250); ndReadout.Size = new Size(fw, p.Height - 250 - 16);
+            ndReadout.Font = Look.Mono; ndReadout.ForeColor = Look.Ink; p.Controls.Add(ndReadout);
+        }
+
+        void RefillNodes()
+        {
+            var rows = new List<string[]>();
+            foreach (var n in nodes) rows.Add(new string[] { n.Name, n.Host, n.Port.ToString() });
+            ndGrid.SetRows(rows);
+        }
+        NodeEntry SelectedNode() { var r = ndGrid.Current; return r != null ? ByHost(r[1]) : null; }
+        NodeEntry ByHost(string h) { foreach (var n in nodes) if (n.Host == h) return n; return null; }
+        NodeEntry ByName(string nm) { foreach (var n in nodes) if (n.ToString() == nm) return n; return null; }
+        void LoadSelectedNode()
+        {
+            var n = SelectedNode(); if (n == null) return;
+            ndName.Text = n.Name; ndHost.Text = n.Host; ndPort.Text = n.Port.ToString(); ndKey.Text = n.Key;
+        }
+        void SaveNode()
+        {
+            string host = ndHost.Text.Trim(); if (host.Length == 0) { Say("no host."); return; }
+            NodeEntry found = null; foreach (var n in nodes) if (n.Host == host) { found = n; break; }
+            if (found == null) { found = new NodeEntry(); nodes.Add(found); }
+            found.Host = host; found.Name = ndName.Text.Trim().Length > 0 ? ndName.Text.Trim() : host;
+            int.TryParse(ndPort.Text.Trim(), out found.Port); if (found.Port < 1) found.Port = 22;
+            found.Key = ndKey.Text.Trim();
+            RefillNodes(); Persist(); if (target == null) SetTarget(found); Say("saved " + found + ".");
+        }
+        void RemoveNode()
+        {
+            var n = SelectedNode(); if (n == null) return;
+            nodes.Remove(n); if (target == n) SetTarget(nodes.Count > 0 ? nodes[0] : null);
+            RefillNodes(); Persist(); Say("removed.");
+        }
+        void TestNode()
+        {
+            var n = SelectedNode() ?? target; if (n == null) { Say("select a node."); return; }
+            ndReadout.ForeColor = Look.Dim; ndReadout.Text = "testing " + n + " ...";
+            Bg(delegate
+            {
+                string err; var f = OneShot(n, "status", null, out err);
+                string txt = (f != null && f.Kind == 2)
+                    ? "online\nversion  " + (KV(f.Body, "version") ?? "-") + "\nuptime   " + Uptime(KV(f.Body, "uptime_s")) + "\njobs     " + (KV(f.Body, "jobs") ?? "-")
+                    : "offline\n" + (err ?? "no control channel");
+                UI(delegate { ndReadout.ForeColor = Look.Ink; ndReadout.Text = txt; Say("tested " + n + "."); });
+            });
+        }
+        void ScanNode()
+        {
+            var n = SelectedNode() ?? target; if (n == null) { Say("select a node."); return; }
+            ndReadout.ForeColor = Look.Dim; ndReadout.Text = "scanning from " + n + " ...";
+            Bg(delegate
+            {
+                string err; var f = OneShot(n, "peers", null, out err);
+                var sb = new StringBuilder();
+                if (f != null && f.Kind == 2)
+                {
+                    foreach (var line in Encoding.UTF8.GetString(f.Body).Split('\n'))
+                    {
+                        if (line.Length == 0) continue;
+                        if (line.StartsWith("count=")) { sb.Append(line.Substring(6)).Append(" peer(s) heard\n"); continue; }
+                        var d = Parse(line);
+                        sb.Append("  ").Append(Get(d, "name")).Append("  ").Append(Get(d, "ip")).Append("  ").Append(Get(d, "version")).Append('\n');
+                    }
+                }
+                else sb.Append(err ?? "no control channel");
+                UI(delegate { ndReadout.ForeColor = Look.Ink; ndReadout.Text = sb.ToString(); Say("scanned."); });
+            });
+        }
+        void DoorLine()
+        {
+            var d = new OpenFileDialog(); d.Filter = "ssh public key|*.pub|all|*.*"; d.Title = "pick your ssh public key";
+            if (d.ShowDialog() != DialogResult.OK) return;
+            try
+            {
+                string[] parts = File.ReadAllText(d.FileName).Trim().Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 2) { Say("that does not look like an ssh public key."); return; }
+                string line = "write door | " + parts[0] + " " + parts[1];
+                Clipboard.SetText(line);
+                ndReadout.ForeColor = Look.Ink;
+                ndReadout.Text = "door line copied to the clipboard:\n\n" + line + "\n\non the node: go system, go settings, paste it, back.";
+                Say("door line copied.");
+            }
+            catch (Exception e) { Say("cannot read the key: " + e.Message); }
+        }
+
+        /* ================= TASKS ======================================== */
+
+        TextBox tEditor, tName, tLo, tHi, tPieces, tAcross, tBudget, tInput, tWait, tResult;
+        Toggle kSplit, kRecipe;
+        Button[] combineBtns; string combineSel = "sum";
+        Label planLbl, gaugeLbl; TextPane tOut; Button sendBtn; bool loading;
+
+        void BuildTasks()
+        {
+            var p = View("tasks");
+            int lw = 470, x = 22, y = 16;
+            Section(p, "task", x, y, lw); y += 30;
+
+            kRecipe = MkToggle(p, "recipe", x, y, "checked: recipe for the interpreter; unchecked: c the node compiles");
+            Field(p, "name", x + 250, y - 2, 60); tName = Text_(p, x + 250, y + 12, lw - 250, "task name, for the log");
+            y += 42;
+
+            kSplit = MkToggle(p, "split", x, y, "divide lo..hi into pieces, one per machine"); y += 26;
+            Field(p, "from", x, y, 60); tLo = Text_(p, x, y + 15, 120, "low end");
+            Field(p, "to", x + 132, y, 40); tHi = Text_(p, x + 132, y + 15, 120, "high end");
+            Field(p, "pieces", x + 264, y, 60); tPieces = Text_(p, x + 264, y + 15, 100, "count of pieces; blank = 4");
             y += 46;
 
-            kRecipe = MkToggle("recipe", x, y, "checked: recipe for the interpreter. unchecked: c the node compiles");
-            Field("name", x + 250, y - 2, 60);
-            tName = Text_(x + 250, y + 12, w - 250, "task name, for the log");
-            y += 44;
-
-            kSplit = MkToggle("split", x, y, "divide lo..hi into pieces, one per machine");
-            y += 26;
-            Field("from", x, y, 60);      tLo = Text_(x, y + 15, 120, "low end");
-            Field("to", x + 132, y, 40);  tHi = Text_(x + 132, y + 15, 120, "high end");
-            Field("pieces", x + 264, y, 60); tPieces = Text_(x + 264, y + 15, 90, "count of pieces; blank = 4");
-            y += 46;
-
-            Field("combine", x, y, 120);
+            Field(p, "combine", x, y, 120);
             string[] combos = { "sum", "concat", "min", "max", "count", "first" };
-            combineBtns = new Button[combos.Length];
-            int bx = x;
+            combineBtns = new Button[combos.Length]; int bx = x;
             for (int i = 0; i < combos.Length; i++)
             {
-                string name = combos[i];
-                int bw = 22 + name.Length * 9;
-                var b = Btn(name, bx, y + 14, bw, 26, false);
+                string name = combos[i]; int bw = 22 + name.Length * 9;
+                var b = Btn(p, name, bx, y + 14, bw, 26, false);
                 b.Click += delegate { SelectCombine(name); };
                 combineBtns[i] = b; bx += bw + 6;
             }
             y += 48;
 
-            Field("across", x, y, 90);  tAcross = Text_(x, y + 15, 90, "quorum: each piece on N machines, majority");
-            Field("budget", x + 106, y, 90); tBudget = Text_(x + 106, y + 15, 90, "seconds per worker");
-            Field("input", x + 212, y, 90); tInputName = Text_(x + 212, y + 15, w - 212, "petname of an object on the node");
+            Field(p, "across", x, y, 90); tAcross = Text_(p, x, y + 15, 90, "quorum: each piece on N machines, majority");
+            Field(p, "budget", x + 106, y, 90); tBudget = Text_(p, x + 106, y + 15, 90, "seconds per worker");
+            Field(p, "input", x + 212, y, 90); tInput = Text_(p, x + 212, y + 15, lw - 212, "petname of an object on the node");
             y += 46;
 
-            planLabel = new Label(); planLabel.AutoSize = false; planLabel.Location = new Point(x, y);
-            planLabel.Size = new Size(w - 120, 30); planLabel.Font = Look.Small; planLabel.ForeColor = Look.Dim;
-            this.Controls.Add(planLabel);
-            gaugeLabel = new Label(); gaugeLabel.AutoSize = false; gaugeLabel.Location = new Point(x + w - 116, y);
-            gaugeLabel.Size = new Size(116, 15); gaugeLabel.Font = Look.Small; gaugeLabel.ForeColor = Look.Dim;
-            gaugeLabel.TextAlign = ContentAlignment.TopRight; this.Controls.Add(gaugeLabel);
+            planLbl = new Label(); planLbl.AutoSize = false; planLbl.Location = new Point(x, y); planLbl.Size = new Size(lw - 130, 30); planLbl.Font = Look.Small; planLbl.ForeColor = Look.Dim; p.Controls.Add(planLbl);
+            gaugeLbl = new Label(); gaugeLbl.AutoSize = false; gaugeLbl.Location = new Point(x + lw - 126, y); gaugeLbl.Size = new Size(126, 15); gaugeLbl.Font = Look.Small; gaugeLbl.ForeColor = Look.Dim; gaugeLbl.TextAlign = ContentAlignment.TopRight; p.Controls.Add(gaugeLbl);
             y += 34;
 
-            Field("editor  --  the payload sent to the machines", x, y, w);
+            Field(p, "editor  --  the payload sent to the machines", x, y, lw);
             tEditor = new TextBox();
             tEditor.Multiline = true; tEditor.AcceptsTab = true; tEditor.ScrollBars = ScrollBars.Both;
             tEditor.BorderStyle = BorderStyle.None; tEditor.BackColor = Look.Panel; tEditor.ForeColor = Look.Ink;
             tEditor.Font = Look.Mono; tEditor.WordWrap = false;
-            tEditor.Location = new Point(x + 2, y + 17); tEditor.Size = new Size(w - 4, this.ClientSize.Height - (y + 17) - 54);
-            var ep = new Panel(); ep.BackColor = Look.Panel; ep.Location = new Point(x, y + 15);
-            ep.Size = new Size(w, this.ClientSize.Height - (y + 15) - 50); ep.Controls.Add(tEditor);
-            this.Controls.Add(ep); bordered.Add(ep); Dark(tEditor);
+            tEditor.Location = new Point(x + 2, y + 17); tEditor.Size = new Size(lw - 4, p.Height - (y + 17) - 54);
+            var ep = new Panel(); ep.BackColor = Look.Panel; ep.Location = new Point(x, y + 15); ep.Size = new Size(lw, p.Height - (y + 15) - 50); ep.Controls.Add(tEditor);
+            p.Controls.Add(ep); bordered.Add(ep); Dark(tEditor);
             tEditor.TextChanged += delegate { RefreshPreview(); };
 
-            var tmplLbl = Field("templates", x, this.ClientSize.Height - 34, 80); tmplLbl.ForeColor = Look.Faint;
-            var t1 = Btn("sum of a range", x + 84, this.ClientSize.Height - 38, 156, 26, false); t1.Click += delegate { LoadTemplate("sumrange"); };
-            var t2 = Btn("count matches", x + 248, this.ClientSize.Height - 38, 150, 26, false); t2.Click += delegate { LoadTemplate("count"); };
+            var tl = Field(p, "templates", x, p.Height - 34, 80); tl.ForeColor = Look.Faint;
+            Btn(p, "sum of a range", x + 84, p.Height - 38, 156, 26, false).Click += delegate { LoadTemplate("sumrange"); };
+            Btn(p, "count matches", x + 248, p.Height - 38, 150, 26, false).Click += delegate { LoadTemplate("count"); };
+
+            /* right column: send + result + output */
+            int rx = 512, rw = p.Width - rx - 22;
+            Section(p, "run", rx, 16, rw);
+            Field(p, "wait for the folded result (seconds)", rx, 46, rw);
+            tWait = Text_(p, rx, 61, 90, "seconds to wait for the answer; 0 = fire and forget");
+            sendBtn = Btn(p, "send to target", rx + 106, 59, 200, 30, true); sendBtn.Click += delegate { DoSend(); };
+            Btn(p, "save package", rx + 316, 59, rw - 316, 30, false).Click += delegate { DoSave(); };
+
+            Field(p, "result", rx, 100, rw - 84);
+            tResult = new TextBox(); tResult.BorderStyle = BorderStyle.None; tResult.BackColor = Look.Field; tResult.ForeColor = Look.Accent; tResult.Font = Look.Res; tResult.ReadOnly = true;
+            tResult.Location = new Point(rx + 3, 119); tResult.Size = new Size(rw - 90, 24);
+            var rp = new Panel(); rp.BackColor = Look.Field; rp.Location = new Point(rx, 117); rp.Size = new Size(rw - 84, 30); rp.Controls.Add(tResult); p.Controls.Add(rp); bordered.Add(rp);
+            Btn(p, "copy", rx + rw - 78, 117, 78, 30, false).Click += delegate { try { if (tResult.Text.Length > 0) Clipboard.SetText(tResult.Text); } catch { } };
+
+            Field(p, "output", rx, 158, rw);
+            var op = new Panel(); op.BackColor = Look.Panel; op.Location = new Point(rx, 173); op.Size = new Size(rw, p.Height - 173 - 16);
+            tOut = new TextPane(); tOut.Location = new Point(1, 1); tOut.Size = new Size(op.Width - 2, op.Height - 2);
+            op.Controls.Add(tOut); p.Controls.Add(op); bordered.Add(op);
+            tOut.SetText("idle.");
+
+            SelectCombine("sum");
+            if (demo) LoadTemplate("sumrange");
         }
 
+        Toggle MkToggle(Control host, string text, int x, int y, string tip)
+        {
+            var t = new Toggle(text); t.Location = new Point(x, y); t.Changed += delegate { RefreshPreview(); };
+            if (tip != null) tips.SetToolTip(t, tip); host.Controls.Add(t); return t;
+        }
         void SelectCombine(string name)
         {
-            combineSel = name;
-            string[] combos = { "sum", "concat", "min", "max", "count", "first" };
+            combineSel = name; string[] combos = { "sum", "concat", "min", "max", "count", "first" };
             for (int i = 0; i < combineBtns.Length; i++)
             {
                 bool on = combos[i] == name;
@@ -526,437 +1004,370 @@ namespace EreBUSGate
             }
             RefreshPreview();
         }
-
-        void BuildRight()
-        {
-            int x = 516, y = 116, w = 460;
-            Section("node", x, y); y += 30;
-
-            Field("nodes", x, y, w);
-            nodeList = new ListBox();
-            nodeList.BorderStyle = BorderStyle.None; nodeList.BackColor = Look.Panel; nodeList.ForeColor = Look.Ink;
-            nodeList.Font = Look.Mono; nodeList.IntegralHeight = false;
-            nodeList.Location = new Point(x + 2, y + 17); nodeList.Size = new Size(w - 4, 72);
-            var nlp = new Panel(); nlp.BackColor = Look.Panel; nlp.Location = new Point(x, y + 15); nlp.Size = new Size(w, 76);
-            nlp.Controls.Add(nodeList); this.Controls.Add(nlp); bordered.Add(nlp); Dark(nodeList);
-            nodeList.DoubleClick += delegate { LoadSelectedNode(); };
-            nodeList.KeyDown += delegate(object o, KeyEventArgs e) { if (e.KeyCode == Keys.Delete) RemoveSelectedNode(); };
-            RefillNodeList();
-            var add = Btn("save node", x, y + 96, 108, 26, false); add.Click += delegate { SaveCurrentNode(); };
-            var del = Btn("remove", x + 116, y + 96, 84, 26, false); del.Click += delegate { RemoveSelectedNode(); };
-            var test = Btn("test", x + 208, y + 96, 84, 26, false); test.Click += delegate { DoProbe(); };
-            var scan = Btn("scan", x + w - 90, y + 96, 90, 26, false); scan.Click += delegate { DoScan(); };
-            y += 134;
-
-            Field("host", x, y, w - 96);
-            tNode = Text_(x, y + 15, w - 152, "user@host or ssh alias; its door holds your key");
-            Field("port", x + w - 88, y, 88); tPort = Text_(x + w - 88, y + 15, 88, "ssh port");
-            y += 46;
-            Field("key", x, y, w);
-            tKey = Text_(x, y + 15, w - 200, "private key file; blank = default keys / agent");
-            var kb = Btn("choose", x + w - 194, y + 14, 90, 26, false);
-            kb.Click += delegate { var d = new OpenFileDialog(); d.Filter = "ssh key|*|all|*.*"; if (d.ShowDialog() == DialogResult.OK) tKey.Text = d.FileName; };
-            var door = Btn("door line", x + w - 98, y + 14, 98, 26, false);
-            tips.SetToolTip(door, "pick your ssh public key; the 'write door | ...' line to authorise this key is copied to the clipboard");
-            door.Click += delegate { DoDoorLine(); };
-            y += 46;
-
-            Field("wait", x, y, 90);
-            tWait = Text_(x, y + 15, 90, "seconds to wait before reading the result; 0 = none");
-            send = Btn("send", x + 116, y + 12, 200, 34, true);
-            send.Click += delegate { DoSend(); };
-            Btn("save package", x + 328, y + 12, w - 328, 34, false).Click += delegate { DoSave(); };
-            y += 56;
-
-            Field("result", x, y, w - 84);
-            tResult = new TextBox();
-            tResult.BorderStyle = BorderStyle.None; tResult.BackColor = Look.Field; tResult.ForeColor = Look.Accent;
-            tResult.Font = Look.Res; tResult.ReadOnly = true;
-            tResult.Location = new Point(x + 3, y + 17); tResult.Size = new Size(w - 90, 24);
-            var rp = new Panel(); rp.BackColor = Look.Field; rp.Location = new Point(x, y + 15); rp.Size = new Size(w - 84, 30);
-            rp.Controls.Add(tResult); this.Controls.Add(rp); bordered.Add(rp);
-            var copy = Btn("copy", x + w - 78, y + 15, 78, 30, false);
-            copy.Click += delegate { try { if (tResult.Text.Length > 0) Clipboard.SetText(tResult.Text); Say("result copied."); } catch { } };
-            y += 50;
-
-            Field("output", x, y, w);
-            log = new RichTextBox();
-            log.BorderStyle = BorderStyle.None; log.BackColor = Look.Panel; log.ForeColor = Look.Ink;
-            log.Font = Look.Mono; log.ReadOnly = true; log.WordWrap = false; log.ScrollBars = RichTextBoxScrollBars.Both;
-            log.Location = new Point(x + 2, y + 17); log.Size = new Size(w - 4, this.ClientSize.Height - (y + 17) - 18);
-            var lp = new Panel(); lp.BackColor = Look.Panel; lp.Location = new Point(x, y + 15);
-            lp.Size = new Size(w, this.ClientSize.Height - (y + 15) - 16); lp.Controls.Add(log);
-            this.Controls.Add(lp); bordered.Add(lp); Dark(log);
-            log.Text = "idle.\n";
-        }
-
-        Toggle MkToggle(string text, int x, int y, string tip)
-        {
-            var t = new Toggle(text); t.Location = new Point(x, y);
-            t.Changed += delegate { RefreshPreview(); };
-            if (tip != null) tips.SetToolTip(t, tip);
-            this.Controls.Add(t);
-            return t;
-        }
-
-        void LoadSource(string path)
-        {
-            loading = true;
-            tSource.Text = path;
-            try { tEditor.Text = File.ReadAllText(path).Replace("\r\n", "\n").Replace("\n", "\r\n"); } catch (Exception e) { Say("cannot read " + path + ": " + e.Message); }
-            if (path.EndsWith(".recipe", StringComparison.OrdinalIgnoreCase)) kRecipe.Checked = true;
-            if (tName.Text.Trim().Length == 0) tName.Text = Path.GetFileNameWithoutExtension(path);
-            loading = false; RefreshPreview();
-        }
-
-        byte[] PayloadBytes()
-        {
-            string t = tEditor.Text;
-            if (!string.IsNullOrEmpty(t)) return new UTF8Encoding(false).GetBytes(t);
-            return new byte[0];
-        }
-
-        Spec Gather(out string err)
-        {
-            err = null;
-            var s = new Spec();
-            s.Source = tSource.Text.Trim(); s.Node = tNode.Text.Trim(); s.Key = tKey.Text.Trim();
-            s.Recipe = kRecipe.Checked; s.Name = tName.Text.Trim(); s.InputName = tInputName.Text.Trim();
-            s.Combine = combineSel;
-            s.Across = PInt(tAcross.Text); s.Budget = PInt(tBudget.Text); s.Pieces = PInt(tPieces.Text);
-            int port = PInt(tPort.Text); s.Port = (port >= 1 && port <= 65535) ? port : 22;
-            int w; s.Wait = int.TryParse((tWait.Text ?? "").Trim(), out w) ? Math.Max(0, w) : 8;
-            if (kSplit.Checked)
-            {
-                s.HasSplit = true; s.SplitLo = PLong(tLo.Text); s.SplitHi = PLong(tHi.Text);
-                if (s.SplitHi < s.SplitLo) { err = "hi < lo."; return null; }
-            }
-            return s;
-        }
         static int PInt(string t) { int v; return int.TryParse((t ?? "").Trim(), out v) ? v : 0; }
         static long PLong(string t) { long v; return long.TryParse((t ?? "").Trim(), out v) ? v : 0; }
 
+        Spec Gather(out string err)
+        {
+            err = null; var s = new Spec();
+            s.Recipe = kRecipe.Checked; s.Name = tName.Text.Trim(); s.InputName = tInput.Text.Trim(); s.Combine = combineSel;
+            s.Across = PInt(tAcross.Text); s.Budget = PInt(tBudget.Text); s.Pieces = PInt(tPieces.Text);
+            int w; s.Wait = int.TryParse((tWait.Text ?? "").Trim(), out w) ? Math.Max(0, w) : 6;
+            if (kSplit.Checked) { s.HasSplit = true; s.SplitLo = PLong(tLo.Text); s.SplitHi = PLong(tHi.Text); if (s.SplitHi < s.SplitLo) { err = "hi < lo."; return null; } }
+            return s;
+        }
+        byte[] Payload() { string t = tEditor.Text; return string.IsNullOrEmpty(t) ? new byte[0] : new UTF8Encoding(false).GetBytes(t); }
         void RefreshPreview()
         {
             if (loading || tEditor == null) return;
             string err; var s = Gather(out err);
-            if (s == null) { planLabel.ForeColor = Look.WarnC; planLabel.Text = err; return; }
-
-            byte[] payload = PayloadBytes();
-            byte[] pkg = Core.Package(s, payload);
-            int bytes = pkg.Length;
-
-            gaugeLabel.ForeColor = bytes > Core.WireMax ? Look.WarnC : Look.Dim;
-            gaugeLabel.Text = bytes + " / " + Core.WireMax + " B";
-
-            int pieces = s.HasSplit ? (s.Pieces > 0 ? s.Pieces : 4) : 1;
-            int quorum = s.Across > 0 ? s.Across : 1;
-            int slots = pieces * quorum;
-            var plan = new StringBuilder();
-            plan.Append(pieces).Append(pieces == 1 ? " piece" : " pieces");
+            if (s == null) { planLbl.ForeColor = Look.WarnC; planLbl.Text = err; return; }
+            byte[] pkg = Core.Package(s, Payload()); int bytes = pkg.Length;
+            gaugeLbl.ForeColor = bytes > Core.WireMax ? Look.WarnC : Look.Dim; gaugeLbl.Text = bytes + " / " + Core.WireMax + " B";
+            int pieces = s.HasSplit ? (s.Pieces > 0 ? s.Pieces : 4) : 1; int quorum = s.Across > 0 ? s.Across : 1; int slots = pieces * quorum;
+            var plan = new StringBuilder(); plan.Append(pieces).Append(pieces == 1 ? " piece" : " pieces");
             if (quorum > 1) plan.Append(" x ").Append(quorum).Append(" = ").Append(slots).Append(" slots");
-            plan.Append("  ·  combine ").Append(s.Combine);
+            plan.Append("  \u00b7  combine ").Append(s.Combine);
             var warn = new StringBuilder();
             if (bytes > Core.WireMax) warn.Append("payload > ").Append(Core.WireMax).Append(" B.  ");
             if (slots > Core.SlotMax) warn.Append(slots).Append(" slots > ").Append(Core.SlotMax).Append(".  ");
-            if (warn.Length > 0) { planLabel.ForeColor = Look.WarnC; planLabel.Text = plan.ToString() + "\n" + warn.ToString(); }
-            else { planLabel.ForeColor = Look.Dim; planLabel.Text = plan.ToString(); }
+            if (warn.Length > 0) { planLbl.ForeColor = Look.WarnC; planLbl.Text = plan.ToString() + "\n" + warn.ToString(); }
+            else { planLbl.ForeColor = Look.Dim; planLbl.Text = plan.ToString(); }
         }
-
-        void Say(string line)
+        void Out(string line)
         {
-            if (log.InvokeRequired) { log.BeginInvoke((MethodInvoker)delegate { Say(line); }); return; }
-            string t = line.TrimStart();
-            if (t.StartsWith("= ")) { tResult.Text = t.Substring(2).Trim(); }
-            bool hot = line.StartsWith("pipe:") || t.StartsWith("= ") || line.StartsWith("---") || line.StartsWith("...");
-            log.SelectionStart = log.TextLength; log.SelectionColor = hot ? Look.Accent : Look.Ink;
-            log.AppendText(line + "\n"); log.SelectionStart = log.TextLength; log.ScrollToCaret();
+            if (tOut.InvokeRequired) { tOut.BeginInvoke((MethodInvoker)delegate { Out(line); }); return; }
+            tOut.Append(line);
         }
-
-        void DoSend()
-        {
-            string err; var s = Gather(out err);
-            if (s == null) { Say(err); return; }
-            byte[] payload = PayloadBytes();
-            if (payload.Length == 0) { Say("no payload (load a file or type in the editor)."); return; }
-            if (string.IsNullOrEmpty(s.Node)) { Say("no node."); return; }
-            byte[] pkg = Core.Package(s, payload);
-            if (pkg.Length > Core.WireMax) { Say("payload " + pkg.Length + " B > " + Core.WireMax + " B; not sent."); return; }
-            tResult.Text = ""; send.Enabled = false;
-            Say(""); Say("--- send " + pkg.Length + " B -> " + s.Node + " ---");
-            var th = new Thread(delegate()
-            {
-                int rc = Core.Feed(s, pkg, Say);
-                Say("--- ssh exit " + rc + " ---");
-                this.BeginInvoke((MethodInvoker)delegate { send.Enabled = true; });
-            });
-            th.IsBackground = true; th.Start();
-        }
-
-        void DoProbe()
-        {
-            string err; var s = Gather(out err);
-            if (s == null || string.IsNullOrEmpty(s.Node)) { Say("no node."); return; }
-            Say(""); Say("--- test " + s.Node + " ---");
-            var th = new Thread(delegate() { int rc = Core.Probe(s, Say); Say("--- ssh exit " + rc + " ---"); });
-            th.IsBackground = true; th.Start();
-        }
-
-        void DoScan()
-        {
-            string err; var s = Gather(out err);
-            if (s == null || string.IsNullOrEmpty(s.Node)) { Say("no node."); return; }
-            Say(""); Say("--- scan from " + s.Node + " ---");
-            var th = new Thread(delegate() { int rc = Core.Scan(s, Say); Say("--- ssh exit " + rc + " ---"); });
-            th.IsBackground = true; th.Start();
-        }
-
-        void DoDoorLine()
-        {
-            var d = new OpenFileDialog(); d.Filter = "ssh public key|*.pub|all|*.*";
-            d.Title = "pick your ssh public key";
-            if (d.ShowDialog() != DialogResult.OK) return;
-            try
-            {
-                string pub = File.ReadAllText(d.FileName).Trim();
-                string[] parts = pub.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length < 2) { Say("that does not look like an ssh public key."); return; }
-                string line = "write door | " + parts[0] + " " + parts[1];
-                Clipboard.SetText(line);
-                Say("");
-                Say("door line copied to the clipboard:");
-                Say("  " + line);
-                Say("on the node: go system, go settings, paste it, then back.");
-            }
-            catch (Exception e) { Say("cannot read the key: " + e.Message); }
-        }
-
-        void DoSave()
-        {
-            string err; var s = Gather(out err);
-            if (s == null) { Say(err); return; }
-            byte[] payload = PayloadBytes();
-            if (payload.Length == 0) { Say("no payload."); return; }
-            byte[] pkg = Core.Package(s, payload);
-            var d = new SaveFileDialog(); d.Filter = "task package|*.ebtask|all|*.*";
-            d.FileName = (string.IsNullOrEmpty(s.Name) ? "task" : s.Name) + ".ebtask";
-            if (d.ShowDialog() == DialogResult.OK) { File.WriteAllBytes(d.FileName, pkg); Say("wrote " + d.FileName + " (" + pkg.Length + " bytes)"); }
-        }
-
         void LoadTemplate(string which)
         {
             loading = true;
-            if (which == "sumrange")
+            string[] body = which == "sumrange"
+                ? new string[] { "long main(long console, long inbox)", "{", "    long buf[16];", "    long lo, hi, s, i;", "    syscall(3, inbox, buf, 0, 0, 0);", "    lo = buf[2];", "    hi = buf[3];", "    s = 0;", "    for (i = lo; i <= hi; i = i + 1)", "        s = s + i;", "    syscall(2, console, 0x54584554, s, 0, 0);", "    return 0;", "}" }
+                : new string[] { "long main(long console, long inbox)", "{", "    long buf[16];", "    long lo, hi, k, i;", "    syscall(3, inbox, buf, 0, 0, 0);", "    lo = buf[2];", "    hi = buf[3];", "    k = 0;", "    for (i = lo; i <= hi; i = i + 1)", "        if ((i & 7) == 0) k = k + 1;", "    syscall(2, console, 0x54584554, k, 0, 0);", "    return 0;", "}" };
+            tEditor.Text = string.Join("\r\n", body);
+            kRecipe.Checked = false; tName.Text = which; kSplit.Checked = true; tLo.Text = "1"; tHi.Text = "1000000"; tPieces.Text = "8"; tBudget.Text = "15";
+            SelectCombine(which == "sumrange" ? "sum" : "sum");
+            loading = false; RefreshPreview();
+        }
+        void DoSend()
+        {
+            if (target == null) { Say("no target node."); return; }
+            string err; var s = Gather(out err); if (s == null) { Out(err); return; }
+            byte[] payload = Payload(); if (payload.Length == 0) { Out("no payload (type in the editor)."); return; }
+            byte[] pkg = Core.Package(s, payload);
+            if (pkg.Length > Core.WireMax) { Out("payload " + pkg.Length + " B > " + Core.WireMax + " B; not sent."); return; }
+            tResult.Text = ""; sendBtn.Enabled = false;
+            Out(""); Out("--- send " + pkg.Length + " B -> " + target + " ---");
+            var n = target; int wait = s.Wait;
+            Bg(delegate
             {
-                tEditor.Text = string.Join("\r\n", new string[] {
-                    "long main(long console, long inbox)", "{",
-                    "    long buf[16];", "    long lo, hi, s, i;",
-                    "    syscall(3, inbox, buf, 0, 0, 0);",
-                    "    lo = buf[2];", "    hi = buf[3];", "    s = 0;",
-                    "    for (i = lo; i <= hi; i = i + 1)", "        s = s + i;",
-                    "    syscall(2, console, 0x54584554, s, 0, 0);",
-                    "    return 0;", "}" });
-                tSource.Text = ""; kRecipe.Checked = false; tName.Text = "sumrange";
-                kSplit.Checked = true; tLo.Text = "1"; tHi.Text = "1000000"; tPieces.Text = "8"; tBudget.Text = "15";
-                SelectCombine("sum");
-                loading = false; RefreshPreview(); Say("loaded sumrange: 1..1000000, 8 pieces, sum.");
-            }
-            else
-            {
-                tEditor.Text = string.Join("\r\n", new string[] {
-                    "long main(long console, long inbox)", "{",
-                    "    long buf[16];", "    long lo, hi, k, i;",
-                    "    syscall(3, inbox, buf, 0, 0, 0);",
-                    "    lo = buf[2];", "    hi = buf[3];", "    k = 0;",
-                    "    for (i = lo; i <= hi; i = i + 1)", "        if ((i & 7) == 0) k = k + 1;",
-                    "    syscall(2, console, 0x54584554, k, 0, 0);",
-                    "    return 0;", "}" });
-                tSource.Text = ""; kRecipe.Checked = false; tName.Text = "count";
-                kSplit.Checked = true; tLo.Text = "1"; tHi.Text = "1000000"; tPieces.Text = "8"; tBudget.Text = "15";
-                SelectCombine("sum");
-                loading = false; RefreshPreview(); Say("loaded count: multiples of 8 in 1..1000000, sum.");
-            }
+                string e2; var c = Ctl.Open(SpecOf(n), out e2);
+                if (c == null) { Out("control: " + e2); UI(delegate { sendBtn.Enabled = true; }); return; }
+                var fs = c.Req("submit", pkg);
+                if (fs == null || fs.Kind != 2) { Out("submit: " + (fs != null ? Encoding.UTF8.GetString(fs.Body) : "no response")); c.Close(); UI(delegate { sendBtn.Enabled = true; }); return; }
+                string handle = Ctl.KV(fs.Body, "handle"); Out("submitted; handle " + handle);
+                if (wait > 0 && handle != null)
+                {
+                    DateTime dl = DateTime.UtcNow.AddSeconds(wait); byte[] hb = Encoding.ASCII.GetBytes(handle);
+                    string state = "pending", result = null;
+                    while (DateTime.UtcNow < dl)
+                    {
+                        Thread.Sleep(400);
+                        var fr = c.Req("result", hb);
+                        if (fr != null && fr.Kind == 2) { state = Ctl.KV(fr.Body, "state") ?? "pending"; result = Ctl.KV(fr.Body, "result"); if (state == "done") break; }
+                    }
+                    Out("= " + (result ?? "(" + state + ")"));
+                    if (result != null) UI(delegate { tResult.Text = result; });
+                }
+                c.Close();
+                UI(delegate { sendBtn.Enabled = true; Say("sent."); });
+            });
+        }
+        void DoSave()
+        {
+            string err; var s = Gather(out err); if (s == null) { Out(err); return; }
+            byte[] payload = Payload(); if (payload.Length == 0) { Out("no payload."); return; }
+            byte[] pkg = Core.Package(s, payload);
+            var d = new SaveFileDialog(); d.Filter = "task package|*.ebtask|all|*.*"; d.FileName = (string.IsNullOrEmpty(s.Name) ? "task" : s.Name) + ".ebtask";
+            if (d.ShowDialog() == DialogResult.OK) { File.WriteAllBytes(d.FileName, pkg); Out("wrote " + d.FileName + " (" + pkg.Length + " bytes)"); }
         }
 
-        void RefillNodeList() { nodeList.Items.Clear(); foreach (var n in nodes) nodeList.Items.Add(n); }
-        void LoadSelectedNode()
+        /* ================= JOBS ========================================= */
+
+        Grid jbGrid, evGrid; List<string[]> events = new List<string[]>();
+        Toggle jbAuto, evWatch; System.Windows.Forms.Timer jbTimer; Ctl watchCtl; Thread watchThread; bool watching;
+
+        void BuildJobs()
         {
-            var n = nodeList.SelectedItem as NodeEntry; if (n == null) return;
-            tNode.Text = n.Host; tPort.Text = n.Port.ToString(); tKey.Text = n.Key;
-        }
-        void SaveCurrentNode()
-        {
-            string host = tNode.Text.Trim(); if (host.Length == 0) { Say("no host."); return; }
-            NodeEntry found = null; foreach (var n in nodes) if (n.Host == host) { found = n; break; }
-            if (found == null) { found = new NodeEntry(); nodes.Add(found); }
-            found.Host = host; found.Name = host; int.TryParse(tPort.Text.Trim(), out found.Port); if (found.Port < 1) found.Port = 22;
-            found.Key = tKey.Text.Trim();
-            RefillNodeList(); Persist(); Say("saved " + host + ".");
-        }
-        void RemoveSelectedNode()
-        {
-            var n = nodeList.SelectedItem as NodeEntry; if (n == null) return;
-            nodes.Remove(n); RefillNodeList(); Persist();
+            var p = View("jobs");
+            Section(p, "jobs in flight", 22, 16, p.Width - 44);
+            Btn(p, "refresh", 22, 44, 100, 26, false).Click += delegate { RefreshJobs(); };
+            jbAuto = new Toggle("auto"); jbAuto.Location = new Point(134, 48); p.Controls.Add(jbAuto);
+            jbAuto.Changed += delegate { if (jbAuto.Checked) jbTimer.Start(); else jbTimer.Stop(); };
+
+            jbGrid = MakeGrid(p, 22, 80, p.Width - 44, 200);
+            jbGrid.Columns(new Grid.Column[] { new Grid.Column("no", 50), new Grid.Column("name", 160), new Grid.Column("state", 96), new Grid.Column("pieces", 84), new Grid.Column("parts", 80), new Grid.Column("done", 74), new Grid.Column("quorum", 92), new Grid.Column("combine", 100) });
+            jbGrid.Tint = delegate(int r, int c, string t) { return (c == 2) ? (t == "run" ? Look.Accent : t == "scan" ? Look.WarnC : Look.Ink) : Look.Ink; };
+
+            Section(p, "event stream", 22, 300, p.Width - 44);
+            evWatch = new Toggle("watch (live push)"); evWatch.Location = new Point(22, 326); p.Controls.Add(evWatch);
+            evWatch.Changed += delegate { if (evWatch.Checked) StartWatch(); else StopWatch(); };
+            Btn(p, "clear", 220, 322, 80, 26, false).Click += delegate { events.Clear(); evGrid.SetRows(new List<string[]>()); };
+
+            evGrid = MakeGrid(p, 22, 358, p.Width - 44, p.Height - 358 - 16);
+            evGrid.Columns(new Grid.Column[] { new Grid.Column("time", 90), new Grid.Column("job", 50), new Grid.Column("kind", 90), new Grid.Column("detail", 400) });
+            evGrid.Tint = delegate(int r, int c, string t) { return (c == 2) ? (t == "done" ? Look.Accent : t == "failed" ? Look.WarnC : Look.Ink) : Look.Ink; };
+
+            jbTimer = new System.Windows.Forms.Timer(); jbTimer.Interval = 4000; jbTimer.Tick += delegate { RefreshJobs(); };
+            this.FormClosing += delegate { jbTimer.Stop(); StopWatch(); };
+            if (demo) SeedJobs();
         }
 
-        void LoadLast()
+        void RefreshJobs()
         {
-            loading = true;
-            if (last.ContainsKey("node")) tNode.Text = last["node"];
-            if (last.ContainsKey("key")) tKey.Text = last["key"];
-            tPort.Text = last.ContainsKey("port") ? last["port"] : "22";
-            tWait.Text = last.ContainsKey("wait") ? last["wait"] : "8";
-            SelectCombine(last.ContainsKey("combine") ? last["combine"] : "sum");
-            loading = false;
+            if (demo) return;
+            var n = target; if (n == null) { Say("no target node."); return; }
+            Bg(delegate
+            {
+                string err; var f = OneShot(n, "jobs", null, out err);
+                var rows = new List<string[]>();
+                if (f != null && f.Kind == 2)
+                    foreach (var line in Encoding.UTF8.GetString(f.Body).Split('\n'))
+                    {
+                        if (line.Length == 0 || line.StartsWith("count=")) continue;
+                        var d = Parse(line);
+                        rows.Add(new string[] { Get(d, "no"), Get(d, "name"), Get(d, "state"), Get(d, "pieces"), Get(d, "parts"), Get(d, "done"), Get(d, "quorum"), Get(d, "combine") });
+                    }
+                UI(delegate { jbGrid.SetRows(rows); Say(f != null ? "jobs: " + rows.Count + " in flight." : "jobs: " + (err ?? "no answer")); });
+            });
+        }
+        void StartWatch()
+        {
+            if (demo || watching) return;
+            var n = target; if (n == null) { Say("no target node."); evWatch.Checked = false; return; }
+            watching = true; Say("subscribed to " + n + ".");
+            watchThread = new Thread(delegate()
+            {
+                string err; watchCtl = Ctl.Open(SpecOf(n), out err);
+                if (watchCtl == null) { UI(delegate { Say("watch: " + err); evWatch.Checked = false; watching = false; }); return; }
+                var sub = watchCtl.Req("subscribe", null);
+                if (sub == null || sub.Kind != 2) { UI(delegate { Say("watch: subscribe failed"); evWatch.Checked = false; watching = false; }); watchCtl.Close(); return; }
+                while (watching)
+                {
+                    var f = watchCtl.ReadFrame();
+                    if (f == null) break;
+                    if (f.Kind == 3)
+                    {
+                        var d = Parse(Encoding.UTF8.GetString(f.Body));
+                        string detail = Get(d, "text"); if (detail.Length == 0) detail = "seq " + Get(d, "seq");
+                        AddEvent(new string[] { DateTime.Now.ToString("HH:mm:ss"), Get(d, "no"), Get(d, "kind"), detail });
+                    }
+                }
+                watching = false;
+            });
+            watchThread.IsBackground = true; watchThread.Start();
+        }
+        void StopWatch()
+        {
+            watching = false;
+            try { if (watchCtl != null) watchCtl.Close(); } catch { }
+            watchCtl = null;
+        }
+        void AddEvent(string[] row)
+        {
+            UI(delegate
+            {
+                events.Insert(0, row); if (events.Count > 200) events.RemoveAt(events.Count - 1);
+                evGrid.SetRows(new List<string[]>(events));
+            });
+        }
+        void SeedJobs()
+        {
+            jbGrid.SetRows(new List<string[]> {
+                new string[]{"7","maxdemo","run","2","2","1","0","max"},
+                new string[]{"8","sumrange","scan","8","8","0","0","sum"},
+            });
+            events = new List<string[]> {
+                new string[]{"14:22:07","8","queued","seq 5"},
+                new string[]{"14:22:05","7","done","= 100"},
+                new string[]{"14:22:01","7","queued","seq 3"},
+                new string[]{"14:21:40","6","failed","no peer is named in the settings"},
+            };
+            evGrid.SetRows(new List<string[]>(events));
+        }
+
+        /* ================= LOGS ========================================= */
+
+        TextPane lgText; Toggle lgAuto; TextBox lgLines; System.Windows.Forms.Timer lgTimer;
+
+        void BuildLogs()
+        {
+            var p = View("logs");
+            Section(p, "log", 22, 16, p.Width - 44);
+            Btn(p, "refresh", 22, 44, 100, 26, false).Click += delegate { RefreshLog(); };
+            lgAuto = new Toggle("auto"); lgAuto.Location = new Point(134, 48); p.Controls.Add(lgAuto);
+            lgAuto.Changed += delegate { if (lgAuto.Checked) lgTimer.Start(); else lgTimer.Stop(); };
+            Field(p, "lines", p.Width - 160, 30, 40); lgLines = Text_(p, p.Width - 118, 44, 96, "how many journal lines"); lgLines.Text = "40";
+
+            var box = new Panel(); box.BackColor = Look.Panel; box.Location = new Point(22, 80); box.Size = new Size(p.Width - 44, p.Height - 80 - 14);
+            lgText = new TextPane(); lgText.Location = new Point(1, 1); lgText.Size = new Size(box.Width - 2, box.Height - 2);
+            box.Controls.Add(lgText); p.Controls.Add(box); bordered.Add(box);
+
+            lgTimer = new System.Windows.Forms.Timer(); lgTimer.Interval = 4000; lgTimer.Tick += delegate { RefreshLog(); };
+            this.FormClosing += delegate { lgTimer.Stop(); };
+            if (demo) SeedLog();
+        }
+        void RefreshLog()
+        {
+            if (demo) return;
+            var n = target; if (n == null) { Say("no target node."); return; }
+            int lines = PInt(lgLines.Text); byte[] body = lines > 0 ? Encoding.ASCII.GetBytes(lines.ToString()) : null;
+            Bg(delegate
+            {
+                string err; var f = OneShot(n, "log", body, out err);
+                string txt = (f != null && f.Kind == 2) ? Encoding.UTF8.GetString(f.Body) : ("(" + (err ?? "no answer") + ")");
+                UI(delegate { lgText.SetText(txt); Say("log from " + n + "."); });
+            });
+        }
+        void SeedLog()
+        {
+            lgText.SetText(string.Join("\n", new string[] {
+                "   3s  ssh: the door's key is SHA256:QGFaYCgd26kmZCPsexPFkwc",
+                "   3s  system: started fresh",
+                "   5s  system: the clock was set from the net",
+                "  31s  ssh: someone logged in",
+                "  71s  pipe: job 1 queued, 39 bytes, parts 2",
+                "  76s  pipe: job 1 answers: 100 (2 parts by alpha, gamma)",
+                " 132s  pipe: node delta went quiet",
+            }));
+        }
+
+        /* ================= CLUSTER ====================================== */
+
+        Grid clGrid; Panel clTopo; List<string[]> clRows = new List<string[]>();
+
+        void BuildCluster()
+        {
+            var p = View("cluster");
+            Section(p, "cluster", 22, 16, p.Width - 44);
+            Btn(p, "refresh", 22, 44, 100, 26, false).Click += delegate { RefreshCluster(); };
+            Field(p, "gateway = the target node; a scan is poked, then the heard peers are read", 134, 50, p.Width - 160);
+
+            clGrid = MakeGrid(p, 22, 80, p.Width - 44, 230);
+            clGrid.Columns(new Grid.Column[] { new Grid.Column("node", 200), new Grid.Column("version", 200), new Grid.Column("jobs", 70), new Grid.Column("works", 80), new Grid.Column("seen", 100) });
+            clGrid.Tint = delegate(int r, int c, string t) { if (c == 0 && r == 0) return Look.Accent; if (c == 3) return t == "yes" ? Look.Accent : Look.Dim; return Look.Ink; };
+
+            Section(p, "topology", 22, 326, p.Width - 44);
+            clTopo = new Panel(); clTopo.Location = new Point(22, 352); clTopo.Size = new Size(p.Width - 44, p.Height - 352 - 16); clTopo.BackColor = Look.Panel;
+            clTopo.Paint += delegate(object o, PaintEventArgs e) { PaintTopo(e.Graphics, clTopo.ClientSize); };
+            p.Controls.Add(clTopo); bordered.Add(clTopo);
+
+            if (demo) SeedCluster();
+        }
+        void RefreshCluster()
+        {
+            if (demo) return;
+            var n = target; if (n == null) { Say("no target node."); return; }
+            Say("aggregating the cluster from " + n + " ...");
+            Bg(delegate
+            {
+                string err; var c = Ctl.Open(SpecOf(n), out err);
+                if (c == null) { UI(delegate { Say("cluster: " + err); }); return; }
+                c.Req("cluster", null); Thread.Sleep(4200);
+                var f = c.Req("cluster", null); c.Close();
+                var rows = new List<string[]>();
+                if (f != null && f.Kind == 2)
+                    foreach (var line in Encoding.UTF8.GetString(f.Body).Split('\n'))
+                    {
+                        if (line.Length == 0 || line.StartsWith("peers=")) continue;
+                        if (line.StartsWith("self "))
+                        { var d = Parse(line.Substring(5)); rows.Insert(0, new string[] { (n.Name.Length > 0 ? n.Name : "self") + " *", Get(d, "version"), Get(d, "jobs"), "-", "self" }); }
+                        else if (line.StartsWith("peer "))
+                        { var d = Parse(line.Substring(5)); rows.Add(new string[] { Get(d, "name").Length > 0 ? Get(d, "name") : Get(d, "ip"), Get(d, "version"), Get(d, "jobs"), Get(d, "works"), Get(d, "seen_s") + "s" }); }
+                    }
+                UI(delegate { clRows = rows; clGrid.SetRows(rows); clTopo.Invalidate(); Say("cluster: " + Math.Max(0, rows.Count - 1) + " peer(s)."); });
+            });
+        }
+        void PaintTopo(Graphics g, Size sz)
+        {
+            g.Clear(Look.Panel); g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            if (clRows.Count == 0) { using (var b = new SolidBrush(Look.Faint)) g.DrawString("(refresh to draw the mesh)", Look.Mono, b, 12, 12); return; }
+            int cx = sz.Width / 2, cy = sz.Height / 2; int R = Math.Min(cx, cy) - 46;
+            int peers = clRows.Count - 1;
+            using (var pen = new Pen(Look.Edge))
+            for (int i = 1; i < clRows.Count; i++)
+            {
+                double ang = -Math.PI / 2 + 2 * Math.PI * (i - 1) / Math.Max(1, peers);
+                int px = cx + (int)(R * Math.Cos(ang)), py = cy + (int)(R * Math.Sin(ang));
+                g.DrawLine(pen, cx, cy, px, py);
+                Node(g, px, py, clRows[i][0], clRows[i][3] == "yes", false);
+            }
+            Node(g, cx, cy, clRows[0][0], false, true);
+        }
+        void Node(Graphics g, int x, int y, string name, bool works, bool self)
+        {
+            int r = 9; Color c = self ? Look.Accent : (works ? Look.Ink : Look.Dim);
+            using (var b = new SolidBrush(Look.Ground)) g.FillEllipse(b, x - r, y - r, 2 * r, 2 * r);
+            using (var pen = new Pen(c, self ? 2f : 1f)) g.DrawEllipse(pen, x - r, y - r, 2 * r, 2 * r);
+            using (var tb = new SolidBrush(c)) { var sz = g.MeasureString(name, Look.Small); g.DrawString(name, Look.Small, tb, x - sz.Width / 2, y + r + 2); }
+        }
+        void SeedCluster()
+        {
+            clRows = new List<string[]> {
+                new string[]{"beta *","0.9.6","1","self","self"},
+                new string[]{"alpha","0.9.6","0","yes","2s"},
+                new string[]{"gamma","0.9.6","0","yes","3s"},
+                new string[]{"delta","0.9.5","0","no","48s"},
+            };
+            clGrid.SetRows(clRows);
+        }
+
+        /* ================= SETTINGS ===================================== */
+
+        void BuildSettings()
+        {
+            var p = View("settings");
+            Section(p, "settings", 22, 16, 560);
+            Field(p, "default target node (host)", 22, 46, 400);
+            var dt = Text_(p, 22, 61, 400, "the node the views act on when Gate opens"); dt.Text = target != null ? target.Host : "";
+            dt.TextChanged += delegate { var n = ByHost(dt.Text.Trim()); if (n != null) SetTarget(n); };
+
+            Section(p, "the machine interface", 22, 110, 560);
+            var m = new Label(); m.AutoSize = false; m.Location = new Point(22, 138); m.Size = new Size(p.Width - 44, 150); m.Font = Look.Mono; m.ForeColor = Look.Dim;
+            m.Text = "the same views drive a program from the command line:\n\n"
+                   + "  EreBUS-Gate.exe api status  --node user@host\n"
+                   + "  EreBUS-Gate.exe api jobs    --node user@host\n"
+                   + "  EreBUS-Gate.exe api submit  --source prog.c --node user@host --split 1..1000000 --pieces 8 --combine max --wait 6\n"
+                   + "  EreBUS-Gate.exe api watch   --node user@host --for 60\n"
+                   + "  EreBUS-Gate.exe api cluster --node user@host\n\n"
+                   + "'api schema' lists every verb. json on stdout, one object per call.";
+            p.Controls.Add(m);
+
+            Section(p, "about", 22, 300, 560);
+            var a = new Label(); a.AutoSize = false; a.Location = new Point(22, 328); a.Size = new Size(p.Width - 44, 120); a.Font = Look.Mono; a.ForeColor = Look.Ink;
+            a.Text = "EreBUS Gate " + Ver.V + "\n\n"
+                   + "a front-end and machine interface for an EreBUS far-work cluster.\n"
+                   + "it speaks the node's control channel over ssh (EreBUS 0.9.6).\n"
+                   + "the node's door must hold your ssh key; a payload is at most 1 KiB and\n"
+                   + "no foreign binaries run -- the node compiles the c or runs the recipe.";
+            p.Controls.Add(a);
+        }
+
+        /* ---- seed / persist ------------------------------------------- */
+
+        void SeedDemo()
+        {
+            nodes.Add(new NodeEntry() { Name = "alpha", Host = "someone@10.11.11.20", Port = 22 });
+            nodes.Add(new NodeEntry() { Name = "beta", Host = "someone@10.11.11.21", Port = 22 });
+            nodes.Add(new NodeEntry() { Name = "gamma", Host = "someone@10.11.11.22", Port = 22 });
+            nodes.Add(new NodeEntry() { Name = "delta", Host = "someone@10.11.11.23", Port = 22 });
         }
         void Persist()
         {
-            if (tNode != null) last["node"] = tNode.Text.Trim();
-            if (tKey != null) last["key"] = tKey.Text.Trim();
-            last["combine"] = combineSel;
-            if (tPort != null) last["port"] = tPort.Text.Trim();
-            if (tWait != null) last["wait"] = tWait.Text.Trim();
-            Store.Save(nodes, last);
-        }
-
-        void ShowAbout()
-        {
-            MessageBox.Show(
-                "EreBUS Gate " + Ver.V + "\n\n" +
-                "packages a task, feeds it to a node's desk over ssh.\n" +
-                "payload: EreBUS c (far-task ABI) or a recipe, <= 1 KiB.\n" +
-                "a node's door must hold your ssh key.",
-                "EreBUS Gate", MessageBoxButtons.OK, MessageBoxIcon.None);
-        }
-    }
-
-    /* a small read-only overview of the saved nodes: online and version,
-     * polled over the door. the dashboard with jobs and live log arrives
-     * with the 0.9.6 control plane. */
-    class ClusterForm : Form
-    {
-        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
-        static extern int SetWindowTheme(IntPtr h, string app, string id);
-
-        List<NodeEntry> nodes;
-        bool[] online, seen; string[] ver;
-        bool busy; Point dragFrom; bool dragging;
-        Panel table; System.Windows.Forms.Timer timer;
-
-        public ClusterForm(List<NodeEntry> src)
-        {
-            nodes = new List<NodeEntry>(src);
-            online = new bool[nodes.Count]; seen = new bool[nodes.Count]; ver = new string[nodes.Count];
-
-            this.Text = "cluster";
-            this.FormBorderStyle = FormBorderStyle.None;
-            this.StartPosition = FormStartPosition.CenterParent;
-            this.BackColor = Look.Ground; this.ForeColor = Look.Ink; this.Font = Look.Body;
-            this.ClientSize = new Size(560, Math.Max(240, 174 + nodes.Count * 26));
-            this.KeyPreview = true;
-            this.KeyDown += delegate(object o, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) this.Close(); };
-            this.Paint += delegate(object o, PaintEventArgs e)
-            { using (var pen = new Pen(Look.Edge)) e.Graphics.DrawRectangle(pen, 0, 0, this.Width - 1, this.Height - 1); };
-
-            var head = new Panel();
-            head.Bounds = new Rectangle(1, 1, this.ClientSize.Width - 2, 60); head.BackColor = Look.Ground;
-            head.Paint += delegate(object o, PaintEventArgs e)
-            {
-                var g = e.Graphics; g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-                using (var f = new Font("Consolas", 15f, FontStyle.Bold))
-                using (var b = new SolidBrush(Look.Accent)) g.DrawString("cluster", f, b, 18, 16);
-                using (var pen = new Pen(Look.Edge)) g.DrawLine(pen, 18, 50, head.Width - 18, 50);
-            };
-            head.MouseDown += delegate(object o, MouseEventArgs e) { dragging = true; dragFrom = e.Location; };
-            head.MouseUp += delegate { dragging = false; };
-            head.MouseMove += delegate(object o, MouseEventArgs e)
-            { if (dragging) this.Location = new Point(this.Location.X + e.X - dragFrom.X, this.Location.Y + e.Y - dragFrom.Y); };
-            this.Controls.Add(head);
-
-            var x = new Label();
-            x.Text = "×"; x.Font = new Font("Consolas", 13f, FontStyle.Bold); x.ForeColor = Look.Dim;
-            x.AutoSize = false; x.Size = new Size(24, 24); x.TextAlign = ContentAlignment.MiddleCenter;
-            x.Location = new Point(head.Width - 30, 12); x.Cursor = Cursors.Hand;
-            x.MouseEnter += delegate { x.ForeColor = Look.Accent; }; x.MouseLeave += delegate { x.ForeColor = Look.Dim; };
-            x.Click += delegate { this.Close(); }; head.Controls.Add(x);
-
-            table = new Panel(); table.BackColor = Look.Ground;
-            table.Location = new Point(1, 62); table.Size = new Size(this.ClientSize.Width - 2, this.ClientSize.Height - 62 - 44);
-            table.Paint += PaintTable; this.Controls.Add(table);
-
-            var refresh = MkBtn("refresh", 18, this.ClientSize.Height - 36, 100);
-            refresh.Click += delegate { Refresh_(); };
-            var auto = new Toggle("auto"); auto.Location = new Point(132, this.ClientSize.Height - 32);
-            auto.Changed += delegate { if (auto.Checked) timer.Start(); else timer.Stop(); };
-            this.Controls.Add(auto);
-
-            timer = new System.Windows.Forms.Timer(); timer.Interval = 8000;
-            timer.Tick += delegate { Refresh_(); };
-            this.FormClosing += delegate { timer.Stop(); };
-
-            Refresh_();
-        }
-
-        Button MkBtn(string text, int x, int y, int w)
-        {
-            var b = new Button();
-            b.Text = text; b.Font = Look.Mono; b.FlatStyle = FlatStyle.Flat;
-            b.FlatAppearance.BorderColor = Look.Edge; b.FlatAppearance.BorderSize = 1; b.BackColor = Look.Ground;
-            b.ForeColor = Look.Dim; b.FlatAppearance.MouseOverBackColor = Color.FromArgb(0x2C, 0x23, 0x1B);
-            b.Location = new Point(x, y); b.Size = new Size(w, 26); b.Cursor = Cursors.Hand; b.UseCompatibleTextRendering = true;
-            this.Controls.Add(b); return b;
-        }
-
-        void PaintTable(object o, PaintEventArgs e)
-        {
-            var g = e.Graphics; g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-            int x0 = 17, y = 6;
-            using (var b = new SolidBrush(Look.Accent))
-            {
-                g.DrawString(Look.Spaced("node"), Look.Small, b, x0, y);
-                g.DrawString(Look.Spaced("state"), Look.Small, b, x0 + 300, y);
-                g.DrawString(Look.Spaced("version"), Look.Small, b, x0 + 392, y);
-            }
-            using (var pen = new Pen(Look.Edge)) g.DrawLine(pen, x0, y + 18, table.Width - 18, y + 18);
-            y += 26;
-            if (nodes.Count == 0)
-            {
-                using (var b = new SolidBrush(Look.Dim)) g.DrawString("no saved nodes.  save one in the main window.", Look.Mono, b, x0, y);
-                return;
-            }
-            for (int i = 0; i < nodes.Count; i++)
-            {
-                using (var b = new SolidBrush(Look.Ink)) g.DrawString(nodes[i].ToString(), Look.Mono, b, x0, y);
-                string state; Color sc;
-                if (!seen[i]) { state = busy ? "..." : "-"; sc = Look.Dim; }
-                else if (online[i]) { state = "online"; sc = Look.Accent; }
-                else { state = "offline"; sc = Look.WarnC; }
-                using (var b = new SolidBrush(sc)) g.DrawString(state, Look.Mono, b, x0 + 300, y);
-                using (var b = new SolidBrush(Look.Dim)) g.DrawString(ver[i] ?? "-", Look.Mono, b, x0 + 392, y);
-                y += 24;
-            }
-        }
-
-        void Refresh_()
-        {
-            if (busy) return;
-            if (nodes.Count == 0) { table.Invalidate(); return; }
-            busy = true; table.Invalidate();
-            var th = new Thread(delegate()
-            {
-                for (int i = 0; i < nodes.Count; i++)
-                {
-                    var n = nodes[i];
-                    var s = new Spec(); s.Node = n.Host; s.Port = n.Port < 1 ? 22 : n.Port; s.Key = n.Key;
-                    var lines = new List<string>();
-                    int rc = Core.Probe(s, delegate(string l) { lock (lines) lines.Add(l); });
-                    online[i] = rc == 0; ver[i] = Core.VersionOf(lines); seen[i] = true;
-                    try { table.BeginInvoke((MethodInvoker)delegate { table.Invalidate(); }); } catch { }
-                }
-                busy = false;
-                try { table.BeginInvoke((MethodInvoker)delegate { table.Invalidate(); }); } catch { }
-            });
-            th.IsBackground = true; th.Start();
+            if (target != null) last["target"] = target.Host;
+            if (!demo) Store.Save(nodes, last);
         }
     }
 
@@ -1164,8 +1575,7 @@ namespace EreBUSGate
             if (args.Length > 0) AttachConsole(-1);
             if (args.Length > 0 && args[0] == "api") return Api(args);
             if (Has(args, "--version")) { Console.WriteLine("EreBUS Gate " + Ver.V); return 0; }
-            if (Has(args, "--shot-cluster")) return ShotCluster(Arg(args, "--shot-cluster"));
-            if (Has(args, "--shot")) return Shot(Arg(args, "--shot"));
+            if (Has(args, "--shot")) return Shot(Arg(args, "--shot"), Arg(args, "--view"));
             if (Has(args, "--headless")) return Headless(args);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -1176,33 +1586,16 @@ namespace EreBUSGate
         static bool Has(string[] a, string k) { foreach (var x in a) if (x == k) return true; return false; }
         static string Arg(string[] a, string k) { for (int i = 0; i < a.Length - 1; i++) if (a[i] == k) return a[i + 1]; return null; }
 
-        static int Shot(string path)
+        static int Shot(string path, string view)
         {
             if (string.IsNullOrEmpty(path)) { Console.Error.WriteLine("--shot needs a file"); return 2; }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            var f = new GateForm();
+            var f = new GateForm(true);
             f.StartPosition = FormStartPosition.Manual; f.Location = new Point(-4000, -4000);
             f.Show(); Application.DoEvents();
-            using (var bmp = new Bitmap(f.Width, f.Height))
-            { f.DrawToBitmap(bmp, new Rectangle(0, 0, f.Width, f.Height)); bmp.Save(path, ImageFormat.Png); }
-            f.Close();
-            Console.WriteLine("wrote " + path);
-            return 0;
-        }
-
-        static int ShotCluster(string path)
-        {
-            if (string.IsNullOrEmpty(path)) { Console.Error.WriteLine("--shot-cluster needs a file"); return 2; }
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            var demo = new List<NodeEntry>();
-            demo.Add(new NodeEntry() { Name = "alpha", Host = "someone@alpha", Port = 22 });
-            demo.Add(new NodeEntry() { Name = "beta",  Host = "someone@beta",  Port = 2222 });
-            demo.Add(new NodeEntry() { Name = "gamma", Host = "someone@gamma", Port = 22 });
-            var f = new ClusterForm(demo);
-            f.StartPosition = FormStartPosition.Manual; f.Location = new Point(-4000, -4000);
-            f.Show(); Application.DoEvents(); System.Threading.Thread.Sleep(150); Application.DoEvents();
+            if (!string.IsNullOrEmpty(view)) { f.Show(view); Application.DoEvents(); }
+            System.Threading.Thread.Sleep(120); Application.DoEvents();
             using (var bmp = new Bitmap(f.Width, f.Height))
             { f.DrawToBitmap(bmp, new Rectangle(0, 0, f.Width, f.Height)); bmp.Save(path, ImageFormat.Png); }
             f.Close();
