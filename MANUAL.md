@@ -186,7 +186,7 @@ The terminal walks like the shell does: it stands on an object and can go only w
 
 ### 5.6 Nodes and the other machines (chapter 13)
 
-`scan`, `found`, `point at <name or address>`, `send <name>`, `ask <name> [with <object>] [as code] [across N]`, `say <words>`, `nodes`, `allow <node> work|update|vouch|all|nothing`, `forget <node>`, `trust <name> ssh-ed25519 ...`, `vouch <node>`, `unvouch <node>`, `renew key`, `update <node> [with <kernel.elf>]`, `update all`, `update check`.
+`scan`, `found`, `point at <name or address>`, `send <name>`, `ask <name> [with <object>] [as code] [across N]`, `submit <name>` (a task package, 9.6), `say <words>`, `nodes`, `allow <node> work|update|vouch|all|nothing`, `forget <node>`, `trust <name> ssh-ed25519 ...`, `vouch <node>`, `unvouch <node>`, `renew key`, `update <node> [with <kernel.elf>]`, `update all`, `update check`.
 
 ### 5.7 The machine
 
@@ -340,6 +340,26 @@ A task is a text sent to other machines (`ask <task>`, or the ask chip). It runs
 
 - Every answer is signed with the answering machine's door key over the job and the result, and checked against that node's key. A verified answer names the node plainly (`7 (by alpha)`); an answer whose signature does not check is marked `(unverified)`.
 - `the ledger`, a read-only text on the system shelf, keeps one line per far-work job asked from this machine: its number, whether it was code, and the result or why it failed. It outlives the desk and the journal's ring.
+
+### 9.6 Task packages
+
+A task can carry its own plan. When a task text begins with a `key | value` manifest, ended by a line of just `--`, the lines after `--` are the payload (a recipe, or C source) and the manifest names the whole policy -- so one artifact holds the work and how to distribute it, to store, send over the pipe, or feed over ssh.
+
+- The keys: `kind` (`code` for C, else a recipe); `split LO HI` and `pieces N` (divide the range into N pieces); `across N` (a quorum, 9.5); `combine` (below); `budget` (seconds each worker is granted); `input` (the petname of a held object sent ahead to each worker); `task` (a name, for the log). Unknown keys are ignored; a task with no manifest is a bare recipe as before.
+- `submit <task>` hands a package to the desk with that policy, resolves its `input` by name, and the willing machines distribute the pieces among themselves. `ask` still takes the inline forms (`as code`, `across N`, `with`).
+- `combine` folds the pieces of a split: `sum` (add the numbers, the default; non-numbers are joined), `concat` (join in order), `min`, `max`, `count` (how many pieces answered), `first`.
+
+**Over ssh.** `erebus-task prog.c --split 1 1000000 --ssh | ssh node` pipes a package straight into a node's terminal: it is received (`receive <n> bytes`, 5.x) into an object and submitted, and the nodes deal the work out themselves. The result is written into that object; read it back, or find it in arrivals.
+
+**The generator.** `erebus-task` (a host program on Windows or Linux, `make task-tool` -> `build/erebus-task`) turns a program into a `.ebtask` package:
+
+```
+erebus-task prog.c [--name n] [--split LO HI] [--pieces N] [--across N]
+                   [--combine sum|concat|min|max|count|first] [--budget S]
+                   [--input NAME] [--recipe] [--ssh] [-o out]
+```
+
+For a C task it first compiles the source with the machine's own compiler (the same `cc.c`), so a mistake shows on the host, not on a boot; then it writes the manifest and the source. It does not run foreign binaries -- the payload is EreBUS C for the far-task ABI (9.3), or a recipe -- and the payload fits one datagram (1 KiB); a larger program and arbitrary-size results are a later milestone.
 
 ---
 
@@ -577,6 +597,7 @@ Verified on an ASUS X99 board (Broadwell-E, UEFI from 2015):
 | 0.9.2 | 2026-09-06 | the browser reads the stylesheets, as far as they change what a page says (12.6): what a rule hides stays hidden, bold, colour, centred and right-set lines, bullets dropped, block or inline breaks; `<style>` blocks and linked sheets in the page's order, the style attribute over them, media queries for this screen; navigation, headers, footers and asides fold to one line with a count, opened by a press; `plain` (`s`) shows the page as it came. Fixed: a page asked for while a picture was still coming left the browser at `loading ...` for good. The renderer gathers each line before painting it; a stylesheet reader with a fuzzer of its own. |
 | 0.9.3 | 2026-09-06 | the browser reads a page's structure (12.6): `font-size` grows the one bitmap font by whole steps, so headings and anything a page sets large stand at twice or three times the body's height; the text is held to a readable column down the middle instead of running the whole screen; a link takes its colour, not an underline, so a page of links is not a wall of lines. Media queries see the true window width, so a page lays itself out for a desktop, not for the column. |
 | 0.9.4 | 2026-09-08 | the browser reads webp pictures and keeps a connection open (12.3): lossless (VP8L) and lossy (VP8) still frames decode beside png and jpeg, exact against the reference; the wire from one fetch is held for the next fetch to the same host, over https the tls session too, so a page and its pictures no longer each pay for a handshake (a stale reuse falls back to a fresh connection, and a connection is kept only when the answer had a length and the server agreed to keep-alive). Also: a table's cells line up in columns, `<pre>` and `<code>` sit on a faint ground, and a `<blockquote>` carries a left accent bar. The picture fuzzer now feeds webp. |
+| 0.9.5 | 2026-09-08 | distributed task packages (9.6): a task text may begin with a `key \| value` manifest (kind, split, pieces, across, combine, budget, input) that carries the whole policy, so a distributed task is one artifact. `submit <task>` hands it to the desk; the pieces of a split fold by `sum`, `concat`, `min`, `max`, `count` or `first`. A package feeds into a node over ssh -- `erebus-task prog.c --split 1 1000000 --ssh \| ssh node` -- and the nodes distribute it themselves. `erebus-task`, a host tool built from the machine's own compiler, packages a program and checks a C task builds for the node first. Two tests added: a package split and folded by max across two machines, and a package fed over ssh that the desk takes. |
 
 ---
 

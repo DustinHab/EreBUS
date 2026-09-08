@@ -52,6 +52,37 @@ bool pipe_ask_with(object *o, bool writable, object *input);
 bool pipe_ask_full(object *o, bool writable, object *input,
                    bool compiled, u32 quorum);
 
+/* How the parts of a split or quorum job are folded into one result. */
+#define TASK_SUM    0                /* add the numeric answers */
+#define TASK_CONCAT 1                /* join the answers in part order */
+#define TASK_MIN    2                /* the smallest numeric answer */
+#define TASK_MAX    3                /* the largest numeric answer */
+#define TASK_COUNT  4                /* how many parts answered */
+#define TASK_FIRST  5                /* the first part's answer */
+
+/* A task package's manifest: "key | value" lines at the top of a task
+ * text, ended by a "--" line, then the payload (a recipe or c source).
+ * Keys: kind (code|recipe), across (quorum N), combine (sum|concat|min|
+ * max|count|first), budget (seconds), split (LO HI), pieces (N),
+ * input (a held object's petname). A text with no such lines is a bare
+ * recipe, as before. */
+typedef struct {
+    bool has_manifest;
+    bool compiled;
+    u32  quorum;
+    u8   combine;
+    u32  budget;
+    bool split;
+    i64  lo, hi;
+    u32  pieces;
+    char input[32];
+    u32  payload_at;             /* byte offset where the payload begins */
+} ebtask_spec;
+
+/* Reads the manifest of the task text d[0..len) into out. Always fills
+ * out (defaults when no manifest is present). */
+void ebtask_parse(const u8 *d, u32 len, ebtask_spec *out);
+
 /* Vouch for a known node: sign a statement that its key is one we
  * recognise and send it to every other known node. A node that has
  * marked this machine 'vouch' pins the key before it meets it. */

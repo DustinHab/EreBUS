@@ -184,7 +184,7 @@ IMAGE  := $(BUILD)/esp.img
 # own copies, so a running VM and a test run never write the same file.
 STORE  := $(BUILD)/teststore.img
 
-.PHONY: all run shot fault wx stack trace-stack desktop trace-input persist agent relay sweep cchost \
+.PHONY: all run shot fault wx stack trace-stack desktop trace-input persist agent relay sweep cchost task-tool \
         look debug clean info
 all: $(IMAGE)
 
@@ -460,6 +460,19 @@ $(BUILD)/cchost: tools/cchost.c kernel/lang/cc.c kernel/lang/asm.c \
 	@clang -O1 -g -std=c11 -Wall -Wno-unused-function \
 	    -Wno-incompatible-library-redeclaration -I$(ROOT)/kernel/include \
 	    -o $@ tools/cchost.c kernel/lang/cc.c kernel/lang/asm.c \
+	    kernel/lang/ld.c kernel/lang/gnu.c
+
+# The task-package generator, on the host: the same compiler validates
+# that a c task builds for the node before it is packaged.
+task-tool: $(BUILD)/erebus-task
+$(BUILD)/erebus-task: tools/erebus-task.c kernel/lang/cc.c kernel/lang/asm.c \
+                 kernel/lang/ld.c kernel/lang/gnu.c \
+                 kernel/include/eb/cc.h kernel/include/eb/asm.h kernel/include/eb/ld.h
+	@mkdir -p $(BUILD)
+	@echo "  HOST    $@"
+	@clang -O1 -g -std=c11 -Wall -Wno-unused-function \
+	    -Wno-incompatible-library-redeclaration -I$(ROOT)/kernel/include \
+	    -o $@ tools/erebus-task.c kernel/lang/cc.c kernel/lang/asm.c \
 	    kernel/lang/ld.c kernel/lang/gnu.c
 
 sweep:

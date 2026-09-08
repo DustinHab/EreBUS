@@ -917,6 +917,8 @@ typedef struct {
     u32     input_len;
     bool    compiled;              /* the recipe is c source, compiled and run on each worker */
     u32     quorum;                /* 0: an ordinary job; N: the same task on N distinct machines, answers compared */
+    u8      combine;              /* TASK_*: how the parts fold into one result */
+    u32     budget;               /* seconds granted to each worker, 0 = the default */
 } desk_job;
 
 static desk_job desk[DESK_JOBS];
@@ -1038,7 +1040,7 @@ static void fask_send(sealrec *s, u32 fi)
     pkt[6] = pkt[7] = 0;
     wr64(pkt + 8, fask[fi].id);
     wr32(pkt + 16, j->len);
-    wr32(pkt + 20, ASK_BUDGET_S);
+    wr32(pkt + 20, j->budget ? j->budget : ASK_BUDGET_S);
     wr64(pkt + 24, (u64)plo);
     wr64(pkt + 32, (u64)phi);
     memcpy(pkt + 40, j->recipe, j->len);
@@ -1189,6 +1191,107 @@ bool pipe_ask_code(object *o, bool writable)
     return ask_take(o, writable, NULL, true, 0);
 }
 
+/* ---- the task package manifest ---------------------------------- */
+
+static bool mkey_is(const u8 *k, u32 kl, const char *w)
+{
+    u32 n = 0; while (w[n]) n++;
+    if (kl != n) return false;
+    for (u32 i = 0; i < n; i++) if (k[i] != (u8)w[i]) return false;
+    return true;
+}
+
+static i64 mdec(const u8 *v, u32 vl)
+{
+    i64 r = 0; u32 i = 0; bool neg = false;
+    if (i < vl && v[i] == '-') { neg = true; i++; }
+    for (; i < vl && v[i] >= '0' && v[i] <= '9'; i++) r = r * 10 + (v[i] - '0');
+    return neg ? -r : r;
+}
+
+static bool mtwo(const u8 *v, u32 vl, i64 *a, i64 *b)
+{
+    i64 nums[2]; u32 got = 0, i = 0;
+    while (i < vl && got < 2) {
+        bool neg = (v[i] == '-' && i + 1 < vl && v[i+1] >= '0' && v[i+1] <= '9');
+        if (neg) i++;
+        if (i < vl && v[i] >= '0' && v[i] <= '9') {
+            i64 n = 0;
+            while (i < vl && v[i] >= '0' && v[i] <= '9') n = n * 10 + (v[i++] - '0');
+            nums[got++] = neg ? -n : n;
+        } else i++;
+    }
+    if (got < 2) return false;
+    *a = nums[0]; *b = nums[1];
+    return true;
+}
+
+static u8 mcombine(const u8 *v, u32 vl)
+{
+    if (mkey_is(v, vl, "concat")) return TASK_CONCAT;
+    if (mkey_is(v, vl, "min"))    return TASK_MIN;
+    if (mkey_is(v, vl, "max"))    return TASK_MAX;
+    if (mkey_is(v, vl, "count"))  return TASK_COUNT;
+    if (mkey_is(v, vl, "first"))  return TASK_FIRST;
+    return TASK_SUM;
+}
+
+void ebtask_parse(const u8 *d, u32 len, ebtask_spec *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->combine = TASK_SUM;
+
+    u32 i = 0;
+    bool any = false;
+    while (i < len) {
+        u32 ls = i;
+        while (i < len && d[i] != '\n') i++;
+        u32 le = i;
+        u32 next = (i < len) ? i + 1 : len;
+        while (le > ls && (d[le-1] == ' ' || d[le-1] == '\r' || d[le-1] == '\t')) le--;
+        u32 s = ls;
+        while (s < le && (d[s] == ' ' || d[s] == '\t')) s++;
+
+        if (le - s == 2 && d[s] == '-' && d[s+1] == '-') {   /* the manifest ends */
+            out->has_manifest = true;
+            out->payload_at = next;
+            return;
+        }
+
+        u32 bar = s;
+        while (bar < le && d[bar] != '|') bar++;
+        if (bar >= le) {                                     /* a line that is not key|value */
+            out->has_manifest = any;
+            out->payload_at = any ? ls : 0;
+            return;
+        }
+
+        u32 ke = bar; while (ke > s && (d[ke-1] == ' ' || d[ke-1] == '\t')) ke--;
+        u32 vs = bar + 1; while (vs < le && (d[vs] == ' ' || d[vs] == '\t')) vs++;
+        const u8 *k = d + s; u32 kl = ke - s;
+        const u8 *v = d + vs; u32 vl = le - vs;
+        any = true;
+        out->has_manifest = true;
+
+        if      (mkey_is(k, kl, "kind"))    out->compiled = (vl >= 4 && v[0]=='c' && v[1]=='o' && v[2]=='d' && v[3]=='e');
+        else if (mkey_is(k, kl, "across"))  out->quorum = (u32)mdec(v, vl);
+        else if (mkey_is(k, kl, "pieces"))  out->pieces = (u32)mdec(v, vl);
+        else if (mkey_is(k, kl, "budget"))  out->budget = (u32)mdec(v, vl);
+        else if (mkey_is(k, kl, "combine")) out->combine = mcombine(v, vl);
+        else if (mkey_is(k, kl, "split")) {
+            i64 a = 0, b = 0;
+            if (mtwo(v, vl, &a, &b)) { out->split = true; out->lo = a; out->hi = b; }
+        } else if (mkey_is(k, kl, "input")) {
+            u32 n = 0;
+            while (n < vl && n < sizeof(out->input) - 1) { out->input[n] = (char)v[n]; n++; }
+            out->input[n] = 0;
+        }
+        /* "task | <name>" and any unknown key are ignored */
+        i = next;
+    }
+    out->payload_at = any ? len : 0;   /* only manifest lines, no payload */
+}
+
 bool pipe_ask_full(object *o, bool writable, object *input,
                    bool compiled, u32 quorum)
 {
@@ -1260,41 +1363,62 @@ static bool ask_take(object *o, bool writable, object *input,
         return false;
     }
 
-    u64 eol = 0;
-    while (eol < len && d[eol] != '\n') eol++;
-
     u32 pieces = 1;
     i64 lo = 0, hi = 0;
     u64 recipe_at = 0;
-    /* A split line divides the range into pieces; a quorum runs every
-     * piece on N distinct machines and compares. Both at once deal
-     * pieces times N slots. */
-    if (quorum > PART_MAX) quorum = PART_MAX;
-    bool split = (eol >= 5 && d[0]=='s' && d[1]=='p' && d[2]=='l' &&
-                  d[3]=='i' && d[4]=='t');
-    if (split) {
-        i64 nums[3];
-        u32 got = 0;
-        for (u64 i = 5; i < eol && got < 3; i++) {
-            bool neg = (d[i] == '-' && i + 1 < eol &&
-                        d[i+1] >= '0' && d[i+1] <= '9');
-            if (neg) i++;
-            if (d[i] < '0' || d[i] > '9') continue;
-            i64 v = 0;
-            while (i < eol && d[i] >= '0' && d[i] <= '9')
-                v = v * 10 + (d[i++] - '0');
-            nums[got++] = neg ? -v : v;
+    bool split = false;
+    u8  combine_j = TASK_SUM;
+    u32 budget_j = 0;
+
+    /* A package's manifest carries the whole policy and the payload is a
+     * pure recipe; without one, the old "split P from LO to HI" first
+     * line still divides the range, and 'as code'/'across' come from the
+     * ask verb. A quorum runs every piece on N distinct machines. */
+    ebtask_spec spec;
+    ebtask_parse(d, (u32)len, &spec);
+    if (spec.has_manifest) {
+        compiled  = spec.compiled;
+        quorum    = spec.quorum;
+        combine_j = spec.combine;
+        budget_j  = spec.budget;
+        recipe_at = spec.payload_at;
+        if (spec.split) {
+            split = true;
+            lo = spec.lo; hi = spec.hi;
+            pieces = spec.pieces ? spec.pieces : 4;
         }
-        if (got < 3 || nums[0] < 1) {
-            journal_says("pipe", "the split line wants: "
-                                 "split P from LO to HI");
-            return false;
+    } else {
+        u64 eol = 0;
+        while (eol < len && d[eol] != '\n') eol++;
+        split = (eol >= 5 && d[0]=='s' && d[1]=='p' && d[2]=='l' &&
+                 d[3]=='i' && d[4]=='t');
+        if (split) {
+            i64 nums[3];
+            u32 got = 0;
+            for (u64 i = 5; i < eol && got < 3; i++) {
+                bool neg = (d[i] == '-' && i + 1 < eol &&
+                            d[i+1] >= '0' && d[i+1] <= '9');
+                if (neg) i++;
+                if (d[i] < '0' || d[i] > '9') continue;
+                i64 v = 0;
+                while (i < eol && d[i] >= '0' && d[i] <= '9')
+                    v = v * 10 + (d[i++] - '0');
+                nums[got++] = neg ? -v : v;
+            }
+            if (got < 3 || nums[0] < 1) {
+                journal_says("pipe", "the split line wants: "
+                                     "split P from LO to HI");
+                return false;
+            }
+            pieces = (u32)(nums[0] > PART_MAX ? PART_MAX : nums[0]);
+            lo = nums[1];
+            hi = nums[2];
+            recipe_at = eol + 1;
         }
-        pieces = (u32)(nums[0] > PART_MAX ? PART_MAX : nums[0]);
-        lo = nums[1];
-        hi = nums[2];
-        recipe_at = eol + 1;
     }
+
+    if (quorum > PART_MAX) quorum = PART_MAX;
+    if (pieces > PART_MAX) pieces = PART_MAX;
     u32 parts = pieces * (quorum ? quorum : 1);
     if (parts > PART_MAX) {
         char line[80];
@@ -1309,7 +1433,7 @@ static bool ask_take(object *o, bool writable, object *input,
     }
 
     if (recipe_at >= len) {
-        journal_says("pipe", "no recipe after the split line");
+        journal_says("pipe", "the task has no recipe");
         return false;
     }
     u64 rlen = len - recipe_at;
@@ -1329,6 +1453,8 @@ static bool ask_take(object *o, bool writable, object *input,
     j->writable = writable;
     j->compiled = compiled;
     j->quorum = quorum;
+    j->combine = combine_j;
+    j->budget = budget_j;
     j->no = ++desk_no;
     j->state = DJ_FRESH;
     j->task = o;
@@ -2293,18 +2419,41 @@ static void inner_input(const u8 src[4], u16 sport, sealrec *s,
                     if (!t[k]) all_num = false;
                     for (; t[k]; k++) if (t[k] < '0' || t[k] > '9') all_num = false;
                 }
-                if (all_num) {
-                    i64 total = 0;
-                    for (u32 i = 0; i < j->parts; i++)
-                        total += j->presult[i];
-                    u64 mag = total < 0 ? (u64)-total : (u64)total;
-                    if (total < 0) text[at++] = '-';
-                    at = put_dec(text, at, mag);
-                } else {
+                u8 cb = j->combine;
+                if ((cb == TASK_SUM || cb == TASK_MIN || cb == TASK_MAX) && !all_num)
+                    cb = TASK_CONCAT;                  /* a numeric fold needs numbers */
+                switch (cb) {
+                case TASK_CONCAT:
                     for (u32 i = 0; i < j->parts; i++) {
                         if (i) text[at++] = ' ';
                         at = put(text, at, j->ptext[i]);
                     }
+                    break;
+                case TASK_FIRST:
+                    at = put(text, at, j->ptext[0][0] ? j->ptext[0] : "nothing");
+                    break;
+                case TASK_COUNT:
+                    at = put_dec(text, at, j->parts);
+                    break;
+                case TASK_MIN:
+                case TASK_MAX: {
+                    i64 best = j->presult[0];
+                    for (u32 i = 1; i < j->parts; i++)
+                        if (cb == TASK_MIN ? j->presult[i] < best
+                                           : j->presult[i] > best) best = j->presult[i];
+                    u64 mag = best < 0 ? (u64)-best : (u64)best;
+                    if (best < 0) text[at++] = '-';
+                    at = put_dec(text, at, mag);
+                    break;
+                }
+                default: {                             /* TASK_SUM */
+                    i64 total = 0;
+                    for (u32 i = 0; i < j->parts; i++) total += j->presult[i];
+                    u64 mag = total < 0 ? (u64)-total : (u64)total;
+                    if (total < 0) text[at++] = '-';
+                    at = put_dec(text, at, mag);
+                    break;
+                }
                 }
                 at = put(text, at, " (");
                 at = put_dec(text, at, j->parts);

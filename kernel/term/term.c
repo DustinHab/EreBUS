@@ -1403,6 +1403,42 @@ static void cmd_send(term_session *s, const char *what)
         t_say(s, "the pipe refused it; the journal says why.  'point at' names a peer.");
 }
 
+/* "submit <task>": a task package -- a text whose "key | value" manifest
+ * names the policy (kind code|recipe, split LO HI, pieces, across N,
+ * combine, budget, input) -- goes to the desk with that whole policy, and
+ * the willing machines distribute it among themselves. This is the form a
+ * generated .ebtask package and an ssh-fed task take. */
+static void cmd_submit(term_session *s, const char *what)
+{
+    if (!what[0]) { t_say(s, "submit which task?  'submit <task>'.  the task's manifest names split, across, combine, budget and input."); return; }
+
+    spot sp;
+    if (!resolve(s, what, &sp)) return;
+    if (obj_type(sp.o) != TYPE_TEXT) { t_say(s, "a task is a text."); return; }
+
+    const u8 *d = (const u8 *)obj_data(sp.o);
+    u64 size = obj_size(sp.o);
+    u32 len = 0;
+    if (d) while (len < size && d[len]) len++;
+
+    ebtask_spec spec;
+    ebtask_parse(d, len, &spec);
+
+    object *in_obj = NULL;
+    if (spec.input[0]) {
+        spot in;
+        if (!resolve(s, spec.input, &in)) { t_say(s, "the input the manifest names was not found."); return; }
+        if (!(in.r & CAP_READ)) { t_say(s, "no read right on the input the manifest names."); return; }
+        in_obj = in.o;
+    }
+
+    bool ok = pipe_ask_full(sp.o, (sp.r & CAP_WRITE) != 0, in_obj, false, 0);
+    if (ok)
+        t_say(s, "submitted to the desk; the answer is written into the task or laid into arrivals.");
+    else
+        t_say(s, "the desk would not take it.  the journal says why.");
+}
+
 /* "ask <task>", or "ask <task> with <object>": the object goes ahead
  * of the work to every machine that gets a part. */
 static void cmd_ask(term_session *s, const char *what)
@@ -2387,6 +2423,7 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "give", &rest))    cmd_give(s, rest);
     else if (word_starts(line, "end", &rest))     cmd_end(s, rest);
     else if (word_starts(line, "send", &rest))    cmd_send(s, rest);
+    else if (word_starts(line, "submit", &rest))  cmd_submit(s, rest);
     else if (word_starts(line, "ask", &rest))     cmd_ask(s, rest);
     else if (word_starts(line, "say", &rest))     cmd_say(s, rest);
     else if (word_starts(line, "scan", NULL))     cmd_scan(s);
