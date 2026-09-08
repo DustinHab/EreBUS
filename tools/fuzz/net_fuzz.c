@@ -111,6 +111,10 @@ bool tls_pki_selftest(void) { return true; }
 u32  pki_builtin_count(void) { return 0; }
 bool tls_get(const u8 addr[4], const char *host, u32 hlen, const char *path, u32 plen, u8 *out, u32 max, u32 *got)
 { (void)addr; (void)host; (void)hlen; (void)path; (void)plen; (void)out; (void)max; *got = 0; return false; }
+bool tls_exchange(const u8 addr[4], const char *host, u32 hlen, const u8 *req, u32 rlen,
+                  const u8 *body, u32 blen, u8 *out, u32 max, u32 *got)
+{ (void)addr; (void)host; (void)hlen; (void)req; (void)rlen; (void)body; (void)blen; (void)out; (void)max; *got = 0; return false; }
+void tls_session_drop(void) { }
 bool tls_last_verified(void) { return false; }
 const char *tls_last_reason(void) { return ""; }
 void time_set_unix(u64 s) { (void)s; }

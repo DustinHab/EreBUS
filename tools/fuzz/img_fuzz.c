@@ -1,5 +1,5 @@
 /*
- * img_fuzz.c -- libFuzzer entry for the picture decoders and inflate: bytes as a png, a jpeg, a gzip stream.
+ * img_fuzz.c -- libFuzzer entry for the picture decoders and inflate: bytes as a png, a jpeg, a webp, a gzip stream.
  * - the first byte picks the target; the rest is the input
  * - the decoders answer into fixed room and must never write past it or read past the input
  * - built and run by tools/fuzz/run.sh
@@ -33,14 +33,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     uint32_t w = 0, h = 0;
     bool ok = false;
 
-    switch (pick % 4) {
+    switch (pick % 5) {
     case 0: ok = png_decode(in, len, pixels, PIXELS, &w, &h, scratch, 8u << 20); break;
     case 1: ok = jpeg_decode(in, len, pixels, PIXELS, &w, &h, scratch, 8u << 20); break;
-    case 2: inflate_gzip(in, len, out, 4u << 20); break;
+    case 2: ok = webp_decode(in, len, pixels, PIXELS, &w, &h, scratch, 8u << 20); break;
+    case 3: inflate_gzip(in, len, out, 4u << 20); break;
     default: inflate_zlib(in, len, out, 4u << 20); ok = image_size(in, len, &w, &h); break;
     }
     /* A size that was read is bounded; a picture that was decoded fits the room given. */
     if (ok && (w == 0 || h == 0 || w > 16384 || h > 16384)) abort();
-    if (ok && pick % 4 < 2 && (uint64_t)w * h > PIXELS) abort();
+    if (ok && pick % 5 < 3 && (uint64_t)w * h > PIXELS) abort();
     return 0;
 }

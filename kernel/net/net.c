@@ -1465,6 +1465,42 @@ void tcp_close(void)
     tcb.active = false;
 }
 
+/* The one connection held open between fetches, when the last answer left
+ * it in a clean, reusable state. */
+static struct {
+    bool open;
+    bool secure;
+    u8   addr[4];
+    u16  port;
+} keepc;
+
+static bool addr_eq(const u8 a[4], const u8 b[4])
+{
+    return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3];
+}
+
+bool net_conn_alive(const u8 addr[4], u16 port, bool secure)
+{
+    return keepc.open && keepc.secure == secure && keepc.port == port &&
+           addr_eq(keepc.addr, addr) &&
+           tcb.active && tcb.established && !tcb.reset && !tcb.peer_done;
+}
+
+void net_conn_keep(const u8 addr[4], u16 port, bool secure)
+{
+    keepc.open = true;
+    keepc.secure = secure;
+    keepc.port = port;
+    for (u32 i = 0; i < 4; i++) keepc.addr[i] = addr[i];
+}
+
+void net_conn_drop(void)
+{
+    if (tcb.active) tcp_close();
+    keepc.open = false;
+    tls_session_drop();
+}
+
 bool http_response_complete(http_progress *p, const u8 *buf, u32 len)
 {
     if (!p->header_end) {
@@ -1500,6 +1536,39 @@ bool http_response_complete(http_progress *p, const u8 *buf, u32 len)
     return p->have_length && (u64)len >= (u64)p->header_end + p->want;
 }
 
+/* A lower-cased byte, for case-blind header matching. */
+static u8 lc(u8 c) { return (c >= 'A' && c <= 'Z') ? (u8)(c + 32) : c; }
+
+/* Whether the header block holds "<name>" whose value contains "<token>",
+ * case-blind. Used to spot "Connection: close". */
+static bool header_token(const u8 *buf, u32 header_end, const char *name, const char *token)
+{
+    u32 nl = 0; while (name[nl]) nl++;
+    for (u32 at = 0; at + nl < header_end; at++) {
+        if (at && buf[at - 1] != '\n') continue;         /* at a line's start */
+        u32 k = 0;
+        while (k < nl && lc(buf[at + k]) == (u8)name[k]) k++;
+        if (k < nl || buf[at + nl] != ':') continue;
+        u32 j = at + nl + 1;                             /* scan this header's value */
+        for (; j < header_end && buf[j] != '\n'; j++) {
+            u32 t = 0;
+            while (token[t] && j + t < header_end && lc(buf[j + t]) == (u8)token[t]) t++;
+            if (!token[t]) return true;
+        }
+        return false;                                    /* the named header, but not the token */
+    }
+    return false;
+}
+
+bool http_keepable(const http_progress *p, const u8 *buf, u32 len)
+{
+    /* Reuse needs a certain end (a length) and the server's explicit assent
+     * to a persistent connection; without the assent an http/1.0 server is
+     * assumed to close, as most do, so no wasted reuse is attempted. */
+    if (!p->have_length || (u64)len < (u64)p->header_end + p->want) return false;
+    return header_token(buf, p->header_end, "connection", "keep-alive");
+}
+
 static u32 putw(char *d, u32 at, u32 max, const char *s)
 {
     while (*s && at + 1 < max) d[at++] = *s++;
@@ -1519,7 +1588,7 @@ static u32 http_request(char *req, u32 max, u8 method, const char *host, u32 hle
     for (u32 i = 0; i < plen && at + 200 < max; i++) req[at++] = path[i];
     at = putw(req, at, max, " HTTP/1.0\r\nHost: ");
     for (u32 i = 0; i < hlen && at + 150 < max; i++) req[at++] = host[i];
-    at = putw(req, at, max, "\r\nUser-Agent: erebus/0.9\r\nConnection: close\r\n");
+    at = putw(req, at, max, "\r\nUser-Agent: erebus/0.9\r\nConnection: keep-alive\r\n");
     if (gzip) at = putw(req, at, max, "Accept-Encoding: gzip\r\n");
     if (clen && at + clen + 12 < max) {
         at = putw(req, at, max, "Cookie: ");
@@ -1540,25 +1609,45 @@ static u32 http_request(char *req, u32 max, u8 method, const char *host, u32 hle
 }
 
 /* Plain http: the head and the body out, the answer in until it is
- * whole, they finish, or the well runs dry. */
+ * whole, they finish, or the well runs dry. The wire from the last fetch
+ * to the same place is reused when it is still open; if that reuse turns
+ * out stale (the far side had let it go), one fresh attempt is made. A
+ * length-framed answer that did not ask to close leaves the wire open for
+ * the next fetch. */
 static bool http_exchange(const u8 *addr, const u8 *req, u32 rlen,
                           const u8 *body, u32 blen, u8 *out, u32 max, u32 *got)
 {
-    if (!tcp_open(addr, 80)) return false;
-    if (!tcp_write(req, rlen)) { tcp_close(); return false; }
-    if (blen && !tcp_write(body, blen)) { tcp_close(); return false; }
+    for (int attempt = 0; attempt < 2; attempt++) {
+        bool reuse = attempt == 0 && net_conn_alive(addr, 80, false);
+        if (!reuse) {
+            net_conn_drop();
+            if (!tcp_open(addr, 80)) return false;
+        }
+        if (!tcp_write(req, rlen) || (blen && !tcp_write(body, blen))) {
+            net_conn_drop();
+            if (reuse) continue;             /* the kept wire was stale: try fresh */
+            return false;
+        }
 
-    u32 len = 0;
-    http_progress pr = { 0, 0, 0, false };
-    while (len < max) {
-        i32 n = tcp_read(out + len, max - len);
-        if (n <= 0) break;
-        len += (u32)n;
-        if (http_response_complete(&pr, out, len)) break;
+        u32 len = 0;
+        http_progress pr = { 0, 0, 0, false };
+        while (len < max) {
+            i32 n = tcp_read(out + len, max - len);
+            if (n <= 0) break;
+            len += (u32)n;
+            if (http_response_complete(&pr, out, len)) break;
+        }
+        if (len == 0) {                      /* nothing came */
+            net_conn_drop();
+            if (reuse) continue;
+            return false;
+        }
+        *got = len;
+        if (http_keepable(&pr, out, len)) net_conn_keep(addr, 80, false);
+        else net_conn_drop();
+        return true;
     }
-    *got = len;
-    tcp_close();
-    return len > 0;
+    return false;
 }
 
 /* ------------------------------------------------------------------ */

@@ -1,6 +1,6 @@
 #!/bin/sh
 # webtest.sh -- the browser against a server of its own on the host.
-# - the page: a title, utf-8 prose, links, two pictures (png, jpeg), a slow third one, a form that posts,
+# - the page: a title, utf-8 prose, links, three pictures (png, jpeg, webp), a slow fourth one, a form that posts,
 #   a stylesheet of its own and an inline one, a link hidden by a rule, a navigation that folds
 # - boot 1: the page fetched and rendered (pictures decoded, the sheet read), the first link followed by keyboard
 #   while the slow picture is still coming (it is not the hidden one, nor one of the folded navigation's) and back
@@ -38,6 +38,16 @@ def jpeg24():
     except Exception as e:
         sys.stderr.write("server: no pil: %s\n" % e); return b""
 
+def webp16():
+    try:
+        from PIL import Image
+        im = Image.new("RGB", (16, 16))
+        for x in range(16):
+            for y in range(16): im.putpixel((x, y), ((x * 15) & 255, (y * 15) & 255, 140))
+        b = io.BytesIO(); im.save(b, "WEBP", quality=80, method=4); return b.getvalue()
+    except Exception as e:
+        sys.stderr.write("server: no pil webp: %s\n" % e); return b""
+
 SHEET = b""".gone { display: none }
 .warm { color: #a00000; font-weight: bold }
 .mid { text-align: center }
@@ -51,7 +61,7 @@ PAGE = """<html><head><title>Erebus test page</title>
 <h1 class="warm">Hello from the host</h1>
 <p class="mid">Some prose with umlauts: &auml;&ouml;&uuml; and Î© and &#x2014; and a link to <a href="/second">the second page</a>.</p>
 <p><a href="gz">a packed page</a> and <a href="/chunk">a page in chunks</a> <span class="gone">and words a class hides</span></p>
-<img src="/i.png" alt="a png"> <img src="p.jpg" alt="a jpeg"> <img src="/slow.png" alt="a slow one">
+<img src="/i.png" alt="a png"> <img src="p.jpg" alt="a jpeg"> <img src="/i.webp" alt="a webp"> <img src="/slow.png" alt="a slow one">
 <form action="/login" method="post">name <input name="user" value=""> word <input type="password" name="pass" value="x"> <input type="submit" value="sign in"></form>
 </body></html>""".encode("utf-8")
 
@@ -90,6 +100,7 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(b"0\r\n\r\n")
         elif p == "/i.png": self.send(200, "image/png", png16())
         elif p == "/p.jpg": self.send(200, "image/jpeg", jpeg24())
+        elif p == "/i.webp": self.send(200, "image/webp", webp16())
         elif p == "/slow.png":
             time.sleep(3)
             self.send(200, "image/png", png16())
@@ -217,6 +228,7 @@ ok=1
 grep -aq 'get http://10.0.2.100/ -> 200' $W/boot1.log && echo "the page was fetched" || { echo "FAILED: no page"; ok=0; }
 grep -aq 'picture /i.png: png 16x16' $W/boot1.log && echo "the png was decoded" || { echo "FAILED: png"; ok=0; }
 grep -aq 'picture p.jpg: jpeg 24x16' $W/boot1.log && echo "the jpeg was decoded" || { echo "FAILED: jpeg"; ok=0; }
+grep -aq 'picture /i.webp: webp 16x16' $W/boot1.log && echo "the webp was decoded" || { echo "FAILED: webp"; ok=0; }
 grep -aq 'get http://10.0.2.100/s.css -> 200.*text/css' $W/boot1.log && echo "the stylesheet was fetched" || { echo "FAILED: sheet"; ok=0; }
 grep -aq 'styles: [0-9]* rules, 1 of 1 sheets, 2 parts hidden, 1 folds' $W/boot1.log && echo "and read: two parts hidden, the navigation folded" || { echo "FAILED: styles"; ok=0; }
 grep -aq 'get http://10.0.2.100/second -> 200' $W/boot1.log && echo "a link was followed by keyboard" || { echo "FAILED: link"; ok=0; }

@@ -3,7 +3,7 @@
 # - tools: lang (compiler, assembler, linker), pki (certificates, keys, signatures), html (the page renderer with
 #   its styles), css (the stylesheet reader alone),
 #   net (frames, the tcp client, the http client, the door with ssh, the air), pipe (the object pipe's
-#   datagrams, sealed and plain), tls (the tls client fed a server's bytes), img (png, jpeg, inflate)
+#   datagrams, sealed and plain), tls (the tls client fed a server's bytes), img (png, jpeg, webp, inflate)
 # - seeds: the kernel's own sources and objects for lang, the certificate fixtures for pki, the manual for html,
 #   hand-made frames, datagrams and records for the rest
 # - the net, pipe and tls tools link the kernel's own files with the ciphers and signatures stubbed to pass, so
@@ -160,10 +160,12 @@ try:
         for y in range(16): im.putpixel((x, y), (x * 16, y * 16, 128))
     b = io.BytesIO(); im.save(b, "JPEG", quality=85); open(f"{C}/jpg0", "wb").write(b"\x01" + b.getvalue())
     b = io.BytesIO(); im.convert("L").save(b, "JPEG", quality=50); open(f"{C}/jpg1", "wb").write(b"\x01" + b.getvalue())
+    b = io.BytesIO(); im.save(b, "WEBP", lossless=True); open(f"{C}/webp0", "wb").write(b"\x02" + b.getvalue())
+    b = io.BytesIO(); im.save(b, "WEBP", quality=80, method=2); open(f"{C}/webp1", "wb").write(b"\x02" + b.getvalue())
 except Exception:
     pass
-open(f"{C}/gz0", "wb").write(b"\x02" + gzip.compress(b"hello hello hello " * 100))
-open(f"{C}/zl0", "wb").write(b"\x03" + zlib.compress(bytes(range(256)) * 20))
+open(f"{C}/gz0", "wb").write(b"\x03" + gzip.compress(b"hello hello hello " * 100))
+open(f"{C}/zl0", "wb").write(b"\x04" + zlib.compress(bytes(range(256)) * 20))
 PY
 }
 
@@ -208,7 +210,7 @@ for t in $TOOLS; do
         net)  build net kernel/net/net.c kernel/net/ssh.c kernel/net/wifi.c kernel/net/nodes.c kernel/net/sha256.c kernel/net/x25519.c kernel/lib/base64.c && seed_net && run net 65536 ;;
         pipe) build pipe kernel/net/pipe.c kernel/net/nodes.c kernel/net/sha256.c kernel/lib/base64.c && seed_pipe && run pipe 65536 ;;
         tls)  build tls kernel/net/tls.c kernel/net/asn1.c kernel/net/bn.c kernel/net/ec.c kernel/net/rsa.c kernel/net/x509.c kernel/net/pki_selftest.c kernel/net/sha512.c kernel/net/x25519.c && seed_tls && run tls 65536 ;;
-        img)  build img kernel/gfx/png.c kernel/gfx/jpeg.c kernel/lib/inflate.c && seed_img && run img 65536 ;;
+        img)  build img kernel/gfx/png.c kernel/gfx/jpeg.c kernel/gfx/webp.c kernel/lib/inflate.c && seed_img && run img 65536 ;;
         *) echo "no such tool: $t" ;;
     esac
 done

@@ -463,9 +463,95 @@ static bool parse_server_hello(const u8 *m, u32 len, u8 server_pub[32])
 
 /* ------------------------------------------------------------------ */
 
+/* The session held for reuse, alongside net.c's kept wire: the two
+ * application epochs (their counters advanced by each exchange), the host
+ * they belong to, and whether that host was proven at the handshake. */
+static struct {
+    bool  valid;
+    bool  verified;
+    char  host[128];
+    u32   hlen;
+    epoch c_app, s_app;
+} sess;
+
+bool tls_session_valid(const char *host, u32 hlen)
+{
+    if (!sess.valid || sess.hlen != hlen || hlen > sizeof(sess.host)) return false;
+    for (u32 i = 0; i < hlen; i++) if (sess.host[i] != host[i]) return false;
+    return true;
+}
+
+void tls_session_drop(void) { sess.valid = false; }
+
+/* Send the request (and body) under the client epoch, read the answer
+ * under the server epoch, both counters advancing as they go. Returns
+ * whether anything came; sets *keep when the answer was length-framed and
+ * did not ask to close, so the session may ride the wire again. */
+static bool tls_converse(epoch *c_app, epoch *s_app, const u8 *req, u32 reqlen,
+                         const u8 *body, u32 blen, u8 *out, u32 max, u32 *got, bool *keep)
+{
+    static u8 rec[18432];
+    *keep = false;
+
+    for (u32 off = 0; off < reqlen; off += 1400) {
+        u32 n = reqlen - off < 1400 ? reqlen - off : 1400;
+        if (!write_encrypted(c_app, REC_APPDATA, req + off, n)) return false;
+    }
+    for (u32 off = 0; off < blen; off += 1400) {
+        u32 n = blen - off < 1400 ? blen - off : 1400;
+        if (!write_encrypted(c_app, REC_APPDATA, body + off, n)) return false;
+    }
+
+    u32 total = 0;
+    http_progress pr = { 0, 0, 0, false };
+    bool complete = false;
+    for (u32 guard = 0; guard < 8192; guard++) {
+        u8 ct;
+        i32 n = read_open(s_app, rec, sizeof(rec), &ct);
+        if (n < 0) break;                    /* end, reset, or stall */
+        if (ct == REC_APPDATA) {
+            for (i32 i = 0; i < n && total < max; i++) out[total++] = rec[i];
+            if (total >= max) break;
+            if (http_response_complete(&pr, out, total)) { complete = true; break; }
+        } else if (ct == REC_ALERT) {
+            break;                           /* close_notify or a gripe */
+        }
+        /* handshake records here are session tickets or key updates: ignored. */
+    }
+    *got = total;
+    if (complete) *keep = http_keepable(&pr, out, total);
+    return total > 0;
+}
+
+static bool tls_handshake_exchange(const u8 addr[4], const char *host, u32 hlen,
+                  const u8 *req, u32 reqlen, const u8 *body, u32 blen,
+                  u8 *out, u32 max, u32 *got);
+
 /* The whole errand: connect, handshake, request, read, and hand back
- * the decrypted http response in out[]. */
+ * the decrypted http response in out[]. A held session for the same host
+ * on the still-open wire skips the handshake; if that reuse is stale, a
+ * fresh handshake is made. */
 bool tls_exchange(const u8 addr[4], const char *host, u32 hlen,
+                  const u8 *req, u32 reqlen, const u8 *body, u32 blen,
+                  u8 *out, u32 max, u32 *got)
+{
+    /* Reuse a held session on the wire kept from the last exchange. */
+    if (net_conn_alive(addr, 443, true) && tls_session_valid(host, hlen)) {
+        bool keep = false;
+        if (tls_converse(&sess.c_app, &sess.s_app, req, reqlen, body, blen, out, max, got, &keep)) {
+            verified = sess.verified;
+            why[0] = 0;
+            if (keep) net_conn_keep(addr, 443, true);
+            else net_conn_drop();
+            return true;
+        }
+        net_conn_drop();                     /* stale: fall through to a fresh handshake */
+    }
+
+    return tls_handshake_exchange(addr, host, hlen, req, reqlen, body, blen, out, max, got);
+}
+
+static bool tls_handshake_exchange(const u8 addr[4], const char *host, u32 hlen,
                   const u8 *req, u32 reqlen, const u8 *body, u32 blen,
                   u8 *out, u32 max, u32 *got)
 {
@@ -473,6 +559,7 @@ bool tls_exchange(const u8 addr[4], const char *host, u32 hlen,
     why[0] = 0;
     *got = 0;
 
+    net_conn_drop();                         /* close any wire kept for elsewhere */
     if (!tcp_open(addr, 443)) return false;
 
     /* Our ephemeral key pair. */
@@ -648,33 +735,22 @@ bool tls_exchange(const u8 addr[4], const char *host, u32 hlen,
     epoch_from(s_ap, &s_app);
     epoch_from(c_ap, &c_app);
 
-    /* The request head, then the body in records of its own. */
-    for (u32 off = 0; off < reqlen; off += 1400) {
-        u32 n = reqlen - off < 1400 ? reqlen - off : 1400;
-        if (!write_encrypted(&c_app, REC_APPDATA, req + off, n)) { tcp_close(); return false; }
-    }
-    for (u32 off = 0; off < blen; off += 1400) {
-        u32 n = blen - off < 1400 ? blen - off : 1400;
-        if (!write_encrypted(&c_app, REC_APPDATA, body + off, n)) { tcp_close(); return false; }
-    }
+    bool keep = false;
+    bool ok = tls_converse(&c_app, &s_app, req, reqlen, body, blen, out, max, got, &keep);
 
-    u32 total = 0;
-    http_progress pr = { 0, 0, 0, false };
-    for (u32 guard = 0; guard < 8192; guard++) {
-        u8 ct;
-        i32 n = read_open(&s_app, rec, sizeof(rec), &ct);
-        if (n < 0) break;                    /* end, reset, or stall */
-        if (ct == REC_APPDATA) {
-            for (i32 i = 0; i < n && total < max; i++) out[total++] = rec[i];
-            if (total >= max) break;
-            if (http_response_complete(&pr, out, total)) break;   /* whole: no need to wait for the close */
-        } else if (ct == REC_ALERT) {
-            break;                           /* close_notify or a gripe */
-        }
-        /* handshake records here are session tickets: ignore them. */
+    /* Keep the session for the next fetch to this host when the answer
+     * framed itself and left the wire clean; else let the wire go. */
+    if (ok && keep && hlen <= sizeof(sess.host)) {
+        sess.valid = true;
+        sess.verified = verified;
+        sess.hlen = hlen;
+        for (u32 i = 0; i < hlen; i++) sess.host[i] = host[i];
+        sess.c_app = c_app;
+        sess.s_app = s_app;
+        net_conn_keep(addr, 443, true);
+    } else {
+        tcp_close();
+        sess.valid = false;
     }
-
-    *got = total;
-    tcp_close();
-    return total > 0;
+    return ok;
 }

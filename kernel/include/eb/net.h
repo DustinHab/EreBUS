@@ -91,6 +91,16 @@ i32  tcp_read(u8 *buf, u32 max);
 bool tcp_eof(void);
 void tcp_close(void);
 
+/* Persistent connections. One is held open at a time (the stack has a
+ * single control block); a fetch elsewhere drops it first. net_conn_alive
+ * tells an exchange whether the open connection is the one it wants and
+ * still healthy, so it may skip the handshake; net_conn_keep marks the
+ * connection to be kept after a length-framed answer; net_conn_drop closes
+ * it. tls.c keeps its session keys alongside, keyed to the same wire. */
+bool net_conn_alive(const u8 addr[4], u16 port, bool secure);
+void net_conn_keep(const u8 addr[4], u16 port, bool secure);
+void net_conn_drop(void);
+
 /* One turn of looking at the wire and standing aside. The waiting
  * loops in tls.c call this between records. */
 void net_breathe(void);
@@ -102,6 +112,11 @@ void net_breathe(void);
  * not read again from the start each time. */
 typedef struct { u32 scanned, header_end; u64 want; bool have_length; } http_progress;
 bool http_response_complete(http_progress *p, const u8 *buf, u32 len);
+
+/* Whether a complete response lets the connection be reused: its length
+ * was known (so its end is certain) and it did not ask for the wire to be
+ * closed. Only a keepable answer leaves the connection open. */
+bool http_keepable(const http_progress *p, const u8 *buf, u32 len);
 
 /* The door: server-side streams on port 22 for ssh to speak through.
  * Several visitors at once, one connection per slot, 0 .. door_count-1;
@@ -143,6 +158,13 @@ bool tls_exchange(const u8 addr[4], const char *host, u32 hlen,
                   u8 *out, u32 max, u32 *got);
 bool tls_last_verified(void);       /* the server's identity was proven */
 const char *tls_last_reason(void);  /* when it was not: why, in a sentence; empty otherwise */
+
+/* The kept tls session's keys, alongside the kept connection. valid tells
+ * whether a session for this host is held; drop forgets it (the wire it
+ * rode is being closed). tls.c owns them; net.c drops them when it drops
+ * the connection. */
+bool tls_session_valid(const char *host, u32 hlen);
+void tls_session_drop(void);
 bool tls_pki_selftest(void);        /* the certificate arithmetic's known answers; run once at start */
 
 /* How the last page arrived, for the browser to mark: sealed means it

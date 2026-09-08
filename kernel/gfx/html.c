@@ -30,6 +30,7 @@ typedef struct {
     i16 link;                       /* -1 for none */
     u8  found;
     u8  scale;                      /* 1, 2 or 3: the glyph's whole-factor size */
+    u8  code;                       /* inside <pre> or <code>: gets a faint ground */
 } cell;
 
 typedef struct {
@@ -65,6 +66,8 @@ typedef struct {
     u32  bold;
     i32  link;                      /* -1, or index into urls */
     u32  pre;                       /* inside preformatted text */
+    u32  code;                      /* inside <code>, for its faint ground */
+    u32  quote;                     /* blockquote nesting, for the left bar */
 
     /* Headings, as a level stack so a close knows what it closes. */
     u8   head_lvl[8];
@@ -240,6 +243,20 @@ static void line_paint(flow *f)
         i32 top = vis ? pixel_y(f, f->row) : 0;
 
         if (vis) {
+            /* a faint ground behind runs of preformatted or <code> cells */
+            for (i32 c = 0; c < f->line_end; ) {
+                if (!(f->line[c].cp && f->line[c].code)) { c++; continue; }
+                i32 start = c;
+                while (c < f->line_end && f->line[c].cp && f->line[c].code) c++;
+                fb_rect(f->v->x + (start + shift) * GLYPH_W - 1, top,
+                        (c - start) * GLYPH_W + 2, (i32)tall * GLYPH_H, f->v->col.faint);
+            }
+            /* the left accent bar(s) of a blockquote, one per nesting level */
+            for (u32 q = 1; q <= f->quote; q++) {
+                i32 gcol = f->indent - (i32)q * IND_STEP;
+                if (gcol < 0) gcol = 0;
+                fb_rect(f->v->x + gcol * GLYPH_W + 2, top, 2, (i32)tall * GLYPH_H, f->v->col.accent);
+            }
             for (i32 c = 0; c < f->line_end; c++) {
                 cell *k = &f->line[c];
                 if (!k->cp) continue;
@@ -291,7 +308,7 @@ static void line_paint(flow *f)
             if (s) spot_add(s->field_spots, s->field_spot_count, x - 2, y - 2, w + 2, GLYPH_H + 4, lf->idx);
         }
     }
-    for (i32 c = 0; c < f->line_end; c++) f->line[c].cp = 0;
+    for (i32 c = 0; c < f->line_end; c++) { f->line[c].cp = 0; f->line[c].code = 0; }
     f->line_end = 0;
     f->nlf = 0;
     f->align_set = false;
@@ -402,6 +419,7 @@ static void word_flush(flow *f)
         k->link = (i16)(f->link >= 0 && f->link < 32000 ? f->link : -1);
         k->found = found;
         k->scale = (u8)sc;
+        k->code = (f->pre || f->code) ? 1 : 0;
     }
     f->col += (i32)(shown * sc);
     if (f->col > f->line_end) f->line_end = f->col;
@@ -464,11 +482,20 @@ static void indent_more(flow *f)
     f->col = f->indent;
 }
 
-/* Two spaces between table cells, when the row already holds one. */
+/* Table cells advance to the next column stop, so the cells of one row
+ * line up under the cells of the rows above and below. A cell wider than
+ * a stop pushes the next cell to the following stop. The first cell of a
+ * row (nothing dirty yet) starts at the margin. */
+#define CELL_STOP  14                   /* columns per table column */
 static void cell_gap(flow *f)
 {
     word_flush(f);
-    if (f->line_dirty && f->col + 2 < f->cols) f->col += 2;
+    if (!f->line_dirty) return;
+    i32 rel  = f->col - f->indent;
+    i32 stop = ((rel / CELL_STOP) + 1) * CELL_STOP;
+    i32 want = f->indent + stop;
+    if (want + 1 < f->cols) f->col = want;
+    else if (f->col + 2 < f->cols) f->col += 2;   /* out of room: a plain gap */
 }
 
 /* A line of plain ascii on a row of its own, in one colour, and the
@@ -1169,6 +1196,7 @@ static u64 tag(flow *f, const u8 *s, u64 left)
             if (gap) want_break(f, gap);
             if (f->indent >= IND_STEP) f->indent -= IND_STEP;
             f->col = f->indent;
+            if (f->quote) f->quote--;
             return t->end;
         }
         if (tag_is(name, "ul") || tag_is(name, "ol")) {
@@ -1189,6 +1217,7 @@ static u64 tag(flow *f, const u8 *s, u64 left)
             tag_is(name, "em") || tag_is(name, "i") || tag_is(name, "code")) {
             word_flush(f);
             if (f->bold) f->bold--;
+            if (tag_is(name, "code") && f->code) f->code--;
             if (gap) want_break(f, gap);
             return t->end;
         }
@@ -1258,6 +1287,7 @@ static u64 tag(flow *f, const u8 *s, u64 left)
     if (tag_is(name, "blockquote")) {
         if (gap) want_break(f, gap);
         indent_more(f);
+        f->quote++;
         return t->end;
     }
 
@@ -1310,6 +1340,7 @@ static u64 tag(flow *f, const u8 *s, u64 left)
         word_flush(f);
         if (gap) want_break(f, gap);
         f->bold++;
+        if (tag_is(name, "code")) f->code++;
         return t->end;
     }
 
@@ -1431,7 +1462,7 @@ u32 html_render(const html_view *v, html_sink *sink)
     f->cur_form = -1;
     f->wlen = 0;
     f->wsc = 1;
-    for (i32 c = 0; c < f->line_end; c++) f->line[c].cp = 0;
+    for (i32 c = 0; c < f->line_end; c++) { f->line[c].cp = 0; f->line[c].code = 0; }
     f->line_end = 0; f->nlf = 0; f->line_align = CSS_ALIGN_LEFT; f->align_set = false; f->line_rows = 1;
     f->depth = 0; f->overflow = 0;
     f->hide_at = -1; f->fold_at = -1; f->fold_open = false; f->fold_kind = 0; f->fold_n = 0;

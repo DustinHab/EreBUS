@@ -82,6 +82,7 @@ KERN_C   := kernel/main.c \
             kernel/gfx/css.c \
             kernel/gfx/png.c \
             kernel/gfx/jpeg.c \
+            kernel/gfx/webp.c \
             kernel/lib/inflate.c \
             kernel/net/web.c \
             kernel/hw/ps2.c \

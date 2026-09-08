@@ -16,11 +16,16 @@ bool png_decode(const u8 *in, u32 len, u32 *out, u32 max_pixels, u32 *w, u32 *h,
                 u8 *scratch, u32 scratch_len);
 bool jpeg_decode(const u8 *in, u32 len, u32 *out, u32 max_pixels, u32 *w, u32 *h,
                  u8 *scratch, u32 scratch_len);
+/* webp: the lossy (VP8) and lossless (VP8L) still frames. */
+bool webp_decode(const u8 *in, u32 len, u32 *out, u32 max_pixels, u32 *w, u32 *h,
+                 u8 *scratch, u32 scratch_len);
+bool webp_size(const u8 *in, u32 len, u32 *w, u32 *h);
 
-/* What a picture is, from its first bytes; 0 when neither. */
+/* What a picture is, from its first bytes; 0 when none. */
 #define IMAGE_NONE 0
 #define IMAGE_PNG  1
 #define IMAGE_JPEG 2
+#define IMAGE_WEBP 3
 u32 image_kind(const u8 *in, u32 len);
 
 /* Only the size, read from the header; for laying out before decoding. */

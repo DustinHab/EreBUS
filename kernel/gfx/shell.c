@@ -1619,13 +1619,16 @@ static void web_decode_pic(web_pic *p, const u8 *data, u32 len)
     phys_addr pa = pmm_alloc_contig(pages);
     if (pa == PMM_NO_FRAME) return;
     u32 *px = (u32 *)phys_to_virt(pa);
-    bool ok = image_kind(data, len) == IMAGE_PNG
-            ? png_decode(data, len, px, WEB_PIC_PIXELS, &w, &h, web.scratch, WEB_SCRATCH_PAGES * PAGE_SIZE)
-            : jpeg_decode(data, len, px, WEB_PIC_PIXELS, &w, &h, web.scratch, WEB_SCRATCH_PAGES * PAGE_SIZE);
+    int kind = image_kind(data, len);
+    const u32 scratch_len = WEB_SCRATCH_PAGES * PAGE_SIZE;
+    bool ok = kind == IMAGE_PNG  ? png_decode(data, len, px, WEB_PIC_PIXELS, &w, &h, web.scratch, scratch_len)
+            : kind == IMAGE_WEBP ? webp_decode(data, len, px, WEB_PIC_PIXELS, &w, &h, web.scratch, scratch_len)
+            :                      jpeg_decode(data, len, px, WEB_PIC_PIXELS, &w, &h, web.scratch, scratch_len);
     if (!ok) { pmm_free_contig(pa, pages); return; }
     p->px = px; p->w = w; p->h = h; p->pages = pages;
     p->state = 2;
-    kprintf("web:  picture %s: %s %ux%u\n", p->url, image_kind(data, len) == IMAGE_PNG ? "png" : "jpeg", w, h);
+    kprintf("web:  picture %s: %s %ux%u\n", p->url,
+            kind == IMAGE_PNG ? "png" : kind == IMAGE_WEBP ? "webp" : "jpeg", w, h);
 }
 
 /* Once a loop of the shell: the answer taken when it came, the next

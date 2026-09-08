@@ -29,6 +29,13 @@ bool tcp_write(const u8 *buf, u32 len)   { (void)buf; (void)len; return true; }
 void tcp_close(void)                     { }
 bool tcp_eof(void)                       { return in_at >= in_len; }
 
+/* No connection is ever kept in the fuzzer: every exchange is a fresh
+ * handshake, which is the path under test. */
+bool net_conn_alive(const u8 a[4], u16 p, bool s) { (void)a; (void)p; (void)s; return false; }
+void net_conn_keep(const u8 a[4], u16 p, bool s)  { (void)a; (void)p; (void)s; }
+void net_conn_drop(void)                          { }
+bool http_keepable(const http_progress *p, const u8 *buf, u32 len) { (void)p; (void)buf; (void)len; return false; }
+
 i32 tcp_read(u8 *buf, u32 max)
 {
     if (in_at >= in_len) return 0;

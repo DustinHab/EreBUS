@@ -13,6 +13,8 @@ u32 image_kind(const u8 *in, u32 len)
 {
     if (len >= 8 && in[0] == 0x89 && in[1] == 'P' && in[2] == 'N' && in[3] == 'G') return IMAGE_PNG;
     if (len >= 3 && in[0] == 0xFF && in[1] == 0xD8 && in[2] == 0xFF) return IMAGE_JPEG;
+    if (len >= 12 && in[0] == 'R' && in[1] == 'I' && in[2] == 'F' && in[3] == 'F' &&
+        in[8] == 'W' && in[9] == 'E' && in[10] == 'B' && in[11] == 'P') return IMAGE_WEBP;
     return IMAGE_NONE;
 }
 
@@ -214,5 +216,6 @@ bool image_size(const u8 *in, u32 len, u32 *w, u32 *h)
             at += 2 + seglen;
         }
     }
+    if (kind == IMAGE_WEBP) return webp_size(in, len, w, h);
     return false;
 }
