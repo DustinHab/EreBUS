@@ -814,10 +814,98 @@ object *system_served(void)
                          NULL, NULL);
 }
 
+/* ---- firmware power control via UEFI runtime services --------------
+ *
+ * The port writes further down cover the common hypervisors; real
+ * firmware usually ignores them and only obeys the UEFI ResetSystem
+ * runtime service. The loader did not relocate the runtime (no
+ * SetVirtualAddressMap), so ResetSystem and the table that holds it are
+ * physical addresses: readable here through the direct map, but the
+ * code can only be called where it sits, at its physical address. The
+ * loader's own page tables still provide that -- an identity map of low
+ * memory, kept intact because its pages are marked EB_MEM_KERNEL and
+ * never handed back out. So the call runs on a small scratch stack
+ * under the loader's cr3 (thread stacks live in a window that map does
+ * not cover), then restores this kernel's address space if the firmware
+ * ever hands control back. */
+
+/* Kept from the handover; zero disables the firmware path. */
+static u64 efi_systab_phys, loader_pml4_phys;
+
+typedef struct { u64 sig; u32 rev, hsize, crc, rsvd; } efi_hdr;
+
+typedef struct {
+    efi_hdr hdr;
+    void *GetTime, *SetTime, *GetWakeupTime, *SetWakeupTime;
+    void *SetVirtualAddressMap, *ConvertPointer;
+    void *GetVariable, *GetNextVariableName, *SetVariable;
+    void *GetNextHighMonotonicCount;
+    void *ResetSystem;      /* the 11th runtime call, offset 104 */
+} efi_runtime;
+
+typedef struct {
+    efi_hdr hdr;
+    void *FirmwareVendor;
+    u32   FirmwareRevision;
+    void *ConsoleInHandle, *ConIn, *ConsoleOutHandle, *ConOut;
+    void *StandardErrorHandle, *StdErr;
+    void *RuntimeServices;
+} efi_systab;
+
+#define EFI_RESET_COLD     0u
+#define EFI_RESET_SHUTDOWN 2u
+
+static u8 fw_stack[8192] __attribute__((aligned(64)));
+
+/* Args (System V): rdi=new_cr3, rsi=reset_fn_phys, rdx=scratch_top,
+ * rcx=reset_type. Switches to the loader's identity map and a scratch
+ * stack, calls ResetSystem with the Microsoft x64 convention, and
+ * restores cr3/rsp from callee-saved registers if it returns. */
+__attribute__((naked, noinline, used))
+static void firmware_call_phys(u64 new_cr3, u64 reset_fn_phys,
+                               u64 scratch_top, u64 reset_type)
+{
+    __asm__ volatile(
+        "cli\n\t"
+        "mov %rcx, %r10\n\t"          /* reset_type -> r10 (rcx is an ms arg) */
+        "mov %rsi, %r13\n\t"          /* reset_fn (nonvolatile across the call) */
+        "mov %cr3, %rax\n\t"
+        "mov %rax, %r14\n\t"          /* old cr3 */
+        "mov %rsp, %r15\n\t"          /* old rsp */
+        "mov %rdi, %cr3\n\t"          /* the loader's identity map */
+        "mov %rdx, %rsp\n\t"          /* scratch stack, mapped there */
+        "mov %r10d, %ecx\n\t"         /* arg1: ResetType */
+        "xor %edx, %edx\n\t"          /* arg2: ResetStatus = EFI_SUCCESS */
+        "xor %r8d, %r8d\n\t"          /* arg3: DataSize = 0 */
+        "xor %r9d, %r9d\n\t"          /* arg4: ResetData = NULL */
+        "sub $32, %rsp\n\t"           /* ms x64 shadow space */
+        "call *%r13\n\t"
+        "add $32, %rsp\n\t"
+        "mov %r14, %cr3\n\t"          /* firmware returned: put it all back */
+        "mov %r15, %rsp\n\t"
+        "sti\n\t"
+        "ret\n\t"
+    );
+}
+
+/* Ask the firmware to power off (shutdown) or reboot (cold). Returns if
+ * the runtime service is missing or the firmware ignored the request. */
+static void firmware_reset(u32 type)
+{
+    if (!efi_systab_phys || !loader_pml4_phys) return;
+    efi_systab *st = (efi_systab *)phys_to_virt((phys_addr)efi_systab_phys);
+    if (!st || !st->RuntimeServices) return;
+    efi_runtime *rt = (efi_runtime *)phys_to_virt((phys_addr)(u64)st->RuntimeServices);
+    if (!rt || !rt->ResetSystem) return;
+    journal_says("system", "asking the firmware to power off");
+    u64 scratch_top = ((u64)&fw_stack[sizeof fw_stack]) - EB_KERNEL_BASE;
+    firmware_call_phys(loader_pml4_phys, (u64)rt->ResetSystem, scratch_top, type);
+}
+
 /* The deliberate end: the graph goes to disk, the journal notes the
- * leaving, and the machine is asked to sleep at the ports the common
- * machines listen on. A machine that ignores them is told so instead
- * of left looking frozen. */
+ * leaving, and the machine is asked to sleep. The UEFI runtime is tried
+ * first, then the ports the common hypervisors listen on. A machine
+ * that ignores them all is told so instead of left looking frozen. */
 void system_off(void)
 {
     journal_says("system", "shutting down");
@@ -827,6 +915,8 @@ void system_off(void)
         snap_save(roots, roots[1] ? 2 : 1);
     kprintf("system: off; generation %llu is on the disk\n",
             snap_generation());
+
+    firmware_reset(EFI_RESET_SHUTDOWN);   /* the portable way; returns if ignored */
 
     outw(0x604, 0x2000);              /* qemu q35 */
     outw(0xB004, 0x2000);             /* bochs, older qemu */
@@ -842,6 +932,8 @@ void system_restart(void)
         snap_save(roots, roots[1] ? 2 : 1);
     kprintf("system: restarting; generation %llu is on the disk\n",
             snap_generation());
+
+    firmware_reset(EFI_RESET_COLD);   /* the portable way; returns if ignored */
 
     /* The keyboard controller's reset line, then the chipset's reset
      * register, and if neither is listened to, an interrupt with no
@@ -1228,6 +1320,11 @@ void kmain(eb_boot_info *bi)
 
     kprintf("\n\nEreBUS %s (x86_64)\n", erebus_version);
     kprintf("boot: handover verified, version %u\n", bi->version);
+
+    /* Kept for firmware power control at shutdown/restart. */
+    efi_systab_phys  = bi->efi_system_table;
+    loader_pml4_phys = bi->pml4;
+
     if (bi->version >= 3 && bi->loader_file && bi->kernel_file) {
         loader_file = (const u8 *)phys_to_virt(bi->loader_file);
         loader_file_size = bi->loader_file_size;

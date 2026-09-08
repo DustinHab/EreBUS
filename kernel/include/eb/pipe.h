@@ -134,6 +134,29 @@ bool pipe_found_at(u32 i, u8 ip[4], char name[24],
 /* Seconds since a machine at that address was last heard; ~0 when never. */
 u64  pipe_seen_ago_s(const u8 ip[4]);
 
+/* The desk's jobs in flight, for the control channel and status views:
+ * how many, and one by one. state is 0 fresh, 1 scanning, 2 running.
+ * Fields the caller does not want may be NULL; name takes 40 bytes.
+ * A snapshot -- the net thread may move the desk on between calls. */
+u32  pipe_desk_count(void);
+bool pipe_desk_at(u32 idx, u32 *no, char name[40], u8 *state,
+                  u32 *pieces, u32 *parts, u32 *done, u32 *quorum, u8 *combine);
+
+/* Far-work events, for a control-channel watcher: a small ring the desk
+ * appends to when a job is queued, done or failed. Each carries a
+ * monotonic seq. A reader keeps a cursor and drains what is new. kind:
+ * 0 queued, 2 done, 3 failed (1 running is reserved). */
+typedef struct { u64 seq; u32 no; u8 kind; char text[48]; } pipe_event;
+u64  pipe_event_seq(void);                                   /* the newest seq, 0 if none */
+u32  pipe_events_since(u64 *cursor, pipe_event *out, u32 max); /* copies seq>*cursor, oldest first; advances *cursor */
+
+/* The cluster as this node has heard it: machines that answered a scan
+ * or a handshake, with what they said. For a control-channel peers view.
+ * seen_ago_s is seconds since last heard; fields wanted NULL are skipped. */
+u32  pipe_peer_count(void);
+bool pipe_peer_at(u32 idx, u8 ip[4], char name[24], char version[24],
+                  bool *works, u32 *free_mib, u32 *seen_ago_s, u32 *up_min, u32 *jobs);
+
 /* The "network" page: what the kernel sees on the wire, rewritten
  * every two seconds. */
 void pipe_page_set(object *text);

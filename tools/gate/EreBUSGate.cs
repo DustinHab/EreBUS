@@ -10,10 +10,13 @@
  * No SDK: build with the .NET Framework compiler.
  *   tools\gate\build.cmd            -> build\gate\EreBUS-Gate.exe
  * No arguments opens the window; --headless drives the core from a command
- * line; --shot <file.png> renders the window to an image.
+ * line; --shot <file.png> renders the window to an image; "api <verb>" is the
+ * machine interface (one json object on stdout), and "api watch" streams json
+ * events, one per line.
  */
 using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -26,12 +29,12 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyTitle("EreBUS Gate")]
 [assembly: System.Reflection.AssemblyProduct("EreBUS Gate")]
 [assembly: System.Reflection.AssemblyCompany("github.com/DustinHab/EreBUS")]
-[assembly: System.Reflection.AssemblyVersion("0.1.2.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.2.0")]
+[assembly: System.Reflection.AssemblyVersion("0.1.3.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.1.3.0")]
 
 namespace EreBUSGate
 {
-    static class Ver { public const string V = "0.1.2"; }
+    static class Ver { public const string V = "0.1.3"; }
 
     static class Look
     {
@@ -244,6 +247,35 @@ namespace EreBUSGate
             if (!p.WaitForExit(20000)) { try { p.Kill(); } catch { } }
             return p.HasExited ? p.ExitCode : 0;
         }
+
+        public static int Read(Spec s, string name, Action<string> log)
+        {
+            Process p = StartSsh(s, log); if (p == null) return -1;
+            try
+            {
+                var stdin = p.StandardInput.BaseStream;
+                Write(stdin, "read " + name + "\n"); stdin.Flush();
+                Thread.Sleep(s.Wait > 0 ? s.Wait * 1000 : 1500);
+                stdin.Close();
+            }
+            catch (Exception e) { log("wire broke: " + e.Message); }
+            if (!p.WaitForExit(15000)) { try { p.Kill(); } catch { } }
+            return p.HasExited ? p.ExitCode : 0;
+        }
+
+        public static string VersionOf(List<string> lines)
+        {
+            foreach (var l in lines)
+                foreach (var t in l.Split(new char[] { ' ', '\t', ',' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    string tt = t.TrimStart('v', 'V');
+                    if (tt.IndexOf('.') <= 0 || tt[tt.Length - 1] == '.') continue;
+                    bool ok = true; int dots = 0;
+                    foreach (char c in tt) { if (c == '.') dots++; else if (c < '0' || c > '9') { ok = false; break; } }
+                    if (ok && dots >= 1) return tt;
+                }
+            return null;
+        }
     }
 
     class Toggle : Label
@@ -340,7 +372,17 @@ namespace EreBUSGate
             head.Controls.Add(Glyph("\u00D7", head.Width - 34, 16, delegate { this.Close(); }));
             head.Controls.Add(Glyph("\u2013", head.Width - 66, 16, delegate { this.WindowState = FormWindowState.Minimized; }));
             head.Controls.Add(Glyph("?", head.Width - 98, 16, delegate { ShowAbout(); }));
+
+            var cl = new Label();
+            cl.Text = "cluster"; cl.Font = Look.Small; cl.ForeColor = Look.Dim; cl.AutoSize = true;
+            cl.Location = new Point(head.Width - 172, 21); cl.Cursor = Cursors.Hand;
+            cl.MouseEnter += delegate { cl.ForeColor = Look.Accent; };
+            cl.MouseLeave += delegate { cl.ForeColor = Look.Dim; };
+            cl.Click += delegate { ShowCluster(); };
+            head.Controls.Add(cl);
         }
+
+        void ShowCluster() { var f = new ClusterForm(nodes); try { f.Show(this); } catch { f.Show(); } }
 
         Label Glyph(string ch, int x, int y, Action onClick)
         {
@@ -788,6 +830,329 @@ namespace EreBUSGate
         }
     }
 
+    /* a small read-only overview of the saved nodes: online and version,
+     * polled over the door. the dashboard with jobs and live log arrives
+     * with the 0.9.6 control plane. */
+    class ClusterForm : Form
+    {
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+        static extern int SetWindowTheme(IntPtr h, string app, string id);
+
+        List<NodeEntry> nodes;
+        bool[] online, seen; string[] ver;
+        bool busy; Point dragFrom; bool dragging;
+        Panel table; System.Windows.Forms.Timer timer;
+
+        public ClusterForm(List<NodeEntry> src)
+        {
+            nodes = new List<NodeEntry>(src);
+            online = new bool[nodes.Count]; seen = new bool[nodes.Count]; ver = new string[nodes.Count];
+
+            this.Text = "cluster";
+            this.FormBorderStyle = FormBorderStyle.None;
+            this.StartPosition = FormStartPosition.CenterParent;
+            this.BackColor = Look.Ground; this.ForeColor = Look.Ink; this.Font = Look.Body;
+            this.ClientSize = new Size(560, Math.Max(240, 174 + nodes.Count * 26));
+            this.KeyPreview = true;
+            this.KeyDown += delegate(object o, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) this.Close(); };
+            this.Paint += delegate(object o, PaintEventArgs e)
+            { using (var pen = new Pen(Look.Edge)) e.Graphics.DrawRectangle(pen, 0, 0, this.Width - 1, this.Height - 1); };
+
+            var head = new Panel();
+            head.Bounds = new Rectangle(1, 1, this.ClientSize.Width - 2, 60); head.BackColor = Look.Ground;
+            head.Paint += delegate(object o, PaintEventArgs e)
+            {
+                var g = e.Graphics; g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                using (var f = new Font("Consolas", 15f, FontStyle.Bold))
+                using (var b = new SolidBrush(Look.Accent)) g.DrawString("cluster", f, b, 18, 16);
+                using (var pen = new Pen(Look.Edge)) g.DrawLine(pen, 18, 50, head.Width - 18, 50);
+            };
+            head.MouseDown += delegate(object o, MouseEventArgs e) { dragging = true; dragFrom = e.Location; };
+            head.MouseUp += delegate { dragging = false; };
+            head.MouseMove += delegate(object o, MouseEventArgs e)
+            { if (dragging) this.Location = new Point(this.Location.X + e.X - dragFrom.X, this.Location.Y + e.Y - dragFrom.Y); };
+            this.Controls.Add(head);
+
+            var x = new Label();
+            x.Text = "×"; x.Font = new Font("Consolas", 13f, FontStyle.Bold); x.ForeColor = Look.Dim;
+            x.AutoSize = false; x.Size = new Size(24, 24); x.TextAlign = ContentAlignment.MiddleCenter;
+            x.Location = new Point(head.Width - 30, 12); x.Cursor = Cursors.Hand;
+            x.MouseEnter += delegate { x.ForeColor = Look.Accent; }; x.MouseLeave += delegate { x.ForeColor = Look.Dim; };
+            x.Click += delegate { this.Close(); }; head.Controls.Add(x);
+
+            table = new Panel(); table.BackColor = Look.Ground;
+            table.Location = new Point(1, 62); table.Size = new Size(this.ClientSize.Width - 2, this.ClientSize.Height - 62 - 44);
+            table.Paint += PaintTable; this.Controls.Add(table);
+
+            var refresh = MkBtn("refresh", 18, this.ClientSize.Height - 36, 100);
+            refresh.Click += delegate { Refresh_(); };
+            var auto = new Toggle("auto"); auto.Location = new Point(132, this.ClientSize.Height - 32);
+            auto.Changed += delegate { if (auto.Checked) timer.Start(); else timer.Stop(); };
+            this.Controls.Add(auto);
+
+            timer = new System.Windows.Forms.Timer(); timer.Interval = 8000;
+            timer.Tick += delegate { Refresh_(); };
+            this.FormClosing += delegate { timer.Stop(); };
+
+            Refresh_();
+        }
+
+        Button MkBtn(string text, int x, int y, int w)
+        {
+            var b = new Button();
+            b.Text = text; b.Font = Look.Mono; b.FlatStyle = FlatStyle.Flat;
+            b.FlatAppearance.BorderColor = Look.Edge; b.FlatAppearance.BorderSize = 1; b.BackColor = Look.Ground;
+            b.ForeColor = Look.Dim; b.FlatAppearance.MouseOverBackColor = Color.FromArgb(0x2C, 0x23, 0x1B);
+            b.Location = new Point(x, y); b.Size = new Size(w, 26); b.Cursor = Cursors.Hand; b.UseCompatibleTextRendering = true;
+            this.Controls.Add(b); return b;
+        }
+
+        void PaintTable(object o, PaintEventArgs e)
+        {
+            var g = e.Graphics; g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            int x0 = 17, y = 6;
+            using (var b = new SolidBrush(Look.Accent))
+            {
+                g.DrawString(Look.Spaced("node"), Look.Small, b, x0, y);
+                g.DrawString(Look.Spaced("state"), Look.Small, b, x0 + 300, y);
+                g.DrawString(Look.Spaced("version"), Look.Small, b, x0 + 392, y);
+            }
+            using (var pen = new Pen(Look.Edge)) g.DrawLine(pen, x0, y + 18, table.Width - 18, y + 18);
+            y += 26;
+            if (nodes.Count == 0)
+            {
+                using (var b = new SolidBrush(Look.Dim)) g.DrawString("no saved nodes.  save one in the main window.", Look.Mono, b, x0, y);
+                return;
+            }
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                using (var b = new SolidBrush(Look.Ink)) g.DrawString(nodes[i].ToString(), Look.Mono, b, x0, y);
+                string state; Color sc;
+                if (!seen[i]) { state = busy ? "..." : "-"; sc = Look.Dim; }
+                else if (online[i]) { state = "online"; sc = Look.Accent; }
+                else { state = "offline"; sc = Look.WarnC; }
+                using (var b = new SolidBrush(sc)) g.DrawString(state, Look.Mono, b, x0 + 300, y);
+                using (var b = new SolidBrush(Look.Dim)) g.DrawString(ver[i] ?? "-", Look.Mono, b, x0 + 392, y);
+                y += 24;
+            }
+        }
+
+        void Refresh_()
+        {
+            if (busy) return;
+            if (nodes.Count == 0) { table.Invalidate(); return; }
+            busy = true; table.Invalidate();
+            var th = new Thread(delegate()
+            {
+                for (int i = 0; i < nodes.Count; i++)
+                {
+                    var n = nodes[i];
+                    var s = new Spec(); s.Node = n.Host; s.Port = n.Port < 1 ? 22 : n.Port; s.Key = n.Key;
+                    var lines = new List<string>();
+                    int rc = Core.Probe(s, delegate(string l) { lock (lines) lines.Add(l); });
+                    online[i] = rc == 0; ver[i] = Core.VersionOf(lines); seen[i] = true;
+                    try { table.BeginInvoke((MethodInvoker)delegate { table.Invalidate(); }); } catch { }
+                }
+                busy = false;
+                try { table.BeginInvoke((MethodInvoker)delegate { table.Invalidate(); }); } catch { }
+            });
+            th.IsBackground = true; th.Start();
+        }
+    }
+
+    static class Json
+    {
+        public static string Write(object o) { var sb = new StringBuilder(); Emit(sb, o); return sb.ToString(); }
+
+        static void Emit(StringBuilder sb, object o)
+        {
+            if (o == null) { sb.Append("null"); return; }
+            if (o is string) { Str(sb, (string)o); return; }
+            if (o is bool) { sb.Append(((bool)o) ? "true" : "false"); return; }
+            if (o is int || o is long) { sb.Append(o.ToString()); return; }
+            if (o is double) { sb.Append(((double)o).ToString("R", System.Globalization.CultureInfo.InvariantCulture)); return; }
+            var dict = o as System.Collections.IDictionary;
+            if (dict != null)
+            {
+                sb.Append('{'); bool first = true;
+                foreach (System.Collections.DictionaryEntry e in dict)
+                { if (!first) sb.Append(','); first = false; Str(sb, Convert.ToString(e.Key)); sb.Append(':'); Emit(sb, e.Value); }
+                sb.Append('}'); return;
+            }
+            var list = o as System.Collections.IEnumerable;
+            if (list != null)
+            {
+                sb.Append('['); bool first = true;
+                foreach (var e in list) { if (!first) sb.Append(','); first = false; Emit(sb, e); }
+                sb.Append(']'); return;
+            }
+            Str(sb, o.ToString());
+        }
+
+        static void Str(StringBuilder sb, string s)
+        {
+            sb.Append('"');
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '"') sb.Append("\\\"");
+                else if (c == '\\') sb.Append("\\\\");
+                else if (c == '\n') sb.Append("\\n");
+                else if (c == '\r') sb.Append("\\r");
+                else if (c == '\t') sb.Append("\\t");
+                else if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("x4"));
+                else sb.Append(c);
+            }
+            sb.Append('"');
+        }
+    }
+
+    /* The control channel client: opens ssh, switches the session to the
+     * node's binary framed protocol with "control", and speaks frames.
+     * A frame is a 4-byte little-endian length and then that many bytes:
+     * u8 kind, u32 id, u16 name length, the name, the body. Requests get
+     * a rising id; the matching response carries it back. */
+    class Ctl
+    {
+        public class Frm { public byte Kind; public uint Id; public string Name; public byte[] Body; }
+
+        Process p; Stream sin, sout; uint nextId = 1;
+        byte[] rbuf = new byte[0]; int rpos = 0;
+        public string NodeVersion;
+
+        public static Ctl Open(Spec s, out string err)
+        {
+            err = null;
+            var psi = new ProcessStartInfo();
+            psi.FileName = "ssh.exe";
+            var a = new StringBuilder();
+            a.Append("-T ");
+            if (s.Port > 0 && s.Port != 22) a.Append("-p ").Append(s.Port).Append(' ');
+            if (!string.IsNullOrEmpty(s.Key)) a.Append("-i \"").Append(s.Key).Append("\" ");
+            a.Append("-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 ");
+            a.Append(s.Node);
+            psi.Arguments = a.ToString();
+            psi.UseShellExecute = false; psi.RedirectStandardInput = true;
+            psi.RedirectStandardOutput = true; psi.RedirectStandardError = true; psi.CreateNoWindow = true;
+
+            var c = new Ctl();
+            try { c.p = Process.Start(psi); }
+            catch (Exception e) { err = "ssh could not start: " + e.Message; return null; }
+            c.sin = c.p.StandardInput.BaseStream; c.sout = c.p.StandardOutput.BaseStream;
+            try
+            {
+                byte[] cmd = Encoding.ASCII.GetBytes("control\n");
+                c.sin.Write(cmd, 0, cmd.Length); c.sin.Flush();
+                if (!c.SkipPast(Encoding.ASCII.GetBytes("lists the words.\n"))) { err = "no control channel (node before 0.9.6?)"; c.Close(); return null; }
+                Frm f = c.ReadFrame();
+                if (f == null || f.Name != "hello") { err = "control handshake failed"; c.Close(); return null; }
+                c.NodeVersion = KV(f.Body, "node");
+            }
+            catch (Exception e) { err = "control: " + e.Message; c.Close(); return null; }
+            return c;
+        }
+
+        public Frm Req(string name, byte[] body)
+        {
+            try
+            {
+                uint id = nextId++;
+                byte[] fr = FrameOf(1, id, name, body);
+                sin.Write(fr, 0, fr.Length); sin.Flush();
+                for (int guard = 0; guard < 100000; guard++)
+                {
+                    Frm f = ReadFrame();
+                    if (f == null) return null;
+                    if ((f.Kind == 2 || f.Kind == 4) && f.Id == id) return f;   /* skip events */
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        public void Close()
+        {
+            try { if (sin != null) sin.Close(); } catch { }
+            try { if (p != null && !p.WaitForExit(3000)) p.Kill(); } catch { }
+        }
+
+        public Frm ReadFrame()
+        {
+            byte[] lenb = ReadExact(4); if (lenb == null) return null;
+            uint total = (uint)(lenb[0] | (lenb[1] << 8) | (lenb[2] << 16) | (lenb[3] << 24));
+            if (total < 7 || total > 200000) return null;
+            byte[] f = ReadExact((int)total); if (f == null) return null;
+            var fr = new Frm();
+            fr.Kind = f[0];
+            fr.Id = (uint)(f[1] | (f[2] << 8) | (f[3] << 16) | (f[4] << 24));
+            int nlen = f[5] | (f[6] << 8);
+            if (7 + nlen > f.Length) return null;
+            fr.Name = Encoding.ASCII.GetString(f, 7, nlen);
+            int blen = (int)total - 7 - nlen;
+            fr.Body = new byte[blen]; Array.Copy(f, 7 + nlen, fr.Body, 0, blen);
+            return fr;
+        }
+
+        static byte[] FrameOf(byte kind, uint id, string name, byte[] body)
+        {
+            byte[] nm = Encoding.ASCII.GetBytes(name);
+            int blen = body != null ? body.Length : 0;
+            int total = 1 + 4 + 2 + nm.Length + blen;
+            var o = new byte[4 + total]; int k = 0;
+            o[k++] = (byte)total; o[k++] = (byte)(total >> 8); o[k++] = (byte)(total >> 16); o[k++] = (byte)(total >> 24);
+            o[k++] = kind;
+            o[k++] = (byte)id; o[k++] = (byte)(id >> 8); o[k++] = (byte)(id >> 16); o[k++] = (byte)(id >> 24);
+            o[k++] = (byte)nm.Length; o[k++] = (byte)(nm.Length >> 8);
+            Array.Copy(nm, 0, o, k, nm.Length); k += nm.Length;
+            if (blen > 0) Array.Copy(body, 0, o, k, blen);
+            return o;
+        }
+
+        bool Fill()
+        {
+            var tmp = new byte[8192];
+            int r = sout.Read(tmp, 0, tmp.Length);
+            if (r <= 0) return false;
+            int rem = rbuf.Length - rpos;
+            var nb = new byte[rem + r];
+            Array.Copy(rbuf, rpos, nb, 0, rem);
+            Array.Copy(tmp, 0, nb, rem, r);
+            rbuf = nb; rpos = 0;
+            return true;
+        }
+
+        byte[] ReadExact(int n)
+        {
+            while (rbuf.Length - rpos < n) { if (!Fill()) return null; }
+            var o = new byte[n]; Array.Copy(rbuf, rpos, o, 0, n); rpos += n; return o;
+        }
+
+        bool SkipPast(byte[] marker)
+        {
+            while (true)
+            {
+                for (int i = rpos; i + marker.Length <= rbuf.Length; i++)
+                {
+                    bool ok = true;
+                    for (int j = 0; j < marker.Length; j++) if (rbuf[i + j] != marker[j]) { ok = false; break; }
+                    if (ok) { rpos = i + marker.Length; return true; }
+                }
+                if (!Fill()) return false;
+            }
+        }
+
+        public static string KV(byte[] body, string key)
+        {
+            if (body == null) return null;
+            foreach (var line in Encoding.UTF8.GetString(body).Split('\n'))
+            {
+                int eq = line.IndexOf('=');
+                if (eq > 0 && line.Substring(0, eq) == key) return line.Substring(eq + 1);
+            }
+            return null;
+        }
+    }
+
     static class Program
     {
         [DllImport("kernel32.dll")]
@@ -797,7 +1162,9 @@ namespace EreBUSGate
         static int Main(string[] args)
         {
             if (args.Length > 0) AttachConsole(-1);
+            if (args.Length > 0 && args[0] == "api") return Api(args);
             if (Has(args, "--version")) { Console.WriteLine("EreBUS Gate " + Ver.V); return 0; }
+            if (Has(args, "--shot-cluster")) return ShotCluster(Arg(args, "--shot-cluster"));
             if (Has(args, "--shot")) return Shot(Arg(args, "--shot"));
             if (Has(args, "--headless")) return Headless(args);
             Application.EnableVisualStyles();
@@ -817,6 +1184,25 @@ namespace EreBUSGate
             var f = new GateForm();
             f.StartPosition = FormStartPosition.Manual; f.Location = new Point(-4000, -4000);
             f.Show(); Application.DoEvents();
+            using (var bmp = new Bitmap(f.Width, f.Height))
+            { f.DrawToBitmap(bmp, new Rectangle(0, 0, f.Width, f.Height)); bmp.Save(path, ImageFormat.Png); }
+            f.Close();
+            Console.WriteLine("wrote " + path);
+            return 0;
+        }
+
+        static int ShotCluster(string path)
+        {
+            if (string.IsNullOrEmpty(path)) { Console.Error.WriteLine("--shot-cluster needs a file"); return 2; }
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            var demo = new List<NodeEntry>();
+            demo.Add(new NodeEntry() { Name = "alpha", Host = "someone@alpha", Port = 22 });
+            demo.Add(new NodeEntry() { Name = "beta",  Host = "someone@beta",  Port = 2222 });
+            demo.Add(new NodeEntry() { Name = "gamma", Host = "someone@gamma", Port = 22 });
+            var f = new ClusterForm(demo);
+            f.StartPosition = FormStartPosition.Manual; f.Location = new Point(-4000, -4000);
+            f.Show(); Application.DoEvents(); System.Threading.Thread.Sleep(150); Application.DoEvents();
             using (var bmp = new Bitmap(f.Width, f.Height))
             { f.DrawToBitmap(bmp, new Rectangle(0, 0, f.Width, f.Height)); bmp.Save(path, ImageFormat.Png); }
             f.Close();
@@ -846,6 +1232,426 @@ namespace EreBUSGate
             if (!string.IsNullOrEmpty(outp)) { File.WriteAllBytes(outp, pkg); Console.WriteLine("wrote " + outp + " (" + pkg.Length + " bytes)"); return 0; }
             if (string.IsNullOrEmpty(s.Node)) { Console.Out.Write(new UTF8Encoding(false).GetString(pkg)); return 0; }
             return Core.Feed(s, pkg, Console.WriteLine);
+        }
+
+        /* ---- machine interface: "api <verb>", json on stdout ---- */
+
+        static OrderedDictionary Obj() { return new OrderedDictionary(); }
+
+        static int Emit(object o)
+        {
+            Console.Out.WriteLine(Json.Write(o)); Console.Out.Flush();
+            var d = o as OrderedDictionary;
+            return (d != null && d.Contains("ok") && (d["ok"] is bool) && !(bool)d["ok"]) ? 1 : 0;
+        }
+
+        static void EmitLine(object o) { Console.Out.WriteLine(Json.Write(o)); Console.Out.Flush(); }
+
+        static int Fail(string msg)
+        {
+            var o = Obj(); o["ok"] = false; o["error"] = msg;
+            Console.Out.WriteLine(Json.Write(o)); Console.Out.Flush();
+            return 1;
+        }
+
+        static long Now() { return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalSeconds; }
+        static Action<string> Sink(List<string> into) { return delegate(string l) { lock (into) into.Add(l); }; }
+
+        static int Api(string[] a)
+        {
+            string verb = a.Length > 1 ? a[1] : "";
+            switch (verb)
+            {
+                case "version": return ApiVersion();
+                case "schema":  return ApiSchema();
+                case "nodes":   return ApiNodes(a);
+                case "status":  return ApiStatus(a);
+                case "jobs":    return ApiJobs(a);
+                case "submit":  return ApiSubmit(a);
+                case "result":  return ApiResult(a);
+                case "scan":    return ApiScan(a);
+                case "door":    return ApiDoor(a);
+                case "watch":   return ApiWatch(a);
+                case "log":     return ApiLog(a);
+                case "peers":   return ApiPeers(a);
+                case "cluster": return ApiCluster(a);
+                default:        return Fail("unknown verb '" + verb + "'; try: api schema");
+            }
+        }
+
+        static Spec NodeSpec(string[] a)
+        {
+            var s = new Spec();
+            string node = Arg(a, "--node"); if (string.IsNullOrEmpty(node)) node = Arg(a, "--host");
+            string key = Arg(a, "--key");
+            int port = 0; int.TryParse(Arg(a, "--port") ?? "", out port);
+            var nodes = new List<NodeEntry>(); var last = new Dictionary<string, string>();
+            Store.Load(nodes, last);
+            NodeEntry m = null;
+            if (!string.IsNullOrEmpty(node)) foreach (var n in nodes) if (n.Name == node || n.Host == node) { m = n; break; }
+            if (m != null) { s.Node = m.Host; s.Port = m.Port; s.Key = m.Key; }
+            else s.Node = node;
+            if (port >= 1) s.Port = port;
+            if (!string.IsNullOrEmpty(key)) s.Key = key;
+            if (s.Port < 1) s.Port = 22;
+            return s;
+        }
+
+        static void ApplySplit(Spec s, string[] a)
+        {
+            long lo, hi;
+            string sp = Arg(a, "--split");
+            if (!string.IsNullOrEmpty(sp))
+            {
+                string[] parts = sp.Replace("..", " ").Split(new char[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 2 && long.TryParse(parts[0], out lo) && long.TryParse(parts[1], out hi))
+                { s.HasSplit = true; s.SplitLo = lo; s.SplitHi = hi; return; }
+            }
+            if (long.TryParse(Arg(a, "--lo") ?? "", out lo) && long.TryParse(Arg(a, "--hi") ?? "", out hi))
+            { s.HasSplit = true; s.SplitLo = lo; s.SplitHi = hi; }
+        }
+
+        static string FindVersion(List<string> lines) { return Core.VersionOf(lines); }
+
+        static object FindJob(List<string> lines)
+        {
+            foreach (var l in lines)
+            {
+                int idx = l.IndexOf("job ");
+                if (idx < 0) continue;
+                if (!(l.Contains("pipe:") || l.Contains("queued") || l.Contains("created"))) continue;
+                int p = idx + 4, e = p;
+                while (e < l.Length && l[e] >= '0' && l[e] <= '9') e++;
+                long n; if (e > p && long.TryParse(l.Substring(p, e - p), out n)) return n;
+            }
+            return null;
+        }
+
+        static string FindResult(List<string> lines)
+        {
+            for (int i = lines.Count - 1; i >= 0; i--)
+            {
+                string t = lines[i].TrimStart();
+                if (t.StartsWith("= ")) return t.Substring(2).Trim();
+            }
+            return null;
+        }
+
+        static bool FindAccepted(List<string> lines)
+        {
+            foreach (var l in lines)
+                if (l.Contains("submitted to the desk") || l.Contains("created here")) return true;
+            return false;
+        }
+
+        static object ToLong(string s) { long v; return long.TryParse(s, out v) ? (object)v : null; }
+
+        /* One control body line, "k=v k=v ...", into the object; a
+         * trailing "text=" takes the rest of the line as one value. */
+        static void KvLine(OrderedDictionary o, string line)
+        {
+            string head = line, text = null;
+            int ti = line.IndexOf(" text=");
+            if (ti >= 0) { text = line.Substring(ti + 6); head = line.Substring(0, ti); }
+            else if (line.StartsWith("text=")) { text = line.Substring(5); head = ""; }
+            foreach (var tok in head.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                int eq = tok.IndexOf('=');
+                if (eq > 0) o[tok.Substring(0, eq)] = tok.Substring(eq + 1);
+            }
+            if (text != null) o["text"] = text;
+        }
+
+        static int ApiVersion()
+        {
+            var o = Obj(); o["ok"] = true; o["name"] = "EreBUS Gate"; o["version"] = Ver.V; o["schema"] = 2;
+            return Emit(o);
+        }
+
+        static object V(string verb, string args, string desc) { var o = Obj(); o["verb"] = verb; o["args"] = args; o["desc"] = desc; return o; }
+
+        static int ApiSchema()
+        {
+            var verbs = new List<object>();
+            verbs.Add(V("version", "", "tool name, version, schema number"));
+            verbs.Add(V("schema", "", "this list of verbs"));
+            verbs.Add(V("nodes", "[--probe]", "saved nodes; --probe adds online and version"));
+            verbs.Add(V("status", "--node [--port --key]", "one node over the control channel: version, uptime_s, jobs (falls back to a line probe on an older node)"));
+            verbs.Add(V("jobs", "--node", "the desk's jobs in flight: no, name, state, pieces, parts, done, quorum, combine"));
+            verbs.Add(V("submit", "--source --node [--recipe, --split lo..hi | --lo --hi, --pieces --across --combine --budget --input --name --out --wait]", "package a task and hand it to the desk over the control channel; returns a handle, and with --wait the folded result"));
+            verbs.Add(V("result", "--node [--name --wait]", "read a named object back on the line channel; returns its folded result"));
+            verbs.Add(V("scan", "--node", "scan the mesh from a node; returns the raw found/nodes text"));
+            verbs.Add(V("door", "--grant key.pub", "the 'write door | ...' line that authorises an ssh key on a node"));
+            verbs.Add(V("watch", "--node [--for s]", "subscribe to a node and stream one json event per far-work transition (queued/done/failed) as it is pushed"));
+            verbs.Add(V("log", "--node [--lines N]", "the tail of the node's journal (default 20 lines)"));
+            verbs.Add(V("peers", "--node", "the cluster as the node has heard it: ip, name, version, jobs, works, free_mib, seen_s, up_min"));
+            verbs.Add(V("cluster", "--node", "this node plus every peer with its live job count, aggregated by the node (a scan is poked, then read)"));
+            var o = Obj(); o["ok"] = true; o["name"] = "EreBUS Gate"; o["version"] = Ver.V; o["schema"] = 2; o["transport"] = "control over ssh"; o["verbs"] = verbs;
+            return Emit(o);
+        }
+
+        static int ApiNodes(string[] a)
+        {
+            var nodes = new List<NodeEntry>(); var last = new Dictionary<string, string>();
+            Store.Load(nodes, last);
+            bool probe = Has(a, "--probe");
+            var arr = new List<object>();
+            foreach (var n in nodes)
+            {
+                var o = Obj(); o["name"] = n.Name; o["host"] = n.Host; o["port"] = n.Port; o["key"] = n.Key;
+                if (probe)
+                {
+                    var s = new Spec(); s.Node = n.Host; s.Port = n.Port < 1 ? 22 : n.Port; s.Key = n.Key;
+                    var lines = new List<string>(); int rc = Core.Probe(s, Sink(lines));
+                    o["online"] = rc == 0; o["version"] = FindVersion(lines);
+                }
+                arr.Add(o);
+            }
+            var top = Obj(); top["ok"] = true; top["count"] = nodes.Count; top["nodes"] = arr;
+            return Emit(top);
+        }
+
+        static int ApiStatus(string[] a)
+        {
+            var s = NodeSpec(a);
+            if (string.IsNullOrEmpty(s.Node)) return Fail("status needs --node");
+            string cerr; var c = Ctl.Open(s, out cerr);
+            if (c != null)
+            {
+                var f = c.Req("status", null); c.Close();
+                if (f != null && f.Kind == 2)
+                {
+                    var o = Obj(); o["ok"] = true; o["node"] = s.Node; o["online"] = true; o["via"] = "control";
+                    o["version"] = Ctl.KV(f.Body, "version");
+                    o["uptime_s"] = ToLong(Ctl.KV(f.Body, "uptime_s"));
+                    o["jobs"] = ToLong(Ctl.KV(f.Body, "jobs"));
+                    return Emit(o);
+                }
+                var e = Obj(); e["ok"] = false; e["node"] = s.Node; e["error"] = f != null ? Encoding.UTF8.GetString(f.Body) : "no response"; return Emit(e);
+            }
+            /* older node or no control channel: the line probe */
+            var lines = new List<string>(); int rc = Core.Probe(s, Sink(lines));
+            var o2 = Obj(); o2["ok"] = true; o2["node"] = s.Node; o2["online"] = rc == 0; o2["via"] = "line";
+            o2["version"] = FindVersion(lines); o2["note"] = cerr; o2["raw"] = lines;
+            return Emit(o2);
+        }
+
+        static int ApiJobs(string[] a)
+        {
+            var s = NodeSpec(a);
+            if (string.IsNullOrEmpty(s.Node)) return Fail("jobs needs --node");
+            string cerr; var c = Ctl.Open(s, out cerr);
+            if (c == null) return Fail(cerr != null ? cerr : "control channel not available");
+            var f = c.Req("jobs", null); c.Close();
+            if (f == null || f.Kind != 2) return Fail(f != null ? Encoding.UTF8.GetString(f.Body) : "no response");
+            var arr = new List<object>(); long count = 0;
+            foreach (var line in Encoding.UTF8.GetString(f.Body).Split('\n'))
+            {
+                if (line.Length == 0) continue;
+                if (line.StartsWith("count=")) { long.TryParse(line.Substring(6), out count); continue; }
+                var jo = Obj(); KvLine(jo, line); arr.Add(jo);
+            }
+            var o = Obj(); o["ok"] = true; o["node"] = s.Node; o["via"] = "control"; o["count"] = count; o["jobs"] = arr;
+            return Emit(o);
+        }
+
+        static int ApiPeers(string[] a)
+        {
+            var s = NodeSpec(a);
+            if (string.IsNullOrEmpty(s.Node)) return Fail("peers needs --node");
+            string cerr; var c = Ctl.Open(s, out cerr);
+            if (c == null) return Fail(cerr != null ? cerr : "control channel not available");
+            var f = c.Req("peers", null); c.Close();
+            if (f == null || f.Kind != 2) return Fail(f != null ? Encoding.UTF8.GetString(f.Body) : "no response");
+            var arr = new List<object>(); long count = 0;
+            foreach (var line in Encoding.UTF8.GetString(f.Body).Split('\n'))
+            {
+                if (line.Length == 0) continue;
+                if (line.StartsWith("count=")) { long.TryParse(line.Substring(6), out count); continue; }
+                var po = Obj(); KvLine(po, line); arr.Add(po);
+            }
+            var o = Obj(); o["ok"] = true; o["node"] = s.Node; o["via"] = "control"; o["count"] = count; o["peers"] = arr;
+            return Emit(o);
+        }
+
+        static int ApiCluster(string[] a)
+        {
+            var s = NodeSpec(a);
+            if (string.IsNullOrEmpty(s.Node)) return Fail("cluster needs --node");
+            string cerr; var c = Ctl.Open(s, out cerr);
+            if (c == null) return Fail(cerr != null ? cerr : "control channel not available");
+            c.Req("cluster", null);      /* the first call pokes a scan */
+            Thread.Sleep(4200);          /* let the peers answer */
+            var f = c.Req("cluster", null); c.Close();
+            if (f == null || f.Kind != 2) return Fail(f != null ? Encoding.UTF8.GetString(f.Body) : "no response");
+            var peers = new List<object>(); OrderedDictionary self = null; long np = 0;
+            foreach (var line in Encoding.UTF8.GetString(f.Body).Split('\n'))
+            {
+                if (line.Length == 0) continue;
+                if (line.StartsWith("peers=")) { long.TryParse(line.Substring(6), out np); continue; }
+                if (line.StartsWith("self ")) { self = Obj(); KvLine(self, line.Substring(5)); continue; }
+                if (line.StartsWith("peer ")) { var po = Obj(); KvLine(po, line.Substring(5)); peers.Add(po); continue; }
+            }
+            var o = Obj(); o["ok"] = true; o["node"] = s.Node; o["via"] = "control"; o["peers_count"] = np; o["self"] = self; o["peers"] = peers;
+            return Emit(o);
+        }
+
+        static int ApiLog(string[] a)
+        {
+            var s = NodeSpec(a);
+            if (string.IsNullOrEmpty(s.Node)) return Fail("log needs --node");
+            int n; byte[] body = int.TryParse(Arg(a, "--lines") ?? "", out n) && n > 0 ? Encoding.ASCII.GetBytes(n.ToString()) : null;
+            string cerr; var c = Ctl.Open(s, out cerr);
+            if (c == null) return Fail(cerr != null ? cerr : "control channel not available");
+            var f = c.Req("log", body); c.Close();
+            if (f == null || f.Kind != 2) return Fail(f != null ? Encoding.UTF8.GetString(f.Body) : "no response");
+            var arr = new List<object>();
+            foreach (var line in Encoding.UTF8.GetString(f.Body).Split('\n')) if (line.Length > 0) arr.Add(line);
+            var o = Obj(); o["ok"] = true; o["node"] = s.Node; o["via"] = "control"; o["lines"] = arr;
+            return Emit(o);
+        }
+
+        static int ApiSubmit(string[] a)
+        {
+            var s = NodeSpec(a);
+            s.Source = Arg(a, "--source"); s.Name = Arg(a, "--name"); s.InputName = Arg(a, "--input"); s.Combine = Arg(a, "--combine");
+            s.Recipe = Has(a, "--recipe");
+            int v;
+            if (int.TryParse(Arg(a, "--across") ?? "", out v)) s.Across = v;
+            if (int.TryParse(Arg(a, "--pieces") ?? "", out v)) s.Pieces = v;
+            if (int.TryParse(Arg(a, "--budget") ?? "", out v)) s.Budget = v;
+            s.Wait = int.TryParse(Arg(a, "--wait") ?? "", out v) ? v : 0;
+            ApplySplit(s, a);
+            if (string.IsNullOrEmpty(s.Source)) return Fail("submit needs --source");
+            string err; byte[] pkg = Core.BuildPackage(s, out err);
+            if (pkg == null) return Fail(err);
+            if (pkg.Length > Core.WireMax) return Fail("payload " + pkg.Length + " B > " + Core.WireMax + " B");
+            string outp = Arg(a, "--out");
+            if (!string.IsNullOrEmpty(outp))
+            {
+                try { File.WriteAllBytes(outp, pkg); } catch (Exception e) { return Fail(e.Message); }
+                var w = Obj(); w["ok"] = true; w["wrote"] = outp; w["bytes"] = pkg.Length; return Emit(w);
+            }
+            if (string.IsNullOrEmpty(s.Node)) return Fail("submit needs --node (or --out to write the package)");
+
+            string cerr; var c = Ctl.Open(s, out cerr);
+            if (c != null)
+            {
+                var fs = c.Req("submit", pkg);
+                if (fs == null || fs.Kind != 2) { string em = fs != null ? Encoding.UTF8.GetString(fs.Body) : "no response"; c.Close(); return Fail(em); }
+                string handle = Ctl.KV(fs.Body, "handle");
+                var o = Obj(); o["ok"] = true; o["node"] = s.Node; o["via"] = "control"; o["bytes"] = pkg.Length; o["handle"] = ToLong(handle);
+                if (s.Wait > 0 && handle != null)
+                {
+                    DateTime dl = DateTime.UtcNow.AddSeconds(s.Wait);
+                    string state = "pending", result = null;
+                    byte[] hb = Encoding.ASCII.GetBytes(handle);
+                    while (DateTime.UtcNow < dl)
+                    {
+                        Thread.Sleep(400);
+                        var fr = c.Req("result", hb);
+                        if (fr != null && fr.Kind == 2)
+                        {
+                            state = Ctl.KV(fr.Body, "state") ?? "pending";
+                            result = Ctl.KV(fr.Body, "result");
+                            if (state == "done") break;
+                        }
+                    }
+                    o["state"] = state; o["result"] = result;
+                }
+                c.Close();
+                return Emit(o);
+            }
+            /* older node or no control channel: the line feed */
+            var lines = new List<string>(); int rc = Core.Feed(s, pkg, Sink(lines));
+            var o2 = Obj(); o2["ok"] = rc == 0; o2["node"] = s.Node; o2["via"] = "line"; o2["bytes"] = pkg.Length; o2["name"] = s.Name;
+            o2["accepted"] = FindAccepted(lines); o2["result"] = FindResult(lines); o2["note"] = cerr; o2["raw"] = lines;
+            return Emit(o2);
+        }
+
+        static int ApiResult(string[] a)
+        {
+            var s = NodeSpec(a);
+            if (string.IsNullOrEmpty(s.Node)) return Fail("result needs --node");
+            string name = Arg(a, "--name"); if (string.IsNullOrEmpty(name)) name = "job";
+            int v; s.Wait = int.TryParse(Arg(a, "--wait") ?? "", out v) ? v : 0;
+            var lines = new List<string>(); int rc = Core.Read(s, name, Sink(lines));
+            var o = Obj(); o["ok"] = rc == 0; o["node"] = s.Node; o["name"] = name; o["result"] = FindResult(lines); o["exit"] = rc; o["raw"] = lines;
+            return Emit(o);
+        }
+
+        static int ApiScan(string[] a)
+        {
+            var s = NodeSpec(a);
+            if (string.IsNullOrEmpty(s.Node)) return Fail("scan needs --node");
+            var lines = new List<string>(); int rc = Core.Scan(s, Sink(lines));
+            var o = Obj(); o["ok"] = rc == 0; o["node"] = s.Node; o["exit"] = rc; o["raw"] = lines;
+            return Emit(o);
+        }
+
+        static int ApiDoor(string[] a)
+        {
+            string grant = Arg(a, "--grant");
+            if (string.IsNullOrEmpty(grant)) return Fail("door needs --grant <ssh public key file>");
+            string pub;
+            try { pub = File.ReadAllText(grant).Trim(); } catch (Exception e) { return Fail("cannot read key: " + e.Message); }
+            string[] parts = pub.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2) return Fail("not an ssh public key");
+            var o = Obj(); o["ok"] = true; o["type"] = parts[0]; o["line"] = "write door | " + parts[0] + " " + parts[1];
+            return Emit(o);
+        }
+
+        static int ApiWatch(string[] a)
+        {
+            string nodesArg = Arg(a, "--node"); if (string.IsNullOrEmpty(nodesArg)) nodesArg = Arg(a, "--host");
+            if (string.IsNullOrEmpty(nodesArg)) return Fail("watch needs --node");
+            string first = nodesArg.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries)[0].Trim();
+            int forS; bool bounded = int.TryParse(Arg(a, "--for") ?? "", out forS);
+            var s = NodeSpec(new string[] { "--node", first, "--key", Arg(a, "--key") ?? "", "--port", Arg(a, "--port") ?? "" });
+
+            string cerr; var c = Ctl.Open(s, out cerr);
+            if (c == null) { var e = Obj(); e["event"] = "error"; e["error"] = cerr; e["t"] = Now(); EmitLine(e); return 1; }
+
+            var subf = c.Req("subscribe", null);
+            if (subf == null || subf.Kind != 2) { var e = Obj(); e["event"] = "error"; e["error"] = "subscribe failed"; e["t"] = Now(); EmitLine(e); c.Close(); return 1; }
+
+            var start = Obj(); start["event"] = "start"; start["mode"] = "push"; start["node"] = first; start["version"] = c.NodeVersion; start["t"] = Now();
+            EmitLine(start);
+
+            /* the node pushes event frames as they occur; read them off the wire */
+            var rt = new Thread(delegate()
+            {
+                try
+                {
+                    while (true)
+                    {
+                        var f = c.ReadFrame();
+                        if (f == null) break;
+                        if (f.Kind == 3)
+                        {
+                            var o = Obj(); o["event"] = "job"; o["node"] = first; KvLine(o, Encoding.UTF8.GetString(f.Body)); o["t"] = Now();
+                            EmitLine(o);
+                        }
+                    }
+                }
+                catch { }
+            });
+            rt.IsBackground = true; rt.Start();
+
+            bool stop = false;
+            var th = new Thread(delegate()
+            {
+                try { string l; while ((l = Console.In.ReadLine()) != null) if (l.Trim() == "stop") { stop = true; break; } }
+                catch { }
+            });
+            th.IsBackground = true; th.Start();
+
+            DateTime deadline = bounded ? DateTime.UtcNow.AddSeconds(forS) : DateTime.MaxValue;
+            while (!stop && DateTime.UtcNow < deadline && !rt.Join(0)) Thread.Sleep(100);
+
+            c.Close();
+            var end = Obj(); end["event"] = "end"; end["t"] = Now(); EmitLine(end);
+            return 0;
         }
     }
 }

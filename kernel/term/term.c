@@ -69,6 +69,18 @@ struct term_session {
     object *take_o;
     u64     take_left, take_size;
     char    take_name[NAME_SHOWN];
+
+    /* Control channel: 'control' switches the session to a binary framed
+     * protocol -- length-prefixed frames in, response and event frames
+     * out on the transcript (see the control section below). */
+    bool control;
+    u32  clen;
+    u8   cbuf[1600];
+    object *cjob[4];      /* control-channel task objects, held so 'result' can read them back */
+    u32     cjob_id[4];
+    u32     cjob_seq;
+    u64     evcursor;     /* how far this session has drained the far-work event ring */
+    bool    pushing;      /* control: push events to the door as they occur, unasked */
 };
 
 static term_session sessions[TERM_SESSIONS];
@@ -188,6 +200,7 @@ void term_close(term_session *s)
     /* A visitor who leaves with bytes still owed leaves a text half
      * filled; the text stays where it was laid, the hold on it goes. */
     if (s->take_o) { obj_release(s->take_o); s->take_o = NULL; s->take_left = 0; }
+    for (u32 i = 0; i < 4; i++) if (s->cjob[i]) { obj_release(s->cjob[i]); s->cjob[i] = NULL; }
     while (s->depth > 0) {
         s->depth--;
         obj_release(s->node[s->depth]);
@@ -638,14 +651,370 @@ static void cmd_receive(term_session *s, const char *what)
     t_say(s, " bytes now.");
 }
 
+/* ---- control channel -------------------------------------------------
+ *
+ * 'control' switches a door session from words to a binary framed
+ * protocol, so a program on the other side speaks to the node instead
+ * of a person. A frame is a 4-byte little-endian length and then that
+ * many bytes: u8 kind, u32 id, u16 name length, the name, the body.
+ * kind 1 is a request in, 2 a response out, 3 an event out, 4 an error.
+ * A request and its response share an id; an event carries the id of
+ * the subscription it belongs to. Reply frames are written onto the
+ * transcript, which the door sends back like any other output. */
+
+#define CTL_REQ   1u
+#define CTL_RESP  2u
+#define CTL_EVENT 3u
+#define CTL_ERR   4u
+
+static u32 ctl_u32(const u8 *p) { return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24); }
+static u16 ctl_u16(const u8 *p) { return (u16)((u16)p[0] | ((u16)p[1] << 8)); }
+static u32 ctl_str(char *dst, const char *src) { u32 i = 0; while (src[i]) { dst[i] = src[i]; i++; } return i; }
+static bool ctl_name(const char *n, u16 nlen, const char *lit)
+{
+    u32 i = 0; while (lit[i]) { if (i >= nlen || n[i] != lit[i]) return false; i++; }
+    return i == nlen;
+}
+
+static u32 ctl_dec(char *dst, u64 v)
+{
+    char t[24]; u32 n = 0;
+    if (v == 0) { dst[0] = '0'; return 1; }
+    while (v) { t[n++] = (char)('0' + v % 10); v /= 10; }
+    for (u32 i = 0; i < n; i++) dst[i] = t[n - 1 - i];
+    return n;
+}
+
+static const char *ctl_combine(u8 c)
+{
+    switch (c) {
+        case TASK_CONCAT: return "concat";
+        case TASK_MIN:    return "min";
+        case TASK_MAX:    return "max";
+        case TASK_COUNT:  return "count";
+        case TASK_FIRST:  return "first";
+        default:          return "sum";
+    }
+}
+
+static void ctl_send(term_session *s, u8 kind, u32 id, const char *name, const u8 *body, u32 blen)
+{
+    u32 nlen = 0; while (name[nlen]) nlen++;
+    u32 total = 1 + 4 + 2 + nlen + blen;
+    t_putc(s, (char)total); t_putc(s, (char)(total >> 8)); t_putc(s, (char)(total >> 16)); t_putc(s, (char)(total >> 24));
+    t_putc(s, (char)kind);
+    t_putc(s, (char)id); t_putc(s, (char)(id >> 8)); t_putc(s, (char)(id >> 16)); t_putc(s, (char)(id >> 24));
+    t_putc(s, (char)nlen); t_putc(s, (char)(nlen >> 8));
+    for (u32 i = 0; i < nlen; i++) t_putc(s, name[i]);
+    for (u32 i = 0; i < blen; i++) t_putc(s, (char)body[i]);
+}
+
+static void ctl_err(term_session *s, u32 id, const char *msg)
+{
+    u32 n = 0; while (msg[n]) n++;
+    ctl_send(s, CTL_ERR, id, "error", (const u8 *)msg, n);
+}
+
+/* submit: the frame body is a whole .ebtask package. Build a text from
+ * it (with room for the answer the desk writes back), let the manifest
+ * drive the policy, and hand it to the desk. The task is held on the
+ * session so a later 'result' can read the folded answer; the handle in
+ * the reply names it. */
+static void ctl_submit(term_session *s, u32 id, const u8 *body, u32 blen)
+{
+    if (blen == 0) { ctl_err(s, id, "empty package"); return; }
+
+    object *t = obj_create(TYPE_TEXT, blen + 129, 0);   /* +room for "= <answer>" */
+    if (!t) { ctl_err(s, id, "out of memory"); return; }
+    u8 *d = (u8 *)obj_data(t);
+    memcpy(d, body, blen);
+    d[blen] = 0;
+    obj_touch(t);
+
+    ebtask_spec spec;
+    ebtask_parse(body, blen, &spec);
+    object *in_obj = NULL;
+    if (spec.input[0]) {
+        spot in;
+        if (!resolve(s, spec.input, &in) || !(in.r & CAP_READ)) { obj_release(t); ctl_err(s, id, "input not found"); return; }
+        in_obj = in.o;
+    }
+
+    if (!pipe_ask_full(t, true, in_obj, false, 0)) { obj_release(t); ctl_err(s, id, "the desk would not take it"); return; }
+
+    u32 h = ++s->cjob_seq;
+    u32 slot = h & 3u;
+    if (s->cjob[slot]) obj_release(s->cjob[slot]);
+    s->cjob[slot] = t;               /* keep the obj_create reference; the desk holds its own */
+    s->cjob_id[slot] = h;
+
+    char b[48]; u32 k = 0;
+    k += ctl_str(b + k, "ok=1\nhandle="); k += ctl_dec(b + k, h); b[k++] = '\n';
+    ctl_send(s, CTL_RESP, id, "submit", (const u8 *)b, k);
+}
+
+/* result: the body is a submit handle in decimal. Reads the held task's
+ * last "= " line -- the folded answer the desk wrote back -- or reports
+ * the job still pending. */
+static void ctl_result(term_session *s, u32 id, const u8 *body, u32 blen)
+{
+    u32 h = 0;
+    for (u32 i = 0; i < blen; i++) { char c = (char)body[i]; if (c < '0' || c > '9') break; h = h * 10u + (u32)(c - '0'); }
+    if (h == 0) { ctl_err(s, id, "result needs a handle"); return; }
+    u32 slot = h & 3u;
+    if (!s->cjob[slot] || s->cjob_id[slot] != h) { ctl_err(s, id, "unknown handle"); return; }
+
+    object *t = s->cjob[slot];
+    const u8 *d = (const u8 *)obj_data(t);
+    u64 size = obj_size(t);
+    u32 len = 0; if (d) while (len < size && d[len]) len++;
+
+    const u8 *ans = NULL; u32 alen = 0;
+    for (u32 i = 0; i + 1 < len; i++)
+        if ((i == 0 || d[i - 1] == '\n') && d[i] == '=' && d[i + 1] == ' ') {
+            u32 j = i + 2; while (j < len && d[j] != '\n') j++;
+            ans = d + i + 2; alen = j - (i + 2);
+        }
+
+    char b[160]; u32 k = 0;
+    if (ans) {
+        k += ctl_str(b + k, "state=done\nresult=");
+        u32 m = alen < 120 ? alen : 120;
+        for (u32 i = 0; i < m; i++) b[k++] = (char)ans[i];
+        b[k++] = '\n';
+    } else {
+        k += ctl_str(b + k, "state=pending\n");
+    }
+    ctl_send(s, CTL_RESP, id, "result", (const u8 *)b, k);
+}
+
+/* wait: the far-work events since this session's cursor -- job queued,
+ * done or failed -- one per line, the cursor advanced. A watcher sends
+ * it on its interval and sees every transition, even a job that came
+ * and went between two calls, because the desk keeps a ring. */
+static void ctl_wait(term_session *s, u32 id)
+{
+    pipe_event evs[8];
+    u32 n = pipe_events_since(&s->evcursor, evs, 8);
+    char b[1024]; u32 k = 0;
+    k += ctl_str(b + k, "count="); k += ctl_dec(b + k, n); b[k++] = '\n';
+    for (u32 i = 0; i < n; i++) {
+        const char *kn = evs[i].kind == 0 ? "queued" : evs[i].kind == 2 ? "done"
+                       : evs[i].kind == 3 ? "failed" : "running";
+        k += ctl_str(b + k, "seq=");   k += ctl_dec(b + k, evs[i].seq);
+        k += ctl_str(b + k, " no=");   k += ctl_dec(b + k, evs[i].no);
+        k += ctl_str(b + k, " kind="); k += ctl_str(b + k, kn);
+        if (evs[i].text[0]) { k += ctl_str(b + k, " text="); k += ctl_str(b + k, evs[i].text); }
+        b[k++] = '\n';
+    }
+    ctl_send(s, CTL_RESP, id, "wait", (const u8 *)b, k);
+}
+
+/* log: the tail of the journal. The body is an optional line count in
+ * decimal (default 20, capped at 100); the reply body is the raw lines,
+ * bounded so one frame holds them. */
+static void ctl_log(term_session *s, u32 id, const u8 *body, u32 blen)
+{
+    u32 want = 0;
+    for (u32 i = 0; i < blen; i++) { char c = (char)body[i]; if (c < '0' || c > '9') break; want = want * 10u + (u32)(c - '0'); }
+    if (want == 0 || want > 100) want = 20;
+
+    object *j = journal_object();
+    const u8 *d = j ? (const u8 *)obj_data(j) : NULL;
+    u64 size = j ? obj_size(j) : 0;
+    u32 len = 0; if (d) while (len < size && d[len]) len++;
+    if (!d || len == 0) { ctl_send(s, CTL_RESP, id, "log", (const u8 *)"", 0); return; }
+
+    u32 end = len; if (d[end - 1] == '\n') end--;
+    u32 nl = 0, start = 0;
+    for (u32 i = end; i > 0; i--)
+        if (d[i - 1] == '\n') { nl++; if (nl >= want) { start = i; break; } }
+
+    if (len - start > 1400u) {              /* keep the newest, aligned to a line */
+        start = len - 1400u;
+        while (start < len && d[start] != '\n') start++;
+        if (start < len) start++;
+    }
+    ctl_send(s, CTL_RESP, id, "log", d + start, len - start);
+}
+
+/* Push far-work events to a subscribed session as they occur -- called
+ * from the door's service tick, not from a request. Writes one event
+ * frame per new event and answers how many, so the caller flushes. */
+u32 term_control_pump(term_session *s)
+{
+    if (!s || !s->used || !s->control || !s->pushing) return 0;
+    pipe_event evs[8];
+    u32 n = pipe_events_since(&s->evcursor, evs, 8);
+    for (u32 i = 0; i < n; i++) {
+        const char *kn = evs[i].kind == 0 ? "queued" : evs[i].kind == 2 ? "done"
+                       : evs[i].kind == 3 ? "failed" : "running";
+        char b[128]; u32 k = 0;
+        k += ctl_str(b + k, "seq=");   k += ctl_dec(b + k, evs[i].seq);
+        k += ctl_str(b + k, " no=");   k += ctl_dec(b + k, evs[i].no);
+        k += ctl_str(b + k, " kind="); k += ctl_str(b + k, kn);
+        if (evs[i].text[0]) { k += ctl_str(b + k, " text="); k += ctl_str(b + k, evs[i].text); }
+        ctl_send(s, CTL_EVENT, 0, "job", (const u8 *)b, k);
+    }
+    return n;
+}
+
+/* peers: the cluster as this node has heard it -- one line per machine
+ * with its address, name, version and whether it takes work. */
+static void ctl_peers(term_session *s, u32 id)
+{
+    char b[1024]; u32 k = 0;
+    u32 n = pipe_peer_count();
+    k += ctl_str(b + k, "count="); k += ctl_dec(b + k, n); b[k++] = '\n';
+    for (u32 i = 0; i < n && k < (u32)sizeof(b) - 160; i++) {
+        u8 ip[4]; char nm[24], ver[24]; bool works = false; u32 fm = 0, ago = 0, up = 0, jb = 0;
+        if (!pipe_peer_at(i, ip, nm, ver, &works, &fm, &ago, &up, &jb)) break;
+        k += ctl_str(b + k, "ip="); k += ctl_dec(b + k, ip[0]); b[k++] = '.'; k += ctl_dec(b + k, ip[1]);
+        b[k++] = '.'; k += ctl_dec(b + k, ip[2]); b[k++] = '.'; k += ctl_dec(b + k, ip[3]);
+        k += ctl_str(b + k, " name=");     k += ctl_str(b + k, nm[0] ? nm : "-");
+        k += ctl_str(b + k, " version=");  k += ctl_str(b + k, ver[0] ? ver : "-");
+        k += ctl_str(b + k, " jobs=");     k += ctl_dec(b + k, jb);
+        k += ctl_str(b + k, " works=");    k += ctl_str(b + k, works ? "yes" : "no");
+        k += ctl_str(b + k, " free_mib="); k += ctl_dec(b + k, fm);
+        k += ctl_str(b + k, " seen_s=");   k += ctl_dec(b + k, ago);
+        k += ctl_str(b + k, " up_min=");   k += ctl_dec(b + k, up);
+        b[k++] = '\n';
+    }
+    ctl_send(s, CTL_RESP, id, "peers", (const u8 *)b, k);
+}
+
+/* cluster: this node's own status and every peer it has heard, each
+ * with its live job count -- the cluster as one connection sees it. A
+ * scan is poked first so the peers refresh into the heard table. */
+static void ctl_cluster(term_session *s, u32 id)
+{
+    pipe_scan();
+    char b[1024]; u32 k = 0;
+    u32 n = pipe_peer_count();
+    k += ctl_str(b + k, "peers="); k += ctl_dec(b + k, n); b[k++] = '\n';
+    k += ctl_str(b + k, "self version="); k += ctl_str(b + k, erebus_version);
+    k += ctl_str(b + k, " uptime_s="); k += ctl_dec(b + k, time_ns() / 1000000000ULL);
+    k += ctl_str(b + k, " jobs="); k += ctl_dec(b + k, pipe_desk_count());
+    b[k++] = '\n';
+    for (u32 i = 0; i < n && k < (u32)sizeof(b) - 200; i++) {
+        u8 ip[4]; char nm[24], ver[24]; bool works = false; u32 fm = 0, ago = 0, up = 0, jb = 0;
+        if (!pipe_peer_at(i, ip, nm, ver, &works, &fm, &ago, &up, &jb)) break;
+        k += ctl_str(b + k, "peer ip="); k += ctl_dec(b + k, ip[0]); b[k++] = '.'; k += ctl_dec(b + k, ip[1]);
+        b[k++] = '.'; k += ctl_dec(b + k, ip[2]); b[k++] = '.'; k += ctl_dec(b + k, ip[3]);
+        k += ctl_str(b + k, " name=");    k += ctl_str(b + k, nm[0] ? nm : "-");
+        k += ctl_str(b + k, " version="); k += ctl_str(b + k, ver[0] ? ver : "-");
+        k += ctl_str(b + k, " jobs=");    k += ctl_dec(b + k, jb);
+        k += ctl_str(b + k, " works=");   k += ctl_str(b + k, works ? "yes" : "no");
+        k += ctl_str(b + k, " seen_s=");  k += ctl_dec(b + k, ago);
+        b[k++] = '\n';
+    }
+    ctl_send(s, CTL_RESP, id, "cluster", (const u8 *)b, k);
+}
+
+static void ctl_frame(term_session *s, const u8 *f, u32 flen)
+{
+    if (flen < 7) { ctl_err(s, 0, "short frame"); return; }
+    u32 id   = ctl_u32(f + 1);
+    u16 nlen = ctl_u16(f + 5);
+    if (7u + nlen > flen) { ctl_err(s, id, "bad name length"); return; }
+    const char *name = (const char *)(f + 7);
+    const u8   *body = f + 7 + nlen;
+    u32         blen = flen - 7 - nlen;
+
+    if (ctl_name(name, nlen, "hello")) {
+        char b[96]; u32 k = 0;
+        k += ctl_str(b + k, "proto=1\nnode="); k += ctl_str(b + k, erebus_version); b[k++] = '\n';
+        ctl_send(s, CTL_RESP, id, "hello", (const u8 *)b, k);
+    } else if (ctl_name(name, nlen, "status")) {
+        char b[192]; u32 k = 0;
+        k += ctl_str(b + k, "version="); k += ctl_str(b + k, erebus_version); b[k++] = '\n';
+        k += ctl_str(b + k, "proto=1\n");
+        k += ctl_str(b + k, "uptime_s="); k += ctl_dec(b + k, time_ns() / 1000000000ULL); b[k++] = '\n';
+        k += ctl_str(b + k, "jobs="); k += ctl_dec(b + k, pipe_desk_count()); b[k++] = '\n';
+        ctl_send(s, CTL_RESP, id, "status", (const u8 *)b, k);
+    } else if (ctl_name(name, nlen, "jobs")) {
+        char b[640]; u32 k = 0;
+        u32 n = pipe_desk_count();
+        k += ctl_str(b + k, "count="); k += ctl_dec(b + k, n); b[k++] = '\n';
+        for (u32 i = 0; i < n && k < (u32)sizeof(b) - 160; i++) {
+            u32 no = 0, pieces = 0, parts = 0, done = 0, quorum = 0; u8 st = 0, comb = 0; char nm[40];
+            if (!pipe_desk_at(i, &no, nm, &st, &pieces, &parts, &done, &quorum, &comb)) break;
+            k += ctl_str(b + k, "no=");       k += ctl_dec(b + k, no);
+            k += ctl_str(b + k, " name=");    k += ctl_str(b + k, nm[0] ? nm : "-");
+            k += ctl_str(b + k, " state=");   k += ctl_str(b + k, st == 1 ? "scan" : st == 2 ? "run" : "fresh"); /* DJ_FRESH/SCAN/RUN */
+            k += ctl_str(b + k, " pieces=");  k += ctl_dec(b + k, pieces);
+            k += ctl_str(b + k, " parts=");   k += ctl_dec(b + k, parts);
+            k += ctl_str(b + k, " done=");    k += ctl_dec(b + k, done);
+            k += ctl_str(b + k, " quorum=");  k += ctl_dec(b + k, quorum);
+            k += ctl_str(b + k, " combine="); k += ctl_str(b + k, ctl_combine(comb));
+            b[k++] = '\n';
+        }
+        ctl_send(s, CTL_RESP, id, "jobs", (const u8 *)b, k);
+    } else if (ctl_name(name, nlen, "submit")) {
+        ctl_submit(s, id, body, blen);
+    } else if (ctl_name(name, nlen, "result")) {
+        ctl_result(s, id, body, blen);
+    } else if (ctl_name(name, nlen, "wait")) {
+        ctl_wait(s, id);
+    } else if (ctl_name(name, nlen, "log")) {
+        ctl_log(s, id, body, blen);
+    } else if (ctl_name(name, nlen, "peers")) {
+        ctl_peers(s, id);
+    } else if (ctl_name(name, nlen, "cluster")) {
+        ctl_cluster(s, id);
+    } else if (ctl_name(name, nlen, "subscribe")) {
+        s->pushing = true; s->evcursor = pipe_event_seq();
+        ctl_send(s, CTL_RESP, id, "subscribe", (const u8 *)"ok=1\n", 5);
+    } else if (ctl_name(name, nlen, "unsubscribe")) {
+        s->pushing = false;
+        ctl_send(s, CTL_RESP, id, "unsubscribe", (const u8 *)"ok=1\n", 5);
+    } else {
+        ctl_err(s, id, "unknown method");
+    }
+}
+
+static u32 ctl_take(term_session *s, const u8 *d, u32 n)
+{
+    u32 room = (u32)sizeof(s->cbuf) - s->clen;
+    u32 take = n < room ? n : room;
+    if (take == 0) { s->clen = 0; ctl_err(s, 0, "frame too large"); return n ? 1 : 0; }
+    memcpy(s->cbuf + s->clen, d, take);
+    s->clen += take;
+
+    u32 off = 0;
+    while (s->clen - off >= 4) {
+        u32 flen = ctl_u32(s->cbuf + off);
+        if (flen == 0 || flen > (u32)sizeof(s->cbuf) - 4) { ctl_err(s, 0, "bad frame length"); s->clen = 0; return take; }
+        if (s->clen - off < 4 + flen) break;
+        ctl_frame(s, s->cbuf + off + 4, flen);
+        off += 4 + flen;
+    }
+    if (off > 0) { memmove(s->cbuf, s->cbuf + off, s->clen - off); s->clen -= off; }
+    return take;
+}
+
+static void cmd_control(term_session *s)
+{
+    s->control = true;
+    s->clen = 0;
+    s->evcursor = pipe_event_seq();   /* watch from now, not the whole history */
+    char b[96]; u32 k = 0;
+    k += ctl_str(b + k, "proto=1\nnode="); k += ctl_str(b + k, erebus_version); b[k++] = '\n';
+    ctl_send(s, CTL_EVENT, 0, "hello", (const u8 *)b, k);
+}
+
+bool term_control(term_session *s) { return s && s->used && s->control; }
+
 bool term_taking(term_session *s)
 {
-    return s && s->used && s->take_o != NULL;
+    return s && s->used && (s->control || s->take_o != NULL);
 }
 
 u32 term_take_bytes(term_session *s, const u8 *d, u32 n)
 {
-    if (!s || !s->take_o || !n) return 0;
+    if (!s || !n) return 0;
+    if (s->control) return ctl_take(s, d, n);
+    if (!s->take_o) return 0;
     u64 done = s->take_size - s->take_left;
     u32 take = (u64)n < s->take_left ? n : (u32)s->take_left;
     u8 *dst = (u8 *)obj_data(s->take_o);
@@ -1291,6 +1660,29 @@ static void cmd_restart(term_session *s)
 {
     t_say(s, "restarting.");
     system_restart();
+}
+
+static void cmd_off(term_session *s)
+{
+    t_say(s, "shutting down.");
+    system_off();
+    t_say(s, "the firmware did not power off; the machine is still here.");
+}
+
+/* cluster: this node and the peers it has heard, to the console (and the
+ * serial log) -- the operator's view of the far-work cluster. */
+static void cmd_cluster(term_session *s)
+{
+    pipe_scan();
+    u32 n = pipe_peer_count();
+    kprintf("cluster: self %s, %u peer(s)\n", erebus_version, n);
+    t_say(s, "cluster (also on the console):");
+    for (u32 i = 0; i < n; i++) {
+        u8 ip[4]; char nm[24], ver[24]; bool works = false; u32 fm = 0, ago = 0, up = 0, jb = 0;
+        if (!pipe_peer_at(i, ip, nm, ver, &works, &fm, &ago, &up, &jb)) break;
+        kprintf("cluster:  peer %u.%u.%u.%u %s version %s jobs %u %s\n",
+                ip[0], ip[1], ip[2], ip[3], nm[0] ? nm : "-", ver[0] ? ver : "-", jb, works ? "works" : "-");
+    }
 }
 
 static void cmd_write_out(term_session *s, const char *what)
@@ -2401,6 +2793,9 @@ void term_line(term_session *s, const char *line)
     else if (word_starts(line, "take in", &rest)) cmd_take_in(s, rest);
     else if (word_starts(line, "install", &rest)) cmd_install(s, rest);
     else if (word_starts(line, "restart", NULL))  cmd_restart(s);
+    else if (word_starts(line, "off", NULL))      cmd_off(s);
+    else if (word_starts(line, "cluster", NULL))  cmd_cluster(s);
+    else if (word_starts(line, "control", NULL))  cmd_control(s);
     else if (word_starts(line, "disks", NULL))    settle_disks(say_to, s);
     else if (word_starts(line, "settle", &rest))  settle_plan(rest, say_to, s);
     else if (word_starts(line, "yes", NULL))      settle_yes(say_to, s);

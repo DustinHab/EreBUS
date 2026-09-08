@@ -352,6 +352,7 @@ typedef struct {
     char version[24];
     u64  seen_ns;
     u16  up_min;                     /* the node's uptime in minutes, as it said */
+    u32  jobs;                       /* the node's live job count, as it announced */
     bool quiet_said;                 /* the journal has said it went quiet */
 } heardrec;
 
@@ -490,6 +491,7 @@ static void say_who(u8 kind, const u8 dst[4], u16 dport)
     wr32(pkt + 36, (u32)(pmm_free_frames() / 256));
     ssh_identity(pkt + 40);
     for (u32 i = 0; i < 23 && erebus_version[i]; i++) pkt[72 + i] = (u8)erebus_version[i];
+    pkt[95] = (u8)pipe_desk_count();   /* live job count at byte 95; older readers ignore it */
 
     u8 self[4] = { 0, 0, 0, 0 };
     net_own_address(self);
@@ -922,6 +924,109 @@ typedef struct {
 } desk_job;
 
 static desk_job desk[DESK_JOBS];
+
+u32 pipe_desk_count(void)
+{
+    u32 c = 0;
+    for (u32 i = 0; i < DESK_JOBS; i++) if (desk[i].used) c++;
+    return c;
+}
+
+bool pipe_desk_at(u32 idx, u32 *no, char name[40], u8 *state,
+                  u32 *pieces, u32 *parts, u32 *done, u32 *quorum, u8 *combine)
+{
+    u32 c = 0;
+    for (u32 i = 0; i < DESK_JOBS; i++) {
+        if (!desk[i].used) continue;
+        if (c++ != idx) continue;
+        desk_job *j = &desk[i];
+        if (no)      *no = j->no;
+        if (state)   *state = j->state;
+        if (pieces)  *pieces = j->pieces;
+        if (parts)   *parts = j->parts;
+        if (quorum)  *quorum = j->quorum;
+        if (combine) *combine = j->combine;
+        if (done) {
+            u32 d = 0;
+            for (u32 p = 0; p < j->parts && p < PART_MAX; p++)
+                if (j->pstate[p] == P_DONE) d++;
+            *done = d;
+        }
+        if (name) {
+            const char *nm = j->task ? obj_name(j->task) : NULL;
+            u32 k = 0; if (nm) while (nm[k] && k < 39) { name[k] = nm[k]; k++; }
+            name[k] = 0;
+        }
+        return true;
+    }
+    return false;
+}
+
+/* The far-work event ring: the desk appends here on the transitions a
+ * watcher cares about; a control session drains it from its own cursor.
+ * One writer (the net thread), readers on the door threads; the seq is
+ * published last so a reader that sees it has the rest of the record. */
+#define EVENT_RING 64
+static pipe_event events[EVENT_RING];
+static u64        event_seq;                 /* last assigned, 0 = none */
+
+static void desk_event(u32 no, u8 kind, const char *text)
+{
+    u64 s = event_seq + 1;
+    pipe_event *e = &events[s % EVENT_RING];
+    e->no = no; e->kind = kind;
+    u32 k = 0; if (text) while (text[k] && k < 47) { e->text[k] = text[k]; k++; }
+    e->text[k] = 0;
+    e->seq = s;
+    event_seq = s;
+}
+
+u64 pipe_event_seq(void) { return event_seq; }
+
+u32 pipe_events_since(u64 *cursor, pipe_event *out, u32 max)
+{
+    u64 top = event_seq;
+    u64 start = (cursor ? *cursor : 0) + 1;
+    if (top >= EVENT_RING && start + EVENT_RING <= top + 1)
+        start = top - EVENT_RING + 1;        /* the oldest still held */
+    u32 n = 0;
+    for (u64 s = start; s <= top && n < max; s++) {
+        pipe_event *e = &events[s % EVENT_RING];
+        if (e->seq != s) continue;           /* overwritten since */
+        out[n++] = *e;
+    }
+    if (n > 0 && cursor) *cursor = out[n - 1].seq;
+    return n;
+}
+
+u32 pipe_peer_count(void)
+{
+    u32 c = 0;
+    for (u32 i = 0; i < HEARD_MAX; i++) if (heard[i].used) c++;
+    return c;
+}
+
+bool pipe_peer_at(u32 idx, u8 ip[4], char name[24], char version[24],
+                  bool *works, u32 *free_mib, u32 *seen_ago_s, u32 *up_min, u32 *jobs)
+{
+    u64 now = time_ns();
+    u32 c = 0;
+    for (u32 i = 0; i < HEARD_MAX; i++) {
+        if (!heard[i].used) continue;
+        if (c++ != idx) continue;
+        heardrec *h = &heard[i];
+        if (ip) for (u32 k = 0; k < 4; k++) ip[k] = h->ip[k];
+        if (name)    { u32 k = 0; while (h->name[k] && k < 23) { name[k] = h->name[k]; k++; } name[k] = 0; }
+        if (version) { u32 k = 0; while (h->version[k] && k < 23) { version[k] = h->version[k]; k++; } version[k] = 0; }
+        if (works)      *works = h->works;
+        if (free_mib)   *free_mib = h->free_mib;
+        if (seen_ago_s) *seen_ago_s = (u32)((now - h->seen_ns) / SECOND);
+        if (up_min)     *up_min = h->up_min;
+        if (jobs)       *jobs = h->jobs;
+        return true;
+    }
+    return false;
+}
 static u32 desk_no;
 
 static struct {
@@ -1101,6 +1206,7 @@ static void job_end(desk_job *j, bool ok, const char *text,
 
         if (j->writable) task_append(j->task, text);
         else             lay_answer(j->no, (const u8 *)text);
+        desk_event(j->no, 2, text);   /* done */
     } else {
         char line[64];
         u32 at = put(line, 0, ": ");
@@ -1128,6 +1234,7 @@ static void job_end(desk_job *j, bool ok, const char *text,
         fat = put(fb, fat, ")");
         fb[fat] = 0;
         if (j->writable) task_append(j->task, fb);
+        desk_event(j->no, 3, why);   /* failed */
     }
 
     desk_clear_fasks((u32)(j - desk));
@@ -1473,6 +1580,7 @@ static bool ask_take(object *o, bool writable, object *input,
         j->input_len = (u32)isz;
     }
     j->used = true;
+    desk_event(j->no, 0, NULL);   /* queued */
 
     if (quorum) {
         char line[48];
@@ -2542,6 +2650,7 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
                 n++;
             }
             h->version[n] = 0;
+            h->jobs = p[95];
         }
         if (len >= 97) {
             u32 n = p[96];

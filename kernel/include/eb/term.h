@@ -75,6 +75,17 @@ bool term_secret(term_session *s);        /* the line being gathered is a passph
  * answers how many it took; the rest are words again. */
 bool term_taking(term_session *s);
 u32  term_take_bytes(term_session *s, const u8 *d, u32 n);
+
+/* The control channel: 'control' switches a door session to a binary
+ * framed protocol (a program on the other side, not a person). While
+ * term_control says so, the door must send the transcript back after
+ * every batch of bytes, not only when a receive finishes. */
+bool term_control(term_session *s);
+
+/* Push any new far-work events to a subscribed control session as
+ * frames; returns how many, so the door flushes when it is more than
+ * zero. Called from the door's service tick. */
+u32 term_control_pump(term_session *s);
 void term_key(term_session *s, char c);
 void term_rub(term_session *s);
 void term_clear_line(term_session *s);

@@ -786,7 +786,7 @@ static void on_keys(const u8 *d, u32 n)
                 pw_u32(ssh.rid);
                 pw_u32(used);
                 send_packet();
-                if (!term_taking(ssh.ts)) flush_transcript();
+                if (!term_taking(ssh.ts) || term_control(ssh.ts)) flush_transcript();
                 i += used - 1;
                 continue;
             }
@@ -1176,6 +1176,12 @@ static void ssh_service_one(void)
         visit_end("packet too large");
         return;
     }
+
+    /* Push far-work events to a subscribed control session without it
+     * having to ask -- the door's own turn carries them out. */
+    if (ssh.stage == ST_LIVE && ssh.ts && term_control(ssh.ts) &&
+        term_control_pump(ssh.ts))
+        flush_transcript();
 
     /* Patience has an end: a visit that never gets to the terminal,
      * and a close the visitor never answers. */
