@@ -1,0 +1,12 @@
+wait
+set a m
+wait
+set b m
+set s 0
+add s a
+add a 1
+if a > b
+skip 1
+back 4
+answer s
+stop
