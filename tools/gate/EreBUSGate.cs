@@ -2,15 +2,15 @@
  * EreBUS Gate -- a Windows front-end that packages a task and feeds it into
  * an EreBUS node over ssh, where the desk distributes it among the machines.
  *
- * It builds a .ebtask package (a "key | value" manifest, a "--" line, then the
- * payload) from the fields and pipes it into the node's terminal through the
- * built-in OpenSSH client: "receive <n> bytes as job", the package, "submit
- * job", then reads the task back so the folded result shows.
+ * Builds a .ebtask package (a "key | value" manifest, a "--" line, then the
+ * payload) from the fields and the editor, and pipes it into the node's
+ * terminal over the built-in OpenSSH client: "receive <n> bytes as job", the
+ * package, "submit job", then reads the task back so the folded result shows.
  *
  * No SDK: build with the .NET Framework compiler.
  *   tools\gate\build.cmd            -> build\gate\EreBUS-Gate.exe
- * No arguments opens the window; --headless drives the same core from a
- * command line; --shot <file.png> renders the window to an image.
+ * No arguments opens the window; --headless drives the core from a command
+ * line; --shot <file.png> renders the window to an image.
  */
 using System;
 using System.Collections.Generic;
@@ -26,12 +26,12 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyTitle("EreBUS Gate")]
 [assembly: System.Reflection.AssemblyProduct("EreBUS Gate")]
 [assembly: System.Reflection.AssemblyCompany("github.com/DustinHab/EreBUS")]
-[assembly: System.Reflection.AssemblyVersion("0.1.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.1.0")]
+[assembly: System.Reflection.AssemblyVersion("0.1.2.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.1.2.0")]
 
 namespace EreBUSGate
 {
-    static class Ver { public const string V = "0.1.1"; }
+    static class Ver { public const string V = "0.1.2"; }
 
     static class Look
     {
@@ -48,6 +48,7 @@ namespace EreBUSGate
         public static Font Mono  = new Font("Consolas", 9.5f,  FontStyle.Regular, GraphicsUnit.Point);
         public static Font Small = new Font("Consolas", 8.25f, FontStyle.Regular, GraphicsUnit.Point);
         public static Font Head  = new Font("Consolas", 22f,   FontStyle.Bold,    GraphicsUnit.Point);
+        public static Font Res   = new Font("Consolas", 12f,   FontStyle.Bold,    GraphicsUnit.Point);
 
         public static string Spaced(string s)
         {
@@ -152,12 +153,8 @@ namespace EreBUSGate
             return m.ToString();
         }
 
-        public static byte[] BuildPackage(Spec s, out string err)
+        public static byte[] Package(Spec s, byte[] payload)
         {
-            err = null;
-            byte[] payload;
-            try { payload = File.ReadAllBytes(s.Source); }
-            catch (Exception e) { err = "cannot read source: " + e.Message; return null; }
             payload = NormalizeLf(payload);
             byte[] manifest = new UTF8Encoding(false).GetBytes(Manifest(s));
             var ms = new MemoryStream();
@@ -165,6 +162,15 @@ namespace EreBUSGate
             ms.Write(payload, 0, payload.Length);
             if (payload.Length == 0 || payload[payload.Length - 1] != (byte)'\n') ms.WriteByte((byte)'\n');
             return ms.ToArray();
+        }
+
+        public static byte[] BuildPackage(Spec s, out string err)
+        {
+            err = null;
+            byte[] payload;
+            try { payload = File.ReadAllBytes(s.Source); }
+            catch (Exception e) { err = "cannot read source: " + e.Message; return null; }
+            return Package(s, payload);
         }
 
         static void Write(Stream st, string ascii) { byte[] b = Encoding.ASCII.GetBytes(ascii); st.Write(b, 0, b.Length); }
@@ -221,9 +227,25 @@ namespace EreBUSGate
             if (!p.WaitForExit(15000)) { try { p.Kill(); } catch { } }
             return p.HasExited ? p.ExitCode : 0;
         }
+
+        public static int Scan(Spec s, Action<string> log)
+        {
+            Process p = StartSsh(s, log); if (p == null) return -1;
+            try
+            {
+                var stdin = p.StandardInput.BaseStream;
+                Write(stdin, "scan\n"); stdin.Flush();
+                Thread.Sleep(4000);          /* a scan calls out for a few seconds */
+                Write(stdin, "found\nnodes\n"); stdin.Flush();
+                Thread.Sleep(1200);
+                stdin.Close();
+            }
+            catch (Exception e) { log("wire broke: " + e.Message); }
+            if (!p.WaitForExit(20000)) { try { p.Kill(); } catch { } }
+            return p.HasExited ? p.ExitCode : 0;
+        }
     }
 
-    /* A checkbox drawn in the shell's palette -- no white system glyph. */
     class Toggle : Label
     {
         bool on; string label; public event EventHandler Changed;
@@ -242,12 +264,12 @@ namespace EreBUSGate
         [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
         static extern int SetWindowTheme(IntPtr h, string app, string id);
 
-        TextBox tSource, tNode, tKey, tLo, tHi, tPieces, tAcross, tBudget, tInputName, tName, tPreview, tPort, tWait;
+        TextBox tSource, tNode, tKey, tLo, tHi, tPieces, tAcross, tBudget, tInputName, tName, tEditor, tPort, tWait, tResult;
         Toggle kSplit, kRecipe;
         Button[] combineBtns; string combineSel = "sum";
         ListBox nodeList;
         RichTextBox log;
-        Label planLabel;
+        Label planLabel, gaugeLabel;
         Button send;
         ToolTip tips = new ToolTip();
         List<Control> bordered = new List<Control>();
@@ -262,7 +284,7 @@ namespace EreBUSGate
             this.FormBorderStyle = FormBorderStyle.None;
             this.StartPosition = FormStartPosition.CenterScreen;
             this.BackColor = Look.Ground; this.ForeColor = Look.Ink; this.Font = Look.Body;
-            this.ClientSize = new Size(1000, 752);
+            this.ClientSize = new Size(1000, 760);
             this.AllowDrop = true; this.KeyPreview = true;
             this.Paint += delegate(object o, PaintEventArgs e)
             {
@@ -270,7 +292,7 @@ namespace EreBUSGate
                 using (var pen = new Pen(Look.Edge))
                 {
                     g.DrawRectangle(pen, 0, 0, this.Width - 1, this.Height - 1);
-                    g.DrawLine(pen, 492, 116, 492, this.Height - 24);
+                    g.DrawLine(pen, 492, 116, 492, this.Height - 16);
                     foreach (Control c in bordered)
                         if (c.Visible) g.DrawRectangle(pen, c.Left - 1, c.Top - 1, c.Width + 1, c.Height + 1);
                 }
@@ -279,9 +301,13 @@ namespace EreBUSGate
             this.DragDrop += delegate(object o, DragEventArgs e)
             {
                 string[] f = (string[])e.Data.GetData(DataFormats.FileDrop);
-                if (f != null && f.Length > 0) { tSource.Text = f[0]; if (f[0].EndsWith(".recipe", StringComparison.OrdinalIgnoreCase)) kRecipe.Checked = true; }
+                if (f != null && f.Length > 0) LoadSource(f[0]);
             };
-            this.KeyDown += delegate(object o, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) this.Close(); };
+            this.KeyDown += delegate(object o, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Escape) this.Close();
+                if (e.Control && e.KeyCode == Keys.Enter) DoSend();
+            };
             this.FormClosing += delegate { Persist(); };
 
             BuildHeader();
@@ -303,8 +329,7 @@ namespace EreBUSGate
                 var g = e.Graphics;
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
                 using (var b = new SolidBrush(Look.Accent)) g.DrawString("EreBUS Gate", Look.Head, b, 22, 20);
-                using (var b = new SolidBrush(Look.Dim))
-                    g.DrawString("v " + Ver.V, Look.Small, b, 25, 66);
+                using (var b = new SolidBrush(Look.Dim)) g.DrawString("v " + Ver.V, Look.Small, b, 25, 66);
                 using (var pen = new Pen(Look.Edge)) g.DrawLine(pen, 22, 92, head.Width - 22, 92);
             };
             head.MouseDown += delegate(object o, MouseEventArgs e) { dragging = true; dragFrom = e.Location; };
@@ -382,13 +407,13 @@ namespace EreBUSGate
             int x = 24, y = 116, w = 444;
             Section("task", x, y); y += 30;
 
-            Field("source", x, y, w);
-            tSource = Text_(x, y + 15, w - 84, "c source or recipe; drag a file here");
+            Field("source file", x, y, w);
+            tSource = Text_(x, y + 15, w - 84, "a file to load into the editor; or type in the editor below");
             var browse = Btn("browse", x + w - 78, y + 14, 78, 26, false);
             browse.Click += delegate
             {
                 var d = new OpenFileDialog(); d.Filter = "programs and recipes|*.c;*.recipe;*.txt|all files|*.*";
-                if (d.ShowDialog() == DialogResult.OK) { tSource.Text = d.FileName; if (d.FileName.EndsWith(".recipe", StringComparison.OrdinalIgnoreCase)) kRecipe.Checked = true; }
+                if (d.ShowDialog() == DialogResult.OK) LoadSource(d.FileName);
             };
             y += 46;
 
@@ -424,23 +449,27 @@ namespace EreBUSGate
             y += 46;
 
             planLabel = new Label(); planLabel.AutoSize = false; planLabel.Location = new Point(x, y);
-            planLabel.Size = new Size(w, 32); planLabel.Font = Look.Small; planLabel.ForeColor = Look.Dim;
+            planLabel.Size = new Size(w - 120, 30); planLabel.Font = Look.Small; planLabel.ForeColor = Look.Dim;
             this.Controls.Add(planLabel);
-            y += 36;
+            gaugeLabel = new Label(); gaugeLabel.AutoSize = false; gaugeLabel.Location = new Point(x + w - 116, y);
+            gaugeLabel.Size = new Size(116, 15); gaugeLabel.Font = Look.Small; gaugeLabel.ForeColor = Look.Dim;
+            gaugeLabel.TextAlign = ContentAlignment.TopRight; this.Controls.Add(gaugeLabel);
+            y += 34;
 
-            Field("package", x, y, w);
-            tPreview = new TextBox();
-            tPreview.Multiline = true; tPreview.ReadOnly = true; tPreview.ScrollBars = ScrollBars.Vertical;
-            tPreview.BorderStyle = BorderStyle.None; tPreview.BackColor = Look.Panel; tPreview.ForeColor = Look.Dim;
-            tPreview.Font = Look.Mono; tPreview.WordWrap = false;
-            tPreview.Location = new Point(x + 2, y + 17); tPreview.Size = new Size(w - 4, this.ClientSize.Height - (y + 17) - 58);
-            var pv = new Panel(); pv.BackColor = Look.Panel; pv.Location = new Point(x, y + 15);
-            pv.Size = new Size(w, this.ClientSize.Height - (y + 15) - 54); pv.Controls.Add(tPreview);
-            this.Controls.Add(pv); bordered.Add(pv); Dark(tPreview);
+            Field("editor  --  the payload sent to the machines", x, y, w);
+            tEditor = new TextBox();
+            tEditor.Multiline = true; tEditor.AcceptsTab = true; tEditor.ScrollBars = ScrollBars.Both;
+            tEditor.BorderStyle = BorderStyle.None; tEditor.BackColor = Look.Panel; tEditor.ForeColor = Look.Ink;
+            tEditor.Font = Look.Mono; tEditor.WordWrap = false;
+            tEditor.Location = new Point(x + 2, y + 17); tEditor.Size = new Size(w - 4, this.ClientSize.Height - (y + 17) - 54);
+            var ep = new Panel(); ep.BackColor = Look.Panel; ep.Location = new Point(x, y + 15);
+            ep.Size = new Size(w, this.ClientSize.Height - (y + 15) - 50); ep.Controls.Add(tEditor);
+            this.Controls.Add(ep); bordered.Add(ep); Dark(tEditor);
+            tEditor.TextChanged += delegate { RefreshPreview(); };
 
-            var tmplLbl = Field("templates", x, this.ClientSize.Height - 36, 80); tmplLbl.ForeColor = Look.Faint;
-            var t1 = Btn("sum of a range", x + 84, this.ClientSize.Height - 40, 156, 28, false); t1.Click += delegate { LoadTemplate("sumrange"); };
-            var t2 = Btn("count matches", x + 248, this.ClientSize.Height - 40, 150, 28, false); t2.Click += delegate { LoadTemplate("count"); };
+            var tmplLbl = Field("templates", x, this.ClientSize.Height - 34, 80); tmplLbl.ForeColor = Look.Faint;
+            var t1 = Btn("sum of a range", x + 84, this.ClientSize.Height - 38, 156, 26, false); t1.Click += delegate { LoadTemplate("sumrange"); };
+            var t2 = Btn("count matches", x + 248, this.ClientSize.Height - 38, 150, 26, false); t2.Click += delegate { LoadTemplate("count"); };
         }
 
         void SelectCombine(string name)
@@ -465,25 +494,29 @@ namespace EreBUSGate
             nodeList = new ListBox();
             nodeList.BorderStyle = BorderStyle.None; nodeList.BackColor = Look.Panel; nodeList.ForeColor = Look.Ink;
             nodeList.Font = Look.Mono; nodeList.IntegralHeight = false;
-            nodeList.Location = new Point(x + 2, y + 17); nodeList.Size = new Size(w - 4, 88);
-            var nlp = new Panel(); nlp.BackColor = Look.Panel; nlp.Location = new Point(x, y + 15); nlp.Size = new Size(w, 92);
+            nodeList.Location = new Point(x + 2, y + 17); nodeList.Size = new Size(w - 4, 72);
+            var nlp = new Panel(); nlp.BackColor = Look.Panel; nlp.Location = new Point(x, y + 15); nlp.Size = new Size(w, 76);
             nlp.Controls.Add(nodeList); this.Controls.Add(nlp); bordered.Add(nlp); Dark(nodeList);
             nodeList.DoubleClick += delegate { LoadSelectedNode(); };
             nodeList.KeyDown += delegate(object o, KeyEventArgs e) { if (e.KeyCode == Keys.Delete) RemoveSelectedNode(); };
             RefillNodeList();
-            var add = Btn("save node", x, y + 112, 150, 26, false); add.Click += delegate { SaveCurrentNode(); };
-            var del = Btn("remove", x + 158, y + 112, 90, 26, false); del.Click += delegate { RemoveSelectedNode(); };
-            var test = Btn("test", x + w - 90, y + 112, 90, 26, false); test.Click += delegate { DoProbe(); };
-            y += 152;
+            var add = Btn("save node", x, y + 96, 108, 26, false); add.Click += delegate { SaveCurrentNode(); };
+            var del = Btn("remove", x + 116, y + 96, 84, 26, false); del.Click += delegate { RemoveSelectedNode(); };
+            var test = Btn("test", x + 208, y + 96, 84, 26, false); test.Click += delegate { DoProbe(); };
+            var scan = Btn("scan", x + w - 90, y + 96, 90, 26, false); scan.Click += delegate { DoScan(); };
+            y += 134;
 
             Field("host", x, y, w - 96);
             tNode = Text_(x, y + 15, w - 152, "user@host or ssh alias; its door holds your key");
             Field("port", x + w - 88, y, 88); tPort = Text_(x + w - 88, y + 15, 88, "ssh port");
             y += 46;
             Field("key", x, y, w);
-            tKey = Text_(x, y + 15, w - 96, "private key file; blank = default keys / agent");
-            var kb = Btn("choose", x + w - 90, y + 14, 90, 26, false);
+            tKey = Text_(x, y + 15, w - 200, "private key file; blank = default keys / agent");
+            var kb = Btn("choose", x + w - 194, y + 14, 90, 26, false);
             kb.Click += delegate { var d = new OpenFileDialog(); d.Filter = "ssh key|*|all|*.*"; if (d.ShowDialog() == DialogResult.OK) tKey.Text = d.FileName; };
+            var door = Btn("door line", x + w - 98, y + 14, 98, 26, false);
+            tips.SetToolTip(door, "pick your ssh public key; the 'write door | ...' line to authorise this key is copied to the clipboard");
+            door.Click += delegate { DoDoorLine(); };
             y += 46;
 
             Field("wait", x, y, 90);
@@ -491,15 +524,26 @@ namespace EreBUSGate
             send = Btn("send", x + 116, y + 12, 200, 34, true);
             send.Click += delegate { DoSend(); };
             Btn("save package", x + 328, y + 12, w - 328, 34, false).Click += delegate { DoSave(); };
-            y += 58;
+            y += 56;
+
+            Field("result", x, y, w - 84);
+            tResult = new TextBox();
+            tResult.BorderStyle = BorderStyle.None; tResult.BackColor = Look.Field; tResult.ForeColor = Look.Accent;
+            tResult.Font = Look.Res; tResult.ReadOnly = true;
+            tResult.Location = new Point(x + 3, y + 17); tResult.Size = new Size(w - 90, 24);
+            var rp = new Panel(); rp.BackColor = Look.Field; rp.Location = new Point(x, y + 15); rp.Size = new Size(w - 84, 30);
+            rp.Controls.Add(tResult); this.Controls.Add(rp); bordered.Add(rp);
+            var copy = Btn("copy", x + w - 78, y + 15, 78, 30, false);
+            copy.Click += delegate { try { if (tResult.Text.Length > 0) Clipboard.SetText(tResult.Text); Say("result copied."); } catch { } };
+            y += 50;
 
             Field("output", x, y, w);
             log = new RichTextBox();
             log.BorderStyle = BorderStyle.None; log.BackColor = Look.Panel; log.ForeColor = Look.Ink;
             log.Font = Look.Mono; log.ReadOnly = true; log.WordWrap = false; log.ScrollBars = RichTextBoxScrollBars.Both;
-            log.Location = new Point(x + 2, y + 17); log.Size = new Size(w - 4, this.ClientSize.Height - (y + 17) - 22);
+            log.Location = new Point(x + 2, y + 17); log.Size = new Size(w - 4, this.ClientSize.Height - (y + 17) - 18);
             var lp = new Panel(); lp.BackColor = Look.Panel; lp.Location = new Point(x, y + 15);
-            lp.Size = new Size(w, this.ClientSize.Height - (y + 15) - 20); lp.Controls.Add(log);
+            lp.Size = new Size(w, this.ClientSize.Height - (y + 15) - 16); lp.Controls.Add(log);
             this.Controls.Add(lp); bordered.Add(lp); Dark(log);
             log.Text = "idle.\n";
         }
@@ -511,6 +555,23 @@ namespace EreBUSGate
             if (tip != null) tips.SetToolTip(t, tip);
             this.Controls.Add(t);
             return t;
+        }
+
+        void LoadSource(string path)
+        {
+            loading = true;
+            tSource.Text = path;
+            try { tEditor.Text = File.ReadAllText(path).Replace("\r\n", "\n").Replace("\n", "\r\n"); } catch (Exception e) { Say("cannot read " + path + ": " + e.Message); }
+            if (path.EndsWith(".recipe", StringComparison.OrdinalIgnoreCase)) kRecipe.Checked = true;
+            if (tName.Text.Trim().Length == 0) tName.Text = Path.GetFileNameWithoutExtension(path);
+            loading = false; RefreshPreview();
+        }
+
+        byte[] PayloadBytes()
+        {
+            string t = tEditor.Text;
+            if (!string.IsNullOrEmpty(t)) return new UTF8Encoding(false).GetBytes(t);
+            return new byte[0];
         }
 
         Spec Gather(out string err)
@@ -535,31 +596,27 @@ namespace EreBUSGate
 
         void RefreshPreview()
         {
-            if (loading || tPreview == null) return;
+            if (loading || tEditor == null) return;
             string err; var s = Gather(out err);
             if (s == null) { planLabel.ForeColor = Look.WarnC; planLabel.Text = err; return; }
 
-            string manifest = Core.Manifest(s);
-            string body = "(choose a source)";
-            int bytes = -1;
-            if (!string.IsNullOrEmpty(s.Source) && File.Exists(s.Source))
-            {
-                byte[] pkg = Core.BuildPackage(s, out err);
-                if (pkg != null) { bytes = pkg.Length; string full = new UTF8Encoding(false).GetString(pkg); int cut = manifest.Length; body = full.Length > cut ? full.Substring(cut) : ""; }
-            }
-            tPreview.Text = (manifest + body).Replace("\n", "\r\n");
+            byte[] payload = PayloadBytes();
+            byte[] pkg = Core.Package(s, payload);
+            int bytes = pkg.Length;
+
+            gaugeLabel.ForeColor = bytes > Core.WireMax ? Look.WarnC : Look.Dim;
+            gaugeLabel.Text = bytes + " / " + Core.WireMax + " B";
 
             int pieces = s.HasSplit ? (s.Pieces > 0 ? s.Pieces : 4) : 1;
             int quorum = s.Across > 0 ? s.Across : 1;
             int slots = pieces * quorum;
             var plan = new StringBuilder();
-            if (bytes >= 0) plan.Append(bytes).Append(" B payload  ·  ");
             plan.Append(pieces).Append(pieces == 1 ? " piece" : " pieces");
             if (quorum > 1) plan.Append(" x ").Append(quorum).Append(" = ").Append(slots).Append(" slots");
             plan.Append("  ·  combine ").Append(s.Combine);
             var warn = new StringBuilder();
-            if (bytes > Core.WireMax) warn.Append("payload > ").Append(Core.WireMax).Append(" B (wire limit).  ");
-            if (slots > Core.SlotMax) warn.Append(slots).Append(" slots > ").Append(Core.SlotMax).Append(" (desk limit).  ");
+            if (bytes > Core.WireMax) warn.Append("payload > ").Append(Core.WireMax).Append(" B.  ");
+            if (slots > Core.SlotMax) warn.Append(slots).Append(" slots > ").Append(Core.SlotMax).Append(".  ");
             if (warn.Length > 0) { planLabel.ForeColor = Look.WarnC; planLabel.Text = plan.ToString() + "\n" + warn.ToString(); }
             else { planLabel.ForeColor = Look.Dim; planLabel.Text = plan.ToString(); }
         }
@@ -567,7 +624,9 @@ namespace EreBUSGate
         void Say(string line)
         {
             if (log.InvokeRequired) { log.BeginInvoke((MethodInvoker)delegate { Say(line); }); return; }
-            bool hot = line.StartsWith("pipe:") || line.Contains("= ") || line.StartsWith("---") || line.StartsWith("...");
+            string t = line.TrimStart();
+            if (t.StartsWith("= ")) { tResult.Text = t.Substring(2).Trim(); }
+            bool hot = line.StartsWith("pipe:") || t.StartsWith("= ") || line.StartsWith("---") || line.StartsWith("...");
             log.SelectionStart = log.TextLength; log.SelectionColor = hot ? Look.Accent : Look.Ink;
             log.AppendText(line + "\n"); log.SelectionStart = log.TextLength; log.ScrollToCaret();
         }
@@ -576,12 +635,12 @@ namespace EreBUSGate
         {
             string err; var s = Gather(out err);
             if (s == null) { Say(err); return; }
-            if (string.IsNullOrEmpty(s.Source) || !File.Exists(s.Source)) { Say("no source."); return; }
+            byte[] payload = PayloadBytes();
+            if (payload.Length == 0) { Say("no payload (load a file or type in the editor)."); return; }
             if (string.IsNullOrEmpty(s.Node)) { Say("no node."); return; }
-            byte[] pkg = Core.BuildPackage(s, out err);
-            if (pkg == null) { Say(err); return; }
+            byte[] pkg = Core.Package(s, payload);
             if (pkg.Length > Core.WireMax) { Say("payload " + pkg.Length + " B > " + Core.WireMax + " B; not sent."); return; }
-            send.Enabled = false;
+            tResult.Text = ""; send.Enabled = false;
             Say(""); Say("--- send " + pkg.Length + " B -> " + s.Node + " ---");
             var th = new Thread(delegate()
             {
@@ -601,13 +660,42 @@ namespace EreBUSGate
             th.IsBackground = true; th.Start();
         }
 
+        void DoScan()
+        {
+            string err; var s = Gather(out err);
+            if (s == null || string.IsNullOrEmpty(s.Node)) { Say("no node."); return; }
+            Say(""); Say("--- scan from " + s.Node + " ---");
+            var th = new Thread(delegate() { int rc = Core.Scan(s, Say); Say("--- ssh exit " + rc + " ---"); });
+            th.IsBackground = true; th.Start();
+        }
+
+        void DoDoorLine()
+        {
+            var d = new OpenFileDialog(); d.Filter = "ssh public key|*.pub|all|*.*";
+            d.Title = "pick your ssh public key";
+            if (d.ShowDialog() != DialogResult.OK) return;
+            try
+            {
+                string pub = File.ReadAllText(d.FileName).Trim();
+                string[] parts = pub.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 2) { Say("that does not look like an ssh public key."); return; }
+                string line = "write door | " + parts[0] + " " + parts[1];
+                Clipboard.SetText(line);
+                Say("");
+                Say("door line copied to the clipboard:");
+                Say("  " + line);
+                Say("on the node: go system, go settings, paste it, then back.");
+            }
+            catch (Exception e) { Say("cannot read the key: " + e.Message); }
+        }
+
         void DoSave()
         {
             string err; var s = Gather(out err);
             if (s == null) { Say(err); return; }
-            if (string.IsNullOrEmpty(s.Source) || !File.Exists(s.Source)) { Say("no source."); return; }
-            byte[] pkg = Core.BuildPackage(s, out err);
-            if (pkg == null) { Say(err); return; }
+            byte[] payload = PayloadBytes();
+            if (payload.Length == 0) { Say("no payload."); return; }
+            byte[] pkg = Core.Package(s, payload);
             var d = new SaveFileDialog(); d.Filter = "task package|*.ebtask|all|*.*";
             d.FileName = (string.IsNullOrEmpty(s.Name) ? "task" : s.Name) + ".ebtask";
             if (d.ShowDialog() == DialogResult.OK) { File.WriteAllBytes(d.FileName, pkg); Say("wrote " + d.FileName + " (" + pkg.Length + " bytes)"); }
@@ -615,31 +703,37 @@ namespace EreBUSGate
 
         void LoadTemplate(string which)
         {
-            string dir = Path.Combine(Path.GetTempPath(), "EreBUS Gate");
-            try { Directory.CreateDirectory(dir); } catch { }
-            string src, name, log_;
+            loading = true;
             if (which == "sumrange")
             {
-                src = "long main(long c, long n) {\n    long b[16]; long lo; long hi; long s; long i;\n" +
-                      "    syscall(3, n, b, 0, 0, 0);\n    lo = b[2]; hi = b[3]; s = 0;\n" +
-                      "    for (i = lo; i <= hi; i = i + 1) s = s + i;\n" +
-                      "    syscall(2, c, 0x54584554, s, 0, 0);\n    return 0;\n}\n";
-                name = "sumrange"; log_ = "loaded sumrange: 1..1000000, 8 pieces, sum.";
+                tEditor.Text = string.Join("\r\n", new string[] {
+                    "long main(long console, long inbox)", "{",
+                    "    long buf[16];", "    long lo, hi, s, i;",
+                    "    syscall(3, inbox, buf, 0, 0, 0);",
+                    "    lo = buf[2];", "    hi = buf[3];", "    s = 0;",
+                    "    for (i = lo; i <= hi; i = i + 1)", "        s = s + i;",
+                    "    syscall(2, console, 0x54584554, s, 0, 0);",
+                    "    return 0;", "}" });
+                tSource.Text = ""; kRecipe.Checked = false; tName.Text = "sumrange";
+                kSplit.Checked = true; tLo.Text = "1"; tHi.Text = "1000000"; tPieces.Text = "8"; tBudget.Text = "15";
+                SelectCombine("sum");
+                loading = false; RefreshPreview(); Say("loaded sumrange: 1..1000000, 8 pieces, sum.");
             }
             else
             {
-                src = "long main(long c, long n) {\n    long b[16]; long lo; long hi; long k; long i;\n" +
-                      "    syscall(3, n, b, 0, 0, 0);\n    lo = b[2]; hi = b[3]; k = 0;\n" +
-                      "    for (i = lo; i <= hi; i = i + 1) if ((i & 7) == 0) k = k + 1;\n" +
-                      "    syscall(2, c, 0x54584554, k, 0, 0);\n    return 0;\n}\n";
-                name = "count"; log_ = "loaded count: multiples of 8 in 1..1000000, sum.";
+                tEditor.Text = string.Join("\r\n", new string[] {
+                    "long main(long console, long inbox)", "{",
+                    "    long buf[16];", "    long lo, hi, k, i;",
+                    "    syscall(3, inbox, buf, 0, 0, 0);",
+                    "    lo = buf[2];", "    hi = buf[3];", "    k = 0;",
+                    "    for (i = lo; i <= hi; i = i + 1)", "        if ((i & 7) == 0) k = k + 1;",
+                    "    syscall(2, console, 0x54584554, k, 0, 0);",
+                    "    return 0;", "}" });
+                tSource.Text = ""; kRecipe.Checked = false; tName.Text = "count";
+                kSplit.Checked = true; tLo.Text = "1"; tHi.Text = "1000000"; tPieces.Text = "8"; tBudget.Text = "15";
+                SelectCombine("sum");
+                loading = false; RefreshPreview(); Say("loaded count: multiples of 8 in 1..1000000, sum.");
             }
-            string path = Path.Combine(dir, name + ".c"); File.WriteAllText(path, src);
-            loading = true;
-            tSource.Text = path; kRecipe.Checked = false; tName.Text = name;
-            kSplit.Checked = true; tLo.Text = "1"; tHi.Text = "1000000"; tPieces.Text = "8";
-            SelectCombine("sum"); tAcross.Text = ""; tBudget.Text = "15";
-            loading = false; RefreshPreview(); Say(log_);
         }
 
         void RefillNodeList() { nodeList.Items.Clear(); foreach (var n in nodes) nodeList.Items.Add(n); }
@@ -668,8 +762,8 @@ namespace EreBUSGate
             loading = true;
             if (last.ContainsKey("node")) tNode.Text = last["node"];
             if (last.ContainsKey("key")) tKey.Text = last["key"];
-            if (last.ContainsKey("port")) tPort.Text = last["port"]; else tPort.Text = "22";
-            if (last.ContainsKey("wait")) tWait.Text = last["wait"]; else tWait.Text = "8";
+            tPort.Text = last.ContainsKey("port") ? last["port"] : "22";
+            tWait.Text = last.ContainsKey("wait") ? last["wait"] : "8";
             SelectCombine(last.ContainsKey("combine") ? last["combine"] : "sum");
             loading = false;
         }
