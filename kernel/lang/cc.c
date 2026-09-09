@@ -42,7 +42,7 @@
 /* ------------------------------------------------------------------ */
 
 enum { T_VOID, T_CHAR, T_SHORT, T_INT, T_LONG, T_FLOAT, T_DOUBLE,
-       T_PTR, T_ARR, T_STRUCT, T_UNION, T_FUNC };
+       T_PTR, T_ARR, T_STRUCT, T_UNION, T_FUNC, T_INT128 };
 
 typedef struct type type;
 struct type {
@@ -229,7 +229,7 @@ typedef struct {
     u32    ntags;
     type  *t_bool;
     type  *t_void, *t_char, *t_uchar, *t_short, *t_ushort, *t_int, *t_uint,
-          *t_long, *t_ulong, *t_float, *t_double, *t_charp;
+          *t_long, *t_ulong, *t_i128, *t_u128, *t_float, *t_double, *t_charp;
 
     node   nodes[NNODES];
     u32    nnodes;
@@ -1464,7 +1464,8 @@ static type *array_of(type *b, u64 n)
     return t;
 }
 
-static bool is_int(const type *t)   { return t->kind >= T_CHAR && t->kind <= T_LONG; }
+static bool is_int(const type *t)   { return (t->kind >= T_CHAR && t->kind <= T_LONG) || t->kind == T_INT128; }
+static bool is_int128(const type *t) { return t->kind == T_INT128; }
 static bool is_flt(const type *t)   { return t->kind == T_FLOAT || t->kind == T_DOUBLE; }
 static bool is_num(const type *t)   { return is_int(t) || is_flt(t); }
 static bool is_ptr(const type *t)   { return t->kind == T_PTR || t->kind == T_ARR; }
@@ -1498,6 +1499,10 @@ static type *tag_find(const char *nm)
 static type *common_type(type *a, type *b)
 {
     if (is_flt(a) || is_flt(b)) return C.t_double;
+    if (is_int128(a) || is_int128(b)) {
+        bool u = (is_int128(a) && a->uns) || (is_int128(b) && b->uns);
+        return u ? C.t_u128 : C.t_i128;
+    }
     bool lng = a->kind == T_LONG || b->kind == T_LONG;
     bool uns = (a->kind == T_LONG && a->uns) || (b->kind == T_LONG && b->uns) ||
                (!lng && ((a->kind == T_INT && a->uns) || (b->kind == T_INT && b->uns)));
@@ -1728,7 +1733,7 @@ static void add_type(u32 i)
 
     case ND_SHL: case ND_SHR:
         if (!is_int(l->ty)) { fail_at(n->line, NULL, "only a whole number shifts", NULL); break; }
-        n->ty = l->ty->kind == T_LONG ? l->ty : (l->ty->uns ? C.t_uint : C.t_int);
+        n->ty = (l->ty->kind == T_LONG || is_int128(l->ty)) ? l->ty : (l->ty->uns ? C.t_uint : C.t_int);
         break;
 
     case ND_EQ: case ND_NE: case ND_LT: case ND_LE:
@@ -2113,6 +2118,7 @@ static type *declspec(bool *is_typedef, bool *is_extern, bool *is_static)
         if (same(w, "short"))  { saw_short = true; advance(); continue; }
         if (same(w, "int"))    { if (base < 0) base = T_INT; advance(); continue; }
         if (same(w, "long"))   { saw_long = true; advance(); continue; }
+        if (same(w, "__int128")) { base = T_INT128; advance(); continue; }
         if (same(w, "float"))  { base = T_FLOAT; advance(); continue; }
         if (same(w, "double")) { base = T_DOUBLE; advance(); continue; }
         if (same(w, "__builtin_va_list")) { named = C.t_charp; advance(); continue; }
@@ -2135,6 +2141,7 @@ static type *declspec(bool *is_typedef, bool *is_extern, bool *is_static)
     case T_CHAR:   return boolean ? C.t_bool : uns ? C.t_uchar : C.t_char;
     case T_SHORT:  return uns ? C.t_ushort : C.t_short;
     case T_INT:    return uns ? C.t_uint : C.t_int;
+    case T_INT128: return uns ? C.t_u128 : C.t_i128;
     case T_FLOAT:  return C.t_float;
     case T_DOUBLE: return C.t_double;
     default:       return uns ? C.t_ulong : C.t_long;
@@ -3355,6 +3362,7 @@ static void gen_addr(u32 i)
 static void load(type *t)
 {
     if (t->kind == T_ARR || is_rec(t) || t->kind == T_FUNC) return;
+    if (is_int128(t)) { o("    mov rdx, [rax + 8]\n    mov rax, [rax]\n"); return; }
     if (t->kind == T_DOUBLE) { o("    movsd xmm0, [rax]\n"); return; }
     if (t->kind == T_FLOAT)  { o("    movss xmm0, dword [rax]\n    cvtss2sd xmm0, xmm0\n"); return; }
     if (t->size == 1) o(t->uns ? "    movzx rax, byte [rax]\n" : "    movsx rax, byte [rax]\n");
@@ -3366,6 +3374,7 @@ static void load(type *t)
 /* rax (or xmm0) into the address in rdi. */
 static void store(type *t)
 {
+    if (is_int128(t)) { o("    mov [rdi], rax\n    mov [rdi + 8], rdx\n"); return; }
     if (is_rec(t)) {
         u32 off = 0;
         while (off + 8 <= t->size) { o("    mov rcx, [rax + %d]\n    mov [rdi + %d], rcx\n", (i64)off, (i64)off); off += 8; }
@@ -3424,6 +3433,13 @@ static member *bitfield_of(u32 i)
 static void cast_to(type *from, type *to)
 {
     if (to->kind == T_VOID || is_rec(to) || to->kind == T_FUNC || to->kind == T_ARR) return;
+    if (is_int128(to)) {
+        /* a narrower value widened to 128 bits: rax holds it, extend into
+         * rdx (zero for unsigned, sign for signed); u128 -> u128 is a nop. */
+        if (!is_int128(from)) o(from->uns || is_ptr(from) ? "    xor edx, edx\n" : "    cqo\n");
+        return;
+    }
+    if (is_int128(from)) from = C.t_ulong;   /* 128 -> narrower: the low half is in rax */
     bool ff = is_flt(from), tf = is_flt(to);
     if (ff && !tf) {
         o("    cvttsd2si rax, xmm0\n");
@@ -3835,6 +3851,68 @@ static u32 gen_args(u32 first, u32 count, const char *const *regs, bool variadic
     return n > REGARGS ? (n - REGARGS) * 8 : 0;
 }
 
+/* A 128-bit value travels in rdx:rax -- rax the low half, rdx the high.
+ * bn.c is the only user: it adds, subtracts and multiplies 64-bit limbs
+ * into 128 bits, then takes the low half and the high half back out.
+ * Operands and results never cross a call boundary, so there is no ABI to
+ * match; these run inside one expression. */
+
+/* One operand of a 128-bit operation into rdx:rax. */
+static void gen_u128_operand(u32 i)
+{
+    node *n = N(i);
+    gen_expr(i);
+    if (!is_int128(n->ty))                       /* a 64-bit value: widen it */
+        o(n->ty->uns || is_ptr(n->ty) ? "    xor edx, edx\n" : "    cqo\n");
+}
+
+static void gen_u128_binop(u32 i)
+{
+    node *n = N(i);
+
+    if (n->kind == ND_SHL || n->kind == ND_SHR) {
+        gen_expr(n->lhs);                        /* rdx:rax = value */
+        if (N(n->rhs)->kind != ND_NUM) {
+            fail_at(n->line, NULL, "a 128-bit shift takes a constant amount here", NULL);
+            return;
+        }
+        i64 k = N(n->rhs)->val & 127;
+        if (n->kind == ND_SHR) {                 /* logical: the 128-bit type is unsigned here */
+            if (k >= 64)     o("    mov rax, rdx\n    shr rax, %d\n    xor edx, edx\n", k - 64);
+            else if (k > 0)  o("    shrd rax, rdx, %d\n    shr rdx, %d\n", k, k);
+        } else {
+            if (k >= 64)     o("    mov rdx, rax\n    shl rdx, %d\n    xor eax, eax\n", k - 64);
+            else if (k > 0)  o("    shld rdx, rax, %d\n    shl rax, %d\n", k, k);
+        }
+        return;
+    }
+
+    gen_expr(n->lhs);                            /* left  -> rdx:rax */
+    o("    push rax\n    push rdx\n");
+    gen_u128_operand(n->rhs);                    /* right -> rdx:rax */
+    o("    mov r10, rax\n    mov r11, rdx\n");    /* right: lo r10, hi r11 */
+    o("    pop rdx\n    pop rax\n");              /* left:  lo rax, hi rdx */
+    switch (n->kind) {
+    case ND_ADD: o("    add rax, r10\n    adc rdx, r11\n"); break;
+    case ND_SUB: o("    sub rax, r10\n    sbb rdx, r11\n"); break;
+    case ND_AND: o("    and rax, r10\n    and rdx, r11\n"); break;
+    case ND_OR:  o("    or rax, r10\n    or rdx, r11\n"); break;
+    case ND_XOR: o("    xor rax, r10\n    xor rdx, r11\n"); break;
+    case ND_MUL:
+        /* (Lhi:Llo)*(Rhi:Rlo) mod 2^128 = Llo*Rlo + (Llo*Rhi + Lhi*Rlo)<<64 */
+        o("    mov r8, rax\n    mov r9, rdx\n");              /* Llo r8, Lhi r9 */
+        o("    mov rax, r8\n    mul r10\n");                  /* rdx:rax = Llo*Rlo */
+        o("    mov rcx, rax\n");                              /* low result */
+        o("    mov rax, r8\n    imul rax, r11\n    add rdx, rax\n");   /* + Llo*Rhi */
+        o("    mov rax, r9\n    imul rax, r10\n    add rdx, rax\n");   /* + Lhi*Rlo */
+        o("    mov rax, rcx\n");                              /* low -> rax, high in rdx */
+        break;
+    default:
+        fail_at(n->line, NULL, "that 128-bit operation is not supported", NULL);
+        break;
+    }
+}
+
 static void gen_expr(u32 i)
 {
     if (!i || C.bad) return;
@@ -3929,7 +4007,7 @@ static void gen_expr(u32 i)
     case ND_ASSIGN: {
         type *t = N(n->lhs)->ty;
         member *m = bitfield_of(n->lhs);
-        if (!n->op && !m && plain_var(N(n->lhs))) {
+        if (!n->op && !m && !is_int128(t) && plain_var(N(n->lhs))) {
             /* a plain variable takes the value without an address
              * computed and kept around the right side */
             gen_expr(n->rhs);
@@ -3937,7 +4015,7 @@ static void gen_expr(u32 i)
             store_plain(&C.syms[N(n->lhs)->sym], t);
             return;
         }
-        if (n->op && !m && plain_var(N(n->lhs)) && !is_flt(N(n->rhs)->ty)) {
+        if (n->op && !m && !is_int128(t) && plain_var(N(n->lhs)) && !is_flt(N(n->rhs)->ty)) {
             /* the same for x op= y: the right side, then the variable
              * itself, the operation, and the variable again */
             sym *s = &C.syms[N(n->lhs)->sym];
@@ -4087,6 +4165,16 @@ static void gen_expr(u32 i)
     }
     default:
         break;
+    }
+
+    /* A binary operation whose result is 128-bit takes its own path,
+     * before the single-register one below. */
+    if (is_int128(n->ty) &&
+        (n->kind == ND_ADD || n->kind == ND_SUB || n->kind == ND_MUL ||
+         n->kind == ND_AND || n->kind == ND_OR  || n->kind == ND_XOR ||
+         n->kind == ND_SHL || n->kind == ND_SHR)) {
+        gen_u128_binop(i);
+        return;
     }
 
     /* The binary ones: left in rax/xmm0, right in rdi/xmm1. A right
@@ -4912,6 +5000,8 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
     C.t_uint   = new_type(T_INT, 4, 4);   C.t_uint->uns = true;
     C.t_long   = new_type(T_LONG, 8, 8);
     C.t_ulong  = new_type(T_LONG, 8, 8);  C.t_ulong->uns = true;
+    C.t_i128   = new_type(T_INT128, 16, 16);
+    C.t_u128   = new_type(T_INT128, 16, 16);  C.t_u128->uns = true;
     C.t_float  = new_type(T_FLOAT, 4, 4);
     C.t_double = new_type(T_DOUBLE, 8, 8);
     C.t_charp  = ptr_to(C.t_char);
