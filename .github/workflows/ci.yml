@@ -1,0 +1,56 @@
+name: ci
+
+# Build the loader and kernel, prove the build is reproducible, and boot
+# the image once under emulation to confirm the self-tests pass and the
+# kernel reaches idle. GitHub's runners have no nested KVM, so the boot
+# runs under TCG; the full 37-test battery needs KVM and is run before a
+# release on a machine that has it (build/battery.sh).
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # git describe wants the tags
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld nasm make mtools dosfstools unifont python3-pil \
+            qemu-system-x86 ovmf
+
+      - name: Build
+        run: |
+          touch kernel/gfx/font8x16.h   # use the committed font, do not regenerate
+          make
+          ls -l build/kernel.elf build/BOOTX64.EFI
+          sha256sum build/kernel.elf build/BOOTX64.EFI
+
+      - name: Reproducible build
+        run: sh tools/reproduce.sh
+
+      - name: Boot smoke (TCG)
+        run: LIMIT=600 sh tools/bootsmoke.sh
+
+      - name: Upload the kernel and the serial log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: |
+            build/kernel.elf
+            build/BOOTX64.EFI
+            build/smoke-serial.log
+          if-no-files-found: ignore
