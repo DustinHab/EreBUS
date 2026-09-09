@@ -26,7 +26,10 @@ jobs:
 
       - name: Install the toolchain
         run: |
-          sudo apt-get update
+          # A stale third-party repo (Google Chrome) on the runner image
+          # can make update fail on a hash mismatch; the Ubuntu lists we
+          # need still refresh, so do not let that sink the job.
+          sudo apt-get update || true
           sudo apt-get install -y --no-install-recommends \
             clang lld nasm make mtools dosfstools unifont python3-pil \
             qemu-system-x86 ovmf
@@ -70,7 +73,10 @@ jobs:
 
       - name: Install the toolchain
         run: |
-          sudo apt-get update
+          # A stale third-party repo (Google Chrome) on the runner image
+          # can make update fail on a hash mismatch; the Ubuntu lists we
+          # need still refresh, so do not let that sink the job.
+          sudo apt-get update || true
           sudo apt-get install -y --no-install-recommends \
             clang lld make python3-pil openssl
 
