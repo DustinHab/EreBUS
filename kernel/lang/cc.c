@@ -4103,6 +4103,19 @@ static char att_operand(asm_block *b, u32 bi, const char *s, u32 len, char *out,
         PUTN(s, len); out[o] = 0; return 'i';
     }
 
+    /* Basic asm carries no operand list, so a lone %reg is a literal
+     * register -- the sigil AT&T uses -- not a reference to an operand.
+     * Strip it, as %%reg does in extended asm; also a leading * (an
+     * indirect call's target) and a segment operand (%gs:16 -> [gs:16]). */
+    if (b->nops == 0 && (s[0] == '%' || (s[0] == '*' && len > 1 && s[1] == '%'))) {
+        const char *p = s; u32 pl = len;
+        if (p[0] == '*') { p++; pl--; }
+        u32 colon = 0;
+        for (u32 i = 1; i < pl; i++) if (p[i] == ':') { colon = i; break; }
+        if (colon) { PUT("["); PUTN(p + 1, pl - 1); PUT("]"); out[o] = 0; return 'm'; }
+        PUTN(p + 1, pl - 1); out[o] = 0; return 'r';
+    }
+
     /* something(%%reg) or something(%N): memory */
     i32 paren = -1;
     for (u32 i = 0; i < len; i++) if (s[i] == '(') { paren = (i32)i; break; }
