@@ -44,6 +44,12 @@ runs in ring 3 and reaches the kernel only through the system-call ABI.
 - Secret-dependent comparisons (WPA2 MIC, GCM tags) use a constant-time
   equality (`ct_equal`); no early exit reveals where two values first
   differ.
+- The AES is constant-time: its S-box (forward and inverse) is computed
+  by inversion in GF(2^8), not looked up, and GHASH multiplies without a
+  data-dependent branch, so no secret byte indexes memory or steers a
+  branch. The computed S-box is checked against the reference for all 256
+  inputs at boot. Constant time in the C source is not a guarantee at the
+  machine-code level, but no secret-indexed table remains.
 - Self-update packages are ed25519-signed; the signature, not the
   transport, is what authorises an update. A lost release private key
   cannot be recovered and cannot be replaced on already-deployed machines.
@@ -56,13 +62,13 @@ runs in ring 3 and reaches the kernel only through the system-call ABI.
 
 These are deliberate, bounded, and documented rather than hidden.
 
-- **AES timing.** The AES is software with table lookups. Table timing is
-  a real side channel. For a single-person machine speaking outward it is
-  noted and accepted; a constant-time or hardware AES path is tracked
-  work. The kernel keeps the vector units off, so there is no SSE state to
-  save and nothing may use it.
 - **No revocation checking.** A certificate revoked by its issuer is still
   accepted until it expires. There is no OCSP or CRL fetch.
+- **Constant time is at the source level.** The AES and the tag and MIC
+  comparisons are written to run in constant time, but the C compiler is
+  free to undo that; there is no machine-code check. No secret-indexed
+  table or data-dependent branch remains in the source, which is what a
+  reader can verify.
 - **Node identity is trust on first use.** A node's key is pinned when
   first seen unless pinned beforehand with `trust`. A vouch is only as
   good as trust in the voucher.

@@ -31,6 +31,12 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - The battery must be green before a change is committed for release.
   "Quality over compute time": a slow but decisive test run is preferred
   to a fast uncertain one.
+- `sh tools/reproduce.sh` builds twice and checks the kernel and loader
+  come out byte-identical. `sh tools/bootsmoke.sh` boots the image once
+  under emulation and confirms the self-tests pass and the kernel reaches
+  idle. Both run in CI on every push (`.github/workflows/ci.yml`); the
+  runners have no KVM, so CI runs under TCG and the full battery stays a
+  local, pre-release step.
 
 Any change to a wire or disk parser must come with a fuzzer input or a
 new case; the fuzzers are under `tools/fuzz/`.
