@@ -142,6 +142,11 @@ u64  term_total(term_session *s) { (void)s; return 0; }
 bool term_secret(term_session *s) { (void)s; return false; }
 bool term_taking(term_session *s) { (void)s; return false; }
 u32  term_take_bytes(term_session *s, const u8 *d, u32 n) { (void)s; (void)d; (void)n; return 0; }
+bool term_control(term_session *s) { (void)s; return false; }
+u32  term_control_pump(term_session *s) { (void)s; return 0; }
+
+/* The browser's http service loop; nothing serves it in the fuzzer. */
+void web_service(void) { }
 
 /* --- the primitives, transparent ------------------------------------------------------------ */
 
@@ -161,6 +166,8 @@ void aes_ccm_seal(const aes_key *k, const u8 nonce[13], const u8 *aad, u32 alen,
 bool aes_ccm_open(const aes_key *k, const u8 nonce[13], const u8 *aad, u32 alen, const u8 *in, u32 len, const u8 tag[8], u8 *out)
 { (void)k; (void)nonce; (void)aad; (void)alen; (void)tag; if (out != in) memmove(out, in, len); return true; }
 bool aes_unwrap(const u8 kek[16], const u8 *in, u32 len, u8 *out) { (void)kek; if (len < 8) return false; memcpy(out, in + 8, len - 8); return true; }
+/* Authentication passes, like the ciphers, so the parser behind it runs. */
+bool ct_equal(const void *a, const void *b, u32 len) { (void)a; (void)b; (void)len; return true; }
 void sha1(const void *data, u64 len, u8 out[20]) { (void)data; (void)len; memset(out, 0, 20); }
 void hmac_sha1(const u8 *key, u32 klen, const void *data, u64 len, u8 out[20]) { (void)key; (void)klen; (void)data; (void)len; memset(out, 0, 20); }
 void pbkdf2_hmac_sha1(const u8 *pass, u32 plen, const u8 *salt, u32 slen, u32 rounds, u8 *out, u32 olen)

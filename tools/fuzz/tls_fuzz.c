@@ -123,7 +123,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     static u8 out[65536];
     u32 got = 0;
     static const u8 addr[4] = { 10, 0, 2, 100 };
-    tls_get(addr, "example.com", 11, "/index.html", 11, out, sizeof out, &got);
+    static const char req[] = "GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    tls_exchange(addr, "example.com", 11, (const u8 *)req, sizeof req - 1, NULL, 0, out, sizeof out, &got);
     if (got > sizeof out) abort();
     (void)tls_last_verified();
     (void)tls_last_reason();
