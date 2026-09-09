@@ -28,6 +28,20 @@ void sched_init(domain *boot_domain);
 thread *thread_create(const char *name, thread_entry entry, void *arg,
                       domain *d);
 
+/* Like thread_create, but with a chosen kernel-stack size in bytes,
+ * rounded up to a page and clamped to [default, maximum]. For the few
+ * threads whose work recurses deeply -- the compiler's background build
+ * thread runs the machine's own compiler, which descends one frame per
+ * level of nesting -- past what the default stack holds. */
+thread *thread_create_stack(const char *name, thread_entry entry, void *arg,
+                            domain *d, u32 stack_bytes);
+
+/* How deep a thread's stack has ever been used, and how big it is, in
+ * bytes. The high-water mark is a tripwire on the guard page: it tells a
+ * long-running compile how much headroom is left before an overrun. */
+u64 thread_stack_highwater(const thread *t);
+u64 thread_stack_size(const thread *t);
+
 /* Ends the calling thread. Does not return. */
 void thread_exit(void);
 

@@ -122,7 +122,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] `install <bytes>`: kernel.new → kernel.elf, previous as kernel.old; the loader falls back after two failed starts
 - [x] `install this kernel`: loader and kernel the machine booted from onto the boot disk; store untouched
 - [x] `receive <n> bytes as <name>`: a file in through the door as raw bytes
-- [x] Self-build: `tools/selfbuild.sh` (host, cchost), `tools/selfkernel.sh` (on the machine, through the door, under KVM: 82 objects in ~30 s)
+- [x] Self-build: `tools/selfbuild.sh` (host, cchost), `tools/selfkernel.sh` (on the machine, through the door, under KVM: 99 objects in ~30 s, then a second generation)
 - [x] Fuzzing of compiler, assembler, linker, certificate checker, page renderer, the wire, the pipe and the tls client (`tools/fuzz/run.sh`)
 
 ### Storage
@@ -245,7 +245,7 @@ Measured on 32 cores under KVM, six at a time: about 10 minutes for all 37 tests
 - The ssh door serves up to four visitors at once (a fifth displaces the longest-idle); it honours a client-driven rekey but does not force one.
 - RTL8168/8169 driver written from documentation, untested on silicon.
 - Two HID inputs on one device: implemented, not tested on a real device.
-- The machine builds its own kernel with its own compiler, assembler and linker: `tools/selfbuild.sh` compiles every source, links `kernel.elf`, and boots it. This includes `bn.c`'s 128-bit big-number arithmetic (the compiler grew an `__int128` type) and the SMP real-mode trampoline (`ap_boot.S`, checked in as a byte table since the assembler does no 16-bit mode). The self-built kernel passes every self-test, the rsa/ecdsa certificate checks among them. `tools/kvm-battery.sh` is the release gate: the battery, then a self-build that must link and boot.
+- The machine builds its own kernel with its own compiler, assembler and linker, at two levels. On the host, `tools/selfbuild.sh` compiles every source with those tools, links `kernel.elf` and boots it -- the fast, full check, and the one that reports all sources that fail at once. On the machine itself, `tools/selfkernel.sh` sends the sources through the door; the machine builds, installs and boots its own kernel there, on the build thread's own 128 KiB stack, and that kernel's own compiler builds a kernel again (a second generation). This exercises `bn.c`'s 128-bit big-number arithmetic -- the compiler grew a partial `unsigned __int128` (add, subtract, multiply, the bitwise operators and constant-count shifts, in a register pair; no divide, compare or variable shift, which bn.c does not need) -- and the SMP real-mode trampoline (`ap_boot.S`, a byte table since the assembler does no 16-bit mode; `tools/tramp-check.sh` holds it to its readable source `tools/ap_boot_ref.S`). The self-built kernel passes every self-test, the rsa/ecdsa certificate checks among them, and brings up all cores. `tools/kvm-battery.sh` is the release gate: the battery, the compiler stack-frame guard, the host self-build and boot, then the on-machine self-build -- because the host build, with the host compiler's megabytes of stack, cannot show what the machine's bounded stack does.
 
 ## Releases
 

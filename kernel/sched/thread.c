@@ -15,12 +15,26 @@
 #include <eb/spin.h>
 #include <eb/time.h>
 #include <eb/panic.h>
+#include <eb/string.h>
 
-/* Thread stacks live in their own window, well clear of the heap. */
+/* Thread stacks live in their own window, well clear of the heap. Each
+ * slot holds one stack at the top of its window with an unmapped guard
+ * page just below it; the window is sized for the largest stack a thread
+ * may ask for, but only the pages a stack actually uses are mapped, so a
+ * default-sized stack costs nothing extra for the room reserved above it.
+ * Most threads take TSTACK_SIZE; a few whose work recurses deeply -- the
+ * compiler's background build thread -- ask for more, up to TSTACK_MAX. */
 #define TSTACK_BASE   0xFFFFFE0000000000ULL
-#define TSTACK_SIZE   (16 * 1024)
-#define TSTACK_STRIDE (TSTACK_SIZE + PAGE_SIZE)   /* stack plus guard */
-#define TSTACK_MAX    1024                        /* threads at once */
+#define TSTACK_SIZE   (16 * 1024)                 /* the default */
+#define TSTACK_MAX    (128 * 1024)                /* the largest on offer */
+#define TSTACK_STRIDE (TSTACK_MAX + PAGE_SIZE)    /* window per slot: max stack plus guard */
+#define TSTACK_SLOTS  1024                        /* threads at once */
+
+/* The mapped stack is filled with this byte at creation; the run leaves
+ * its own marks, so the lowest address still holding the sentinel is the
+ * high-water mark -- how close the thread came to its guard page. */
+#define STACK_FILL_BYTE 0xA5u
+#define STACK_SENTINEL  0xA5A5A5A5u
 
 #define THREAD_MAGIC 0x54485245414400ULL   /* "THREAD" */
 
@@ -46,6 +60,7 @@ struct thread {
     bool         condemned;    /* marked to end at its next kernel step */
     bool         may_roam;     /* false: only the boot processor runs it */
     u32          slot;         /* which stack slot is ours */
+    u32          stack_size;   /* mapped stack, in bytes */
     virt_addr    stack_low;    /* first mapped byte */
     thread_entry entry;
     void        *arg;
@@ -135,7 +150,7 @@ static u64 switches;
 static u64 thread_count;
 static u64 runnable_count;
 static volatile bool started;   /* the timer may tick before sched_init runs */
-static u8 slot_taken[TSTACK_MAX / 8];
+static u8 slot_taken[TSTACK_SLOTS / 8];
 
 /* ------------------------------------------------------------------ */
 /* Run queue                                                           */
@@ -174,7 +189,7 @@ static void queue_remove(thread *t)
 
 static bool claim_slot(u32 *out)
 {
-    for (u32 i = 0; i < TSTACK_MAX; i++) {
+    for (u32 i = 0; i < TSTACK_SLOTS; i++) {
         if (slot_taken[i >> 3] & (1u << (i & 7))) continue;
         slot_taken[i >> 3] |= (u8)(1u << (i & 7));
         *out = i;
@@ -188,20 +203,28 @@ static void release_slot(u32 slot)
     slot_taken[slot >> 3] &= (u8)~(1u << (slot & 7));
 }
 
-/* Maps a stack, leaving the page below it unmapped as the guard. */
-static virt_addr map_stack(u32 slot)
+/* Maps a stack of the given size at the top of its slot's window, leaving
+ * the page just below the mapped region unmapped as the guard. Returns the
+ * first mapped byte, or 0 if a frame could not be had -- unwinding what it
+ * mapped so far, so a failure leaks nothing. */
+static virt_addr map_stack(u32 slot, u32 size)
 {
-    virt_addr guard = TSTACK_BASE + (u64)slot * TSTACK_STRIDE;
-    virt_addr low   = guard + PAGE_SIZE;
+    virt_addr top = TSTACK_BASE + (u64)slot * TSTACK_STRIDE + TSTACK_STRIDE;
+    virt_addr low = top - size;
 
-    for (u64 off = 0; off < TSTACK_SIZE; off += PAGE_SIZE) {
+    for (u64 off = 0; off < size; off += PAGE_SIZE) {
         phys_addr frame = pmm_alloc();
-        if (frame == PMM_NO_FRAME) return 0;
-        if (!vmm_map(vmm_kernel_pml4(), low + off, frame, PAGE_SIZE,
-                     PAGE_KERNEL_DATA)) {
-            pmm_free(frame);
-            return 0;
+        if (frame != PMM_NO_FRAME &&
+            vmm_map(vmm_kernel_pml4(), low + off, frame, PAGE_SIZE,
+                    PAGE_KERNEL_DATA)) {
+            continue;
         }
+        if (frame != PMM_NO_FRAME) pmm_free(frame);
+        for (u64 u = 0; u < off; u += PAGE_SIZE) {
+            phys_addr f;
+            if (vmm_unmap_page(vmm_kernel_pml4(), low + u, &f)) pmm_free(f);
+        }
+        return 0;
     }
     return low;
 }
@@ -315,9 +338,13 @@ void sched_adopt_ap(u64 kstack_top)
     this_cpu()->slice_left = slice_ticks;
 }
 
-thread *thread_create(const char *name, thread_entry entry, void *arg,
-                      domain *d)
+static thread *create(const char *name, thread_entry entry, void *arg,
+                      domain *d, u32 size)
 {
+    if (size < TSTACK_SIZE) size = TSTACK_SIZE;
+    if (size > TSTACK_MAX)  size = TSTACK_MAX;
+    size = (u32)((size + PAGE_SIZE - 1) & ~(u64)(PAGE_SIZE - 1));
+
     thread *t = (thread *)kzalloc(sizeof(thread));
     if (!t) return NULL;
 
@@ -331,7 +358,7 @@ thread *thread_create(const char *name, thread_entry entry, void *arg,
     spin_unlock_irq(&sched_lock, flags);
     if (!got) { kfree(t); return NULL; }
 
-    virt_addr low = map_stack(t->slot);
+    virt_addr low = map_stack(t->slot, size);
     if (!low) {
         flags = spin_lock_irq(&sched_lock);
         release_slot(t->slot);
@@ -340,19 +367,24 @@ thread *thread_create(const char *name, thread_entry entry, void *arg,
         return NULL;
     }
 
+    /* Sentinel-fill for the high-water mark, then lay the first frame in
+     * over the top of it. */
+    memset((void *)low, STACK_FILL_BYTE, size);
+
     t->magic = THREAD_MAGIC;
     t->name  = name;
     t->dom   = d;
     t->entry = entry;
     t->arg   = arg;
     t->state = THREAD_READY;
+    t->stack_size = size;
     t->stack_low = low;
-    t->kstack_top = low + TSTACK_SIZE;
+    t->kstack_top = low + size;
 
     /* Lay out the stack so that switch_stack's epilogue walks off it
      * straight into the trampoline: flags first, then the six
      * callee-saved registers, then the address it will return to. */
-    u64 *sp = (u64 *)(low + TSTACK_SIZE);
+    u64 *sp = (u64 *)(low + size);
     *--sp = (u64)trampoline;   /* ret target */
     *--sp = 0;                 /* rbp */
     *--sp = 0;                 /* rbx */
@@ -370,6 +402,35 @@ thread *thread_create(const char *name, thread_entry entry, void *arg,
 
     return t;
 }
+
+thread *thread_create(const char *name, thread_entry entry, void *arg,
+                      domain *d)
+{
+    return create(name, entry, arg, d, TSTACK_SIZE);
+}
+
+thread *thread_create_stack(const char *name, thread_entry entry, void *arg,
+                            domain *d, u32 stack_bytes)
+{
+    return create(name, entry, arg, d, stack_bytes);
+}
+
+/* The deepest a thread's stack has been used, in bytes: the mapped region
+ * is sentinel-filled at creation, so the lowest word that no longer holds
+ * the sentinel is as far as the stack ever grew. An approximation -- a run
+ * that happened to leave the sentinel value on the stack reads as untouched
+ * there -- but close enough to watch the guard from. */
+u64 thread_stack_highwater(const thread *t)
+{
+    if (!t || t->slot == 0xFFFFFFFFu || !t->stack_low) return 0;
+    const u32 *p = (const u32 *)t->stack_low;
+    u64 words = t->stack_size / 4;
+    u64 i = 0;
+    while (i < words && p[i] == STACK_SENTINEL) i++;
+    return t->stack_size - i * 4;
+}
+
+u64 thread_stack_size(const thread *t) { return t ? t->stack_size : 0; }
 
 /* Finished threads, waiting to be reaped. Declared here because a
  * thread condemned but never reaching a syscall is retired straight
@@ -751,7 +812,7 @@ static void reap_finished(void)
         if (t->on_reap) t->on_reap(t->on_reap_arg);
 
         if (t->slot != 0xFFFFFFFFu) {
-            for (u64 off = 0; off < TSTACK_SIZE; off += PAGE_SIZE) {
+            for (u64 off = 0; off < t->stack_size; off += PAGE_SIZE) {
                 phys_addr frame;
                 if (vmm_unmap_page(vmm_kernel_pml4(),
                                    t->stack_low + off, &frame))

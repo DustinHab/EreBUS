@@ -10,51 +10,13 @@
  * The trampoline is 16- and 32-bit code, which the machine's own
  * assembler does not do (it has no .code16). So the assembled bytes are
  * checked in below as a table -- the machine can build its own kernel
- * without a 16-bit assembler -- and the source they came from is kept
- * here, both to read and to regenerate from.
+ * without a 16-bit assembler.
  *
- * To regenerate after changing the trampoline: put the source below back
- * into a .S with the .code16/.code32/.code64 directives, build it with
- * clang for x86_64-unknown-none-elf, then
- *   objcopy -O binary --only-section=.rodata ap_boot.o - | od -An -v -tx1
- * The first 192 bytes (up to ap_tramp_params, whose offset readelf gives)
- * are the code table; the rest is the zeroed params.
- *
- * The source (do not assemble this copy; it is the reference):
- *
- *     .code16
- *   ap_tramp_start:
- *     cli
- *     cld
- *     movw    %cs, %ax
- *     movw    %ax, %ds
- *     lgdt    (gdt_desc - ap_tramp_start)
- *     movl    %cr0, %eax
- *     orl     $1, %eax                 ; protected mode on
- *     movl    %eax, %cr0
- *     .byte 0xEA                        ; far jump to 32-bit code
- *     .word (pm32 - ap_tramp_start + TRAMP_PA)
- *     .word 0x08
- *     .code32
- *   pm32:
- *     movw    $0x10, %ax
- *     movw    %ax, %ds/%es/%ss/%fs/%gs
- *     movl    %cr4, %eax ; orl $(1<<5), %eax ; movl %eax, %cr4      ; PAE
- *     movl    (ap_tramp_params - ap_tramp_start + TRAMP_PA), %eax   ; cr3
- *     movl    %eax, %cr3
- *     movl    $0xC0000080, %ecx ; rdmsr ; orl $((1<<8)|(1<<11)), %eax ; wrmsr ; EFER LME|NX
- *     movl    %cr0, %eax ; orl $0x80000001, %eax ; movl %eax, %cr0  ; paging
- *     .byte 0xEA ; .long (lm64 - ap_tramp_start + TRAMP_PA) ; .word 0x18
- *     .code64
- *   lm64:
- *     movw    $0x20, %ax ; movw %ax, %ds/%es/%ss/%fs/%gs
- *     movq    (ap_tramp_params - ap_tramp_start + TRAMP_PA + 8),  %rsp   ; stack top
- *     movl    (ap_tramp_params - ap_tramp_start + TRAMP_PA + 24), %edi   ; cpu index
- *     movq    (ap_tramp_params - ap_tramp_start + TRAMP_PA + 16), %rax   ; ap_main
- *     callq   *%rax
- *   1:  hlt ; jmp 1b
- *     ; gdt32: null, 0x08 32-bit code, 0x10 32-bit data, 0x18 64-bit code, 0x20 64-bit data
- *     ; gdt_desc: .word gdt32_end-gdt32-1 ; .long gdt32 - ap_tramp_start + TRAMP_PA
+ * The readable source those bytes came from is tools/ap_boot_ref.S, which
+ * clang can assemble. tools/tramp-check.sh assembles it and compares, so
+ * the table below cannot drift from that source unnoticed (the check runs
+ * in CI). To change the trampoline, edit tools/ap_boot_ref.S and rebuild
+ * this table from it as the check's header describes.
  */
 
     .section .rodata

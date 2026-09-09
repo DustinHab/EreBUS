@@ -1518,6 +1518,20 @@ static void build_thread(void *arg)
     term_build_list(job.list, job.name, say_to_journal_line, NULL);
     obj_release(job.list);
     job.list = NULL;
+
+    /* Record how close the compile came to the stack guard. The machine's
+     * own compiler descends one frame per level of nesting; this line is
+     * the tripwire if a future change to it deepens the frames again. */
+    thread *self = sched_current();
+    char note[80];
+    u32 q = 0;
+    ap(note, &q, "stack high-water ");
+    apd(note, &q, thread_stack_highwater(self));
+    ap(note, &q, " of ");
+    apd(note, &q, thread_stack_size(self));
+    ap(note, &q, " bytes");
+    journal_says("build", note);
+
     building = false;
 }
 
@@ -1546,7 +1560,11 @@ bool term_build_start(object *list, const char *name)
     u32 k = 0;
     while (name && name[k] && k < NAME_SHOWN - 1) { job.name[k] = name[k]; k++; }
     job.name[k] = 0;
-    if (!thread_create("build", build_thread, NULL, thread_domain(sched_current()))) {
+    /* The build thread runs the machine's own compiler, whose code walk
+     * recurses per level of nesting; give it far more stack than a default
+     * thread so deeply nested source does not run it into its guard. */
+    if (!thread_create_stack("build", build_thread, NULL,
+                             thread_domain(sched_current()), 128 * 1024)) {
         obj_release(list);
         job.list = NULL;
         building = false;

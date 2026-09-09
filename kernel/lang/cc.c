@@ -5,7 +5,10 @@
  *   functions (16 params, variadic), full operator set, control flow, initializers, preprocessor with
  *   macros/#if/#include, inline asm in GNU form; integer arithmetic in 64 bits
  * - structs by value: caller keeps a copy and passes its address (own convention)
- * - not supported: 128-bit types, va_arg of a struct
+ * - unsigned __int128: add/sub/and/or/xor/mul and constant shifts, carried in a
+ *   register pair; no divide, no compare, no variable-count shift (bn.c is the
+ *   only user and needs none of those)
+ * - not supported: va_arg of a struct
  * - peephole optimizer switches: OPT_* defines, CC_NOPEEP, CC_PEEP_ONLY
  */
 #include <eb/cc.h>
@@ -322,8 +325,9 @@ static void sf_norm(u64 *m, i32 *e)
     while (*m && !(*m >> 63)) { *m <<= 1; (*e)--; }
 }
 
-/* Both keep to 64-bit arithmetic in halves, so that this compiler can
- * read its own text: there is no 128-bit type here. */
+/* Both keep to 64-bit arithmetic in halves. This compiler's own 128-bit
+ * support is partial -- no divide -- so the soft-float code stays clear of
+ * it and can be built by the compiler it lives in. */
 static void sf_mul10(u64 *m, i32 *e)
 {
     u64 b = *m & 0xffffffffULL, a = *m >> 32;
@@ -3821,6 +3825,12 @@ static void load_plain(sym *s, type *t)
  * patterns in the whole-number registers, so that va_arg can read
  * them all from one place. Answers how many bytes the caller must
  * take back off the stack afterwards. */
+/* Kept out of its callers' frames: gen_args carries two NPARAMS-wide local
+ * arrays, and folding them into the recursive gen_expr/gen_stmt would grow
+ * every level of the code walk's stack. The build thread runs this compiler
+ * with a bounded stack (see thread_create_stack), so the per-level frame
+ * has to stay small. */
+__attribute__((noinline))
 static u32 gen_args(u32 first, u32 count, const char *const *regs, bool variadic)
 {
     u32 list[NPARAMS];
@@ -3866,6 +3876,10 @@ static void gen_u128_operand(u32 i)
         o(n->ty->uns || is_ptr(n->ty) ? "    xor edx, edx\n" : "    cqo\n");
 }
 
+/* Also kept out of gen_expr's frame: it is reached from one arm of the
+ * expression walk and never recurses, so leaving it inline would only add
+ * its working set to every level of the recursion. */
+__attribute__((noinline))
 static void gen_u128_binop(u32 i)
 {
     node *n = N(i);
@@ -3913,6 +3927,14 @@ static void gen_u128_binop(u32 i)
     }
 }
 
+/* Kept a separate frame from gen_stmt. The two recurse over the code
+ * tree, and gen_stmt reaches an expression through here at several of its
+ * cases; were gen_expr folded into gen_stmt, its whole working set -- and
+ * that of everything it in turn inlines -- would ride on every level of
+ * the statement recursion, and a deeply nested function would run the
+ * build thread's stack into its guard. Both frames must stay small, so
+ * they stay apart. */
+__attribute__((noinline))
 static void gen_expr(u32 i)
 {
     if (!i || C.bad) return;
@@ -4465,6 +4487,13 @@ static void att_statement(asm_block *b, u32 bi, const char *s, u32 len)
     o("\n");
 }
 
+/* Reached from one place -- gen_stmt's ND_ASM case -- so clang would fold
+ * it in, and with it the operand-parsing buffers and the register-name
+ * matching. That is a large working set to hang on gen_stmt, which recurses
+ * per level of statement nesting; an inline-asm statement is rare and one
+ * more call is nothing, so it keeps its own frame and gen_stmt stays lean.
+ * This is what drops gen_stmt from ~800 bytes a level to a fraction of it. */
+__attribute__((noinline))
 static void gen_asm(u32 bi)
 {
     asm_block *b = &asms[bi];

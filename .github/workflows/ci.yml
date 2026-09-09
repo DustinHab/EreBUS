@@ -32,7 +32,7 @@ jobs:
           sudo apt-get update || true
           sudo apt-get install -y --no-install-recommends \
             clang lld nasm make mtools dosfstools unifont python3-pil \
-            qemu-system-x86 ovmf
+            qemu-system-x86 ovmf binutils
 
       - name: Build
         run: |
@@ -47,6 +47,32 @@ jobs:
       - name: Boot smoke (TCG)
         run: LIMIT=600 sh tools/bootsmoke.sh
 
+      # The compiler's code walk recurses per level of nesting; a fat
+      # per-level frame overflows the build thread's stack when the machine
+      # compiles its own kernel. Guard the frame at build time.
+      - name: Compiler stack frames
+        run: sh tools/stackframe-check.sh
+
+      # The AP trampoline is checked into ap_boot.S as a byte table (the
+      # machine's assembler has no 16-bit mode). Confirm it still equals the
+      # readable source it claims to come from.
+      - name: Trampoline byte table
+        run: sh tools/tramp-check.sh
+
+      # The machine's own compiler, assembler and linker build the whole
+      # kernel on the host, and the result is booted under TCG with -smp so
+      # its self-tests, its crypto (bn.c's 128-bit arithmetic through rsa
+      # and ecdsa) and its self-assembled trampoline all run. The on-machine
+      # build (tools/selfkernel.sh) needs KVM and stays in the pre-release
+      # gate; this proves the same toolchain on a plain runner.
+      - name: Self-build and boot the self-built kernel (TCG)
+        run: |
+          sh tools/selfbuild.sh build
+          cp build/esp.img build/self/esp.img
+          mcopy -o -i build/self/esp.img build/self/kernel.elf ::/erebus/kernel.elf
+          ESP=build/self/esp.img NOMAKE=1 LOG=build/self-smoke.log \
+            LIMIT=600 SMP=4 sh tools/bootsmoke.sh
+
       - name: Upload the kernel and the serial log
         if: always()
         uses: actions/upload-artifact@v4
@@ -56,6 +82,7 @@ jobs:
             build/kernel.elf
             build/BOOTX64.EFI
             build/smoke-serial.log
+            build/self-smoke.log
           if-no-files-found: ignore
 
   # Build every parser fuzzer and run each briefly under ASan and UBSan.
