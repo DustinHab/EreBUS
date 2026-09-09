@@ -3,7 +3,7 @@
 # - door key typed through the screen once; sources streamed over one ssh shell session (tools/mkupload.sh)
 # - 'build kernel' in the background; the list is polled for kernel.elf; 'install kernel.elf'; 'restart'
 # - the booted kernel must report the version text sent with the sources
-# - run under KVM: sh build/kvm.sh tools/selfkernel.sh (minutes on a real processor, hours under TCG)
+# - run under KVM: sh tools/kvm.sh tools/selfkernel.sh (minutes on a real processor, hours under TCG)
 cd "$(dirname "$0")/.."
 BUILD=build
 KEY=$HOME/.ssh/erebus_remote

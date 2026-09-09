@@ -119,7 +119,7 @@ Report privately, not in a public issue.
   and the fix private until a release is ready.
 - Include: the version, what an attacker can reach, the steps or input
   that trigger it, and -- if you have one -- a minimal reproducer against
-  the test battery (`build/battery.sh`) or one of the fuzzers under
+  the test battery (`tools/battery.sh`) or one of the fuzzers under
   `tools/fuzz/`.
 
 There is no bounty. Reports are read and answered; a fix is released with

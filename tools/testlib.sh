@@ -1,6 +1,6 @@
 #!/bin/sh
 # testlib.sh -- shared by the test scripts: paths, KVM, key input, waiting on the serial log.
-# - BUILD may be set by the caller (build/battery.sh runs every test in its own directory)
+# - BUILD may be set by the caller (tools/battery.sh runs every test in its own directory)
 # - KVM is used when /dev/kvm is writable, unless NOKVM=1; then keys are sent faster
 # - waitlog/waitcount/waitfile replace fixed sleeps; bootwait waits for the shell
 
@@ -10,12 +10,12 @@ OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
 
 KVM=0
-if [ -z "$NOKVM" ] && [ -w /dev/kvm ] && [ -f "$ROOT/build/kvm-shim/qemu-system-x86_64" ]; then
+if [ -z "$NOKVM" ] && [ -w /dev/kvm ] && [ -f "$ROOT/tools/kvm-shim/qemu-system-x86_64" ]; then
     KVM=1
-    chmod +x "$ROOT/build/kvm-shim/qemu-system-x86_64"
+    chmod +x "$ROOT/tools/kvm-shim/qemu-system-x86_64"
     case ":$PATH:" in
-        *":$ROOT/build/kvm-shim:"*) ;;
-        *) PATH="$ROOT/build/kvm-shim:$PATH"; export PATH ;;
+        *":$ROOT/tools/kvm-shim:"*) ;;
+        *) PATH="$ROOT/tools/kvm-shim:$PATH"; export PATH ;;
     esac
 fi
 if [ "$KVM" = 1 ]; then

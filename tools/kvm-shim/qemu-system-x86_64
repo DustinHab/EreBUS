@@ -1,0 +1,5 @@
+#!/bin/sh
+# A stand-in for qemu that adds KVM to whatever it is asked, so every
+# test script runs on the real processor without knowing it:
+#   PATH=tools/kvm-shim:$PATH sh tools/termtest.sh
+exec /usr/bin/qemu-system-x86_64 "$@" -accel kvm

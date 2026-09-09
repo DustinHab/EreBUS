@@ -24,7 +24,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 
 - One regression test: `sh tools/<test>.sh` (the table is in `MANUAL.md`).
   A test uses KVM when `/dev/kvm` is writable and TCG otherwise.
-- The whole battery: `sh build/battery.sh` -- one build, then 37 tests,
+- The whole battery: `sh tools/battery.sh` -- one build, then 37 tests,
   most in parallel lanes, three run alone. It prints seconds per test,
   any `FAILED` lines, and a total. A failed or timed-out test runs once
   more before it is reported.

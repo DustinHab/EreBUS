@@ -4,7 +4,7 @@ name: ci
 # the image once under emulation to confirm the self-tests pass and the
 # kernel reaches idle. GitHub's runners have no nested KVM, so the boot
 # runs under TCG; the full 37-test battery needs KVM and is run before a
-# release on a machine that has it (build/battery.sh).
+# release on a machine that has it (tools/battery.sh).
 
 on:
   push:

@@ -564,8 +564,8 @@ static u32 read_line(char *buf, u32 max)
             if (n && buf[n - 1] == '\\') { n--; getc_(); if (n < max - 1) buf[n++] = ' '; continue; }
             break;
         }
-        /* A string or char literal is copied whole, so // or /* inside it
-         * (a url in a #define, say) is not mistaken for a comment. */
+        /* A string or char literal is copied whole, so a comment marker
+         * inside it (a url in a #define, say) is not taken for a comment. */
         if (c == '"' || c == '\'') {
             char q = (char)c;
             getc_(); if (n < max - 1) buf[n++] = (char)c;

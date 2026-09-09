@@ -245,7 +245,11 @@ Measured on 32 cores under KVM, six at a time: about 10 minutes for all 37 tests
 - The ssh door serves up to four visitors at once (a fifth displaces the longest-idle); it honours a client-driven rekey but does not force one.
 - RTL8168/8169 driver written from documentation, untested on silicon.
 - Two HID inputs on one device: implemented, not tested on a real device.
-- No 128-bit integer type in the compiler. This is the last thing that keeps the machine's own compiler from rebuilding the whole kernel: it now handles the comments, the segment-relative and basic inline assembly, the SMP atomic builtins and `rdseed` that the self-hosting build once tripped over, and stops only at `bn.c`, whose big-number arithmetic uses `unsigned __int128`. Implementing that (a two-register value model) is the open piece for a full self-build; `build/kvm-battery.sh` runs the self-build and reports how far it gets.
+- The machine's own compiler builds every kernel source but two, so a full self-build is not yet possible. It now handles the comments, the segment-relative and basic inline assembly, the SMP atomic builtins and `rdseed` that the self-hosting build once tripped over; what remains:
+  - **No 128-bit integer type.** `bn.c`'s big-number arithmetic uses `unsigned __int128`; supporting it means a two-register value model through the code generator.
+  - **No 16-bit assembly.** `ap_boot.S`, the SMP real-mode trampoline, uses `.code16`, which the assembler does not do. The pragmatic path is to assemble the trampoline once with `nasm` and check it in as a byte table, so the assembler need not learn 16-bit mode.
+
+  `tools/selfbuild.sh build` compiles every source with the machine's tools and lists what it cannot; `tools/kvm-battery.sh` runs it and fails only on a regression beyond those two known limits.
 
 ## Releases
 
@@ -288,7 +292,7 @@ authorities) is credited in [NOTICE](NOTICE).
 ## Contributing and security
 
 How to build, test, and submit a change: [CONTRIBUTING.md](CONTRIBUTING.md).
-The battery (`sh build/battery.sh`) must be green before a change ships.
+The battery (`sh tools/battery.sh`) must be green before a change ships.
 
 To report a security flaw, and for the threat model and known limits:
 [SECURITY.md](SECURITY.md). Report privately, not in a public issue.

@@ -17,7 +17,7 @@ else
     make -s cchost >/dev/null 2>&1 || { echo "cchost does not build"; exit 1; }
     rm -f $OUT/*.obj $OUT/*.asm $OUT/kernel.elf
 
-    HEADERS="kernel/include/eb/*.h kernel/net/gf25519.h kernel/gfx/*.h common/*.h"
+    HEADERS="kernel/include/eb/*.h kernel/net/*.h kernel/gfx/*.h common/*.h"
     CS=$(ls kernel/*.c kernel/*/*.c kernel/*/*/*.c 2>/dev/null)
     [ -f $BUILD/version.c ] && CS="$CS $BUILD/version.c"     # what the kernel calls itself, made by make
     SS=$(ls kernel/arch/x86_64/*.S kernel/user/*.S)

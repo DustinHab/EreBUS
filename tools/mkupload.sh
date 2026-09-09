@@ -10,7 +10,7 @@ printf 'make list %s\n' "$LIST"
 printf 'go %s\n' "$LIST"
 for f in kernel/*.c kernel/*/*.c kernel/*/*/*.c \
          kernel/arch/x86_64/*.S kernel/user/*.S \
-         kernel/include/eb/*.h kernel/net/gf25519.h kernel/gfx/*.h common/*.h; do
+         kernel/include/eb/*.h kernel/net/*.h kernel/gfx/*.h common/*.h; do
     [ -f "$f" ] || continue
     printf 'receive %s bytes as %s\n' "$(wc -c < "$f")" "$(basename "$f")"
     cat "$f"
