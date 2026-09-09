@@ -579,6 +579,20 @@ static void rm_reg(as *a, u8 op8, u8 op, const operand *rm, const operand *r, u8
     else modrm_rr(a, r->reg, rm->reg);
 }
 
+/* Like rm_reg, but for a two-byte opcode (0F xx): the atomic read-modify
+ * pair xadd (0F C0/C1) and cmpxchg (0F B0/B1), r/m as the destination and
+ * the register in the reg field. */
+static void rm_reg_0f(as *a, u8 op8, u8 op, const operand *rm, const operand *r, u8 size)
+{
+    if (size == 16) emit8(a, 0x66);
+    rex(a, size == 64, r->reg, index_of(rm), base_of(rm),
+        byte_needs_rex(r, size) || byte_needs_rex(rm, size));
+    emit8(a, 0x0F);
+    emit8(a, size == 8 ? op8 : op);
+    if (rm->kind == OP_MEM) mem_tail(a, r->reg, rm, 0);
+    else modrm_rr(a, r->reg, rm->reg);
+}
+
 /* A single reg/mem operand with the opcode's own digit in the reg
  * field, and an immediate of imm_bytes after it. */
 static void rm_digit(as *a, u8 op8, u8 op, u8 digit, const operand *rm, u8 size, u32 imm_bytes)
@@ -1145,6 +1159,17 @@ static void assemble_line(as *a, const char *s, u32 n)
     const char *ops = s + rest;
     u32 on = n - rest;
 
+    /* The lock prefix, then the instruction it applies to. */
+    if (word_is(mn, ml, "lock")) {
+        emit8(a, 0xF0);
+        i = rest;
+        j = i;
+        while (j < n && is_name_char(s[j])) j++;
+        mn = s + i; ml = j - i;
+        rest = skip_sp(s, n, j);
+        ops = s + rest; on = n - rest;
+    }
+
     /* Directives first. */
     if (word_is(mn, ml, "section")) {
         u32 sec;
@@ -1289,8 +1314,23 @@ static void assemble_line(as *a, const char *s, u32 n)
             return;
         }
         if (word_is(mn, ml, "xchg")) {
-            if (d.kind != OP_REG || sr.kind != OP_REG || d.size != sr.size) { fail(a, "xchg wants two registers alike", NULL); return; }
-            rm_reg(a, 0x86, 0x87, &d, &sr, d.size);
+            /* reg,reg or a memory destination with a register (the atomic
+             * swap the lock uses). xchg with memory is locked implicitly. */
+            if (sr.kind != OP_REG) { fail(a, "xchg's second operand is a register", NULL); return; }
+            u8 size = width_of(a, &d, &sr);
+            if (!size) return;
+            if (d.kind == OP_REG && d.size != sr.size) { fail(a, "xchg wants two registers alike", NULL); return; }
+            rm_reg(a, 0x86, 0x87, &d, &sr, size);
+            return;
+        }
+        if (word_is(mn, ml, "xadd") || word_is(mn, ml, "cmpxchg")) {
+            /* r/m, reg: the destination is memory or a register, the second
+             * operand a register. Used by the atomic builtins with lock. */
+            if (sr.kind != OP_REG) { fail(a, "the second operand is a register", NULL); return; }
+            u8 size = width_of(a, &d, &sr);
+            if (!size) return;
+            if (mn[0] == 'x') rm_reg_0f(a, 0xC0, 0xC1, &d, &sr, size);
+            else              rm_reg_0f(a, 0xB0, 0xB1, &d, &sr, size);
             return;
         }
         if (word_is(mn, ml, "bt") || word_is(mn, ml, "bts") || word_is(mn, ml, "btr")) {

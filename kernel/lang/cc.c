@@ -99,7 +99,7 @@ enum {
     ND_CAST, ND_INCDEC, ND_SYSCALL, ND_COMMA, ND_VASTART, ND_VAARG, ND_BYVAL,
     ND_EXPR, ND_RETURN, ND_IF, ND_WHILE, ND_DO, ND_FOR, ND_BLOCK,
     ND_BREAK, ND_CONTINUE, ND_SWITCH, ND_CASE, ND_DEFAULT,
-    ND_GOTO, ND_LABEL, ND_ASM, ND_MEMCPY, ND_ZERO
+    ND_GOTO, ND_LABEL, ND_ASM, ND_MEMCPY, ND_ZERO, ND_ATOMIC
 };
 
 typedef struct {
@@ -1838,6 +1838,13 @@ static void add_type(u32 i)
         n->ty = C.t_long;
         break;
 
+    case ND_ATOMIC:
+        /* The value the pointer points at -- the type the builtin reads
+         * and returns; a bare fence (no pointer) is typed long and unused. */
+        n->ty = (n->lhs && is_ptr(N(n->lhs)->ty) && N(n->lhs)->ty->base)
+                ? N(n->lhs)->ty->base : C.t_long;
+        break;
+
     case ND_VAARG:
         break;                        /* set when made */
 
@@ -2338,6 +2345,33 @@ static u32 primary(void)
         while (eat(",")) assign();
         expect(")");
         return e;
+    }
+    /* The atomic builtins the kernel's locks and counters use. A memory
+     * order argument (and any extra) is parsed and discarded. */
+    {
+        static const struct { const char *name; u8 op; u8 args; } atomics[] = {
+            { "__sync_synchronize",       0, 0 },
+            { "__sync_lock_release",      1, 1 },
+            { "__sync_lock_test_and_set", 2, 2 },
+            { "__atomic_exchange_n",      2, 3 },
+            { "__sync_fetch_and_add",     3, 2 },
+            { "__sync_fetch_and_or",      4, 2 },
+            { "__atomic_store_n",         5, 3 },
+            { 0, 0, 0 }
+        };
+        for (u32 ai = 0; atomics[ai].name; ai++) {
+            if (is_kw(atomics[ai].name)) {
+                advance();
+                expect("(");
+                u32 nn = mk(ND_ATOMIC);
+                N(nn)->val = atomics[ai].op;
+                if (atomics[ai].args >= 1) N(nn)->lhs = assign();
+                if (atomics[ai].args >= 2) { expect(","); N(nn)->rhs = assign(); }
+                while (eat(",")) assign();     /* the memory order, ignored */
+                expect(")");
+                return nn;
+            }
+        }
     }
     if (C.cur.kind == TK_IDENT) {
         sym *s = sym_find(C.cur.text);
@@ -3250,6 +3284,7 @@ static const char *const argx[REGARGS]  = { "xmm0", "xmm1", "xmm2", "xmm3", "xmm
 
 static void gen_expr(u32 i);
 static void gen_stmt(u32 i);
+static const char *gp_at(i32 idx, u8 width);
 
 static void gen_addr(u32 i)
 {
@@ -3975,6 +4010,36 @@ static void gen_expr(u32 i)
         static const char *const sregs[6] = { "rax", "rdi", "rsi", "rdx", "r10", "r8" };
         gen_args(n->aux, (u32)n->val, sregs, false);
         o("    syscall\n");
+        return;
+    }
+    case ND_ATOMIC: {
+        u32 op = (u32)n->val;
+        if (op == 0) { o("    mfence\n"); return; }      /* __sync_synchronize */
+        u32 w = (n->ty && n->ty->size) ? (n->ty->size > 8 ? 8 : n->ty->size) : 8;
+        /* the value in rsi, the pointer in rdi -- value first, so working
+         * out the pointer cannot disturb it */
+        if (n->rhs) { gen_expr(n->rhs); o("    push rax\n"); }
+        gen_expr(n->lhs);
+        o("    mov rdi, rax\n");
+        if (n->rhs) o("    pop rsi\n");
+        const char *wq = w == 1 ? "byte" : w == 2 ? "word" : w == 4 ? "dword" : "qword";
+        const char *si = gp_at(6, (u8)w);                /* rsi at the width */
+        const char *cx = gp_at(1, (u8)w);                /* rcx at the width */
+        const char *ax = gp_at(0, (u8)w);                /* rax at the width */
+        switch (op) {
+        case 1: o("    mov %s [rdi], 0\n", wq); return;                       /* lock_release */
+        case 5: o("    mov [rdi], %s\n", si); return;                         /* store_n */
+        case 2: o("    xchg [rdi], %s\n    mov rax, rsi\n", si); return;      /* test_and_set/exchange */
+        case 3: o("    lock xadd [rdi], %s\n    mov rax, rsi\n", si); return; /* fetch_and_add */
+        case 4: {                                                            /* fetch_and_or */
+            u32 l = C.label++;
+            o("    mov %s, [rdi]\n", ax);
+            o("%l:\n", l);
+            o("    mov rcx, rax\n    or %s, %s\n", cx, si);
+            o("    lock cmpxchg [rdi], %s\n    jne %l\n", cx, l);
+            return;                                                          /* old value in rax */
+        }
+        }
         return;
     }
     case ND_VASTART: {
@@ -4836,6 +4901,12 @@ i64 cc_compile(const u8 *src, u64 len, const char *src_name,
     sym_add("", C.t_void, S_ENUM);            /* index zero means no name */
     define_text("__erebus__", "1");
     define_text("__x86_64__", "1");
+    define_text("__ATOMIC_RELAXED", "0");
+    define_text("__ATOMIC_CONSUME", "1");
+    define_text("__ATOMIC_ACQUIRE", "2");
+    define_text("__ATOMIC_RELEASE", "3");
+    define_text("__ATOMIC_ACQ_REL", "4");
+    define_text("__ATOMIC_SEQ_CST", "5");
 
     if (!push_source(src, len, src_name ? src_name : "the text", false)) return -1;
     lex_raw(&C.nxt);
