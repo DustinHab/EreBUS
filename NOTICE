@@ -1,0 +1,41 @@
+EreBUS
+Copyright (C) 2026  DustinHab
+
+This product includes third-party material listed below. EreBUS itself is
+licensed under the GNU Affero General Public License, version 3 or later
+(see LICENSE). The items below keep their own licenses; nothing here
+restricts your rights under those licenses.
+
+--------------------------------------------------------------------------
+GNU Unifont
+--------------------------------------------------------------------------
+The screen font is built from GNU Unifont, used under the SIL Open Font
+License, Version 1.1.
+
+    Copyright Roman Czyborra, Paul Hardy, and the GNU Unifont authors.
+
+tools/mkfont.py extracts the 8x16 glyphs the kernel needs from the Unifont
+.hex distribution into kernel/gfx/font8x16.h at build time. Only the glyph
+bitmaps for the code points in use are embedded, not the whole font.
+
+The SIL Open Font License 1.1 is available at
+https://openfontlicense.org/ .
+
+--------------------------------------------------------------------------
+TLS root authorities
+--------------------------------------------------------------------------
+kernel/net/authorities.h contains the DER encodings of public certificate
+authority certificates. The selection of which authorities to trust
+follows the Mozilla CA Certificate Program's included-roots list, whose
+trust-store data Mozilla distributes under the Mozilla Public License,
+Version 2.0 (https://www.mozilla.org/MPL/2.0/).
+
+The certificates themselves are the public certificates issued by those
+authorities (Sectigo, Let's Encrypt / ISRG, DigiCert, GlobalSign, Google
+Trust Services, and others named in tools/pki/authorities.txt). They are
+factual public data. tools/mkauthorities.sh regenerates the header from
+the PEM files under tools/pki/authorities/ and the list in
+tools/pki/authorities.txt.
+
+A host under a root not in this list is treated as unverified unless its
+authority is added in the machine's settings.

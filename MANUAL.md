@@ -442,7 +442,7 @@ For a C task it first compiles the source with the machine's own compiler (the s
 - An authority of your own: write `authority | <base64>` into the settings, the base64 being the authority certificate's public key as `openssl x509 -in ca.pem -pubkey -noout | openssl pkey -pubin -outform DER | base64 -w0` prints it. Up to four lines. A server whose chain reaches one of them counts as verified.
 - What becomes of an unverified server: by default the page still comes, marked `sealed, unverified`, and the log and journal say why (`no trusted authority signs the chain`, `the certificate names no host that matches`, `a certificate in the chain has expired`, ...). `tls | strict` refuses such a page instead.
 - The clock matters: dates are judged against the machine's clock, which comes from the real-time clock at start and from the net once a time server answered (`net: the clock was set from the net`).
-- Limits: a host under a root not in the list is unverified until its authority is written into the settings; no revocation checking; no name constraints. The self-update does not depend on any of this: its package is ed25519-signed (13.8).
+- Limits: a host under a root not in the list is unverified until its authority is written into the settings; no revocation checking. A leaf whose names fall outside a signing authority's name constraints is refused (RFC 5280 dNSName permitted and excluded subtrees). The self-update does not depend on any of this: its package is ed25519-signed (13.8).
 
 ### 12.6 The browser
 
@@ -543,7 +543,7 @@ A machine on the network can keep itself current from a published release, with 
 - A far-work result is signed by the node that produced it, but not otherwise checked: the answer is that node's word, not a proof the computation is right. Running the same task on several nodes and comparing is left for a later version.
 - Broadcast discovery covers the local network only; across routers a node must be entered as peer once, after which gossip and heartbeat keep it known.
 - One transfer at a time per node; one job at a time per worker.
-- https verifies servers against thirty-eight built-in authorities and those written into the settings (12.5); no revocation checking, no name constraints.
+- https verifies servers against thirty-eight built-in authorities and those written into the settings (12.5); no revocation checking; a leaf outside a signing authority's name constraints is refused.
 
 ---
 

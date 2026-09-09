@@ -5,12 +5,26 @@
 #include <eb/types.h>
 #include <eb/panic.h>
 #include <eb/io.h>
+#include <eb/crypto.h>
 
-/* Fixed for now. Once a random source is available (RDRAND or RDSEED,
- * at the latest when processes appear) the guard is overwritten at
- * start-up: a predictable value can simply be written back by whoever
- * is doing the overwriting, which makes it worthless. */
+/* The initial value is a placeholder used only until stack_guard_init
+ * runs, very early in start-up, and replaces it with a random one from
+ * the entropy pool. A guard that stayed at a value printed in the source
+ * would be no guard at all. */
 u64 __stack_chk_guard = 0x5EC0DE00C0FFEE11ULL;
+
+/* Replaces the guard with a random value. Called once, before start-up
+ * has called anything that will later check its canary against the new
+ * value. It must not carry a canary of its own: it changes the guard and
+ * then returns, and its own epilogue would compare the old saved canary
+ * against the new global and fail. */
+__attribute__((no_stack_protector))
+void stack_guard_init(void)
+{
+    u64 g = 0;
+    rand_bytes((u8 *)&g, sizeof(g));
+    if (g) __stack_chk_guard = g;   /* never weaken it to zero */
+}
 
 /* Straight to the serial port, byte by byte: the stack this runs on
  * has just been proven rotten, so nothing here may lean on anything

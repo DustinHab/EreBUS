@@ -373,7 +373,7 @@ static void eapol_in(const u8 *e, u32 len)
         memcpy(mic, copy + 4 + 77, 16);
         memset(copy + 4 + 77, 0, 16);
         hmac_sha1(st.ptk, 16, copy, 4 + body, calc);
-        if (memcmp(mic, calc, 16) != 0) { fail("the password did not open it"); return; }
+        if (!ct_equal(mic, calc, 16)) { fail("the password did not open it"); return; }
 
         static u8 plain[256];
         if (kdlen > sizeof(plain) + 8 || kdlen < 24) { fail("invalid key data from the network"); return; }

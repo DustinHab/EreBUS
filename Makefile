@@ -201,8 +201,10 @@ $(LOADER): $(BOOT_SRC) boot/efi.h common/bootinfo.h common/elf64.h
 	@echo "  CC      $(BOOT_SRC)"
 	@$(CC) $(BOOT_FLAGS) -c $(BOOT_SRC) -o $(BUILD)/boot.o
 	@echo "  LINK    $@"
+	@# -Brepro: no wall-clock timestamp in the PE header, so two builds of
+	@# the same source produce the same loader (tools/reproduce.sh).
 	@$(PELINK) -subsystem:efi_application -entry:efi_main -nodefaultlib \
-	           $(BUILD)/boot.o -out:$@
+	           -Brepro $(BUILD)/boot.o -out:$@
 
 # --- kernel -----------------------------------------------------------
 $(BUILD)/%.o: %.c $(FONT)

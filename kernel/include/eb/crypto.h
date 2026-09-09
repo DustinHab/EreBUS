@@ -110,9 +110,18 @@ bool aes128_gcm_open(const u8 key[16], const u8 iv[12],
                      const u8 *aad, u32 alen,
                      const u8 *ct, u32 len, const u8 tag[16], u8 *pt);
 
-/* Random bytes: rdrand where the processor offers it, and a hash
- * chain over the cycle counter where it does not. */
+/* Random bytes from a hash-based entropy pool seeded by RDSEED, then
+ * RDRAND, then the cycle counter -- as much true randomness as the
+ * hardware gives, folded through SHA-256. */
 void rand_bytes(u8 *out, u32 len);
+
+/* Replaces the stack-protector guard with a random value. Called once,
+ * very early in start-up. */
+void stack_guard_init(void);
+
+/* Constant-time equality: no early exit, so a mismatch is not timed on.
+ * Returns true when the two strings are equal. */
+bool ct_equal(const void *a, const void *b, u32 len);
 
 /* Known-answer tests for all of the above. TLS refuses to exist when
  * these fail: a seal that cannot prove itself seals nothing. */

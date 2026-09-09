@@ -36,6 +36,7 @@ static const u8 OID_SKI[]        = { 0x55,0x1D,0x0E };
 static const u8 OID_AKI[]        = { 0x55,0x1D,0x23 };
 static const u8 OID_POLICIES[]   = { 0x55,0x1D,0x20 };
 static const u8 OID_CRL_DP[]     = { 0x55,0x1D,0x1F };
+static const u8 OID_NAME_CON[]   = { 0x55,0x1D,0x1E };   /* nameConstraints */
 static const u8 OID_POLICY_CON[] = { 0x55,0x1D,0x24 };
 static const u8 OID_INHIBIT[]    = { 0x55,0x1D,0x36 };
 static const u8 OID_AIA[]        = { 0x2B,0x06,0x01,0x05,0x05,0x07,0x01,0x01 };
@@ -142,6 +143,14 @@ static bool parse_extensions(x509_cert *c, const asn1_tlv *wrap)
             asn1_inside(&in, &es);
             while (asn1_next(&es, &o))
                 if (OID(&o, OID_SERVER_AUTH) || OID(&o, OID_ANY_EKU)) c->eku_server = true;
+        } else if (OID(&oid, OID_NAME_CON)) {
+            /* Kept whole; the walk enforces it on the names below this
+             * certificate. Recognising it here also stops a genuine
+             * name-constrained authority from being rejected as an
+             * unknown critical extension. */
+            if (!asn1_expect(&v, ASN1_SEQUENCE, &in)) return false;
+            c->nc = in.p;
+            c->nclen = in.len;
         } else if (critical &&
                    !OID(&oid, OID_SKI) && !OID(&oid, OID_AKI) && !OID(&oid, OID_POLICIES) &&
                    !OID(&oid, OID_CRL_DP) && !OID(&oid, OID_POLICY_CON) && !OID(&oid, OID_INHIBIT) &&
@@ -381,6 +390,62 @@ static bool worth_trying(const opened *o, const x509_cert *c)
 }
 
 /* ------------------------------------------------------------------ */
+/* Name constraints                                                    */
+/* ------------------------------------------------------------------ */
+
+/* A dNSName inside a constraint subtree (RFC 5280 4.2.1.10): a suffix at
+ * a label boundary. An empty constraint covers everything; a leading dot
+ * is tolerated and treated the same. Case-insensitive, like host names. */
+static bool dns_in_subtree(const u8 *cons, u32 clen, const u8 *name, u32 nlen)
+{
+    if (clen && cons[0] == '.') { cons++; clen--; }
+    if (clen == 0) return true;
+    if (nlen == clen) return name_eq(cons, clen, name, nlen);
+    if (nlen > clen && name[nlen - clen - 1] == '.')
+        return name_eq(cons, clen, name + (nlen - clen), clen);
+    return false;
+}
+
+/* Applies one certificate's name constraints to every dNSName the leaf
+ * carries. A dNSName is bound only by dNSName subtrees; other name types
+ * are left to their own kind. False when a leaf name is excluded, or when
+ * dNSName permitted subtrees exist and a leaf name matches none of them --
+ * which is how a constrained intermediate is kept from vouching for a
+ * host outside the ground it was trusted for. */
+static bool names_within(const x509_cert *ca, const x509_cert *leaf)
+{
+    if (!ca->nc || !leaf->san) return true;
+
+    asn1_span sans; asn1_tlv nm;
+    asn1_span_of(&sans, leaf->san, leaf->sanlen);
+    while (asn1_next(&sans, &nm)) {
+        if (nm.tag != ASN1_CONTEXT(2)) continue;          /* dNSName only */
+
+        bool have_permitted = false, matched = false;
+        asn1_span top; asn1_tlv side;
+        asn1_span_of(&top, ca->nc, ca->nclen);
+        while (asn1_next(&top, &side)) {
+            bool excl = side.tag == ASN1_CONTEXT_C(1);    /* excludedSubtrees */
+            bool perm = side.tag == ASN1_CONTEXT_C(0);    /* permittedSubtrees */
+            if (!excl && !perm) continue;
+            asn1_span subs; asn1_tlv gs;
+            asn1_span_of(&subs, side.p, side.len);
+            while (asn1_next(&subs, &gs)) {
+                if (gs.tag != ASN1_SEQUENCE) continue;     /* GeneralSubtree */
+                asn1_span gi; asn1_tlv base;
+                asn1_inside(&gs, &gi);
+                if (!asn1_next(&gi, &base) || base.tag != ASN1_CONTEXT(2)) continue;
+                bool m = dns_in_subtree(base.p, base.len, nm.p, nm.len);
+                if (excl && m) return false;
+                if (perm) { have_permitted = true; if (m) matched = true; }
+            }
+        }
+        if (have_permitted && !matched) return false;
+    }
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
 /* The walk                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -454,6 +519,9 @@ x509_status x509_verify_chain(const u8 *const *ders, const u32 *lens, u32 count,
         if (d != X509_VERIFIED) return d;
         if (!key_fits(c->sig, p->key.kind)) return X509_UNSUPPORTED;
         if (!x509_check_signature(c, &p->key)) return X509_BAD_SIGNATURE;
+        /* This authority constrains everything beneath it, the leaf
+         * included. */
+        if (!names_within(p, &certs[0])) return X509_NAME_NOT_PERMITTED;
         used[next] = true;
         cur = next;
     }
@@ -473,6 +541,7 @@ const char *x509_status_text(x509_status s)
     case X509_UNSUPPORTED:      return "the chain uses an algorithm or extension not supported";
     case X509_NOT_AN_AUTHORITY: return "a certificate in the chain is not marked as an authority";
     case X509_NOT_A_SERVER:     return "the certificate is not issued for a server";
+    case X509_NAME_NOT_PERMITTED: return "a host in the certificate lies outside an authority's name constraints";
     }
     return "not verified";
 }

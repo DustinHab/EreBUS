@@ -68,6 +68,7 @@ typedef struct {
     const u8 *spki;    u32 spkilen;     /* the SubjectPublicKeyInfo, whole element */
     pki_key   key;                      /* kind KEY_NONE when the key is not supported */
     const u8 *san;     u32 sanlen;      /* the GeneralNames, or NULL */
+    const u8 *nc;      u32 nclen;       /* nameConstraints content, or NULL */
     bool      is_ca;                    /* basicConstraints cA */
     bool      has_key_usage, may_sign_certs;
     bool      has_eku, eku_server;      /* extendedKeyUsage present; serverAuth or any in it */
@@ -96,7 +97,8 @@ typedef enum {
     X509_WRONG_HOST,        /* no name in the certificate matches the host */
     X509_UNSUPPORTED,       /* a key, signature or critical extension not supported */
     X509_NOT_AN_AUTHORITY,  /* a certificate in the middle is not marked as an authority */
-    X509_NOT_A_SERVER       /* the leaf is not issued for server use */
+    X509_NOT_A_SERVER,      /* the leaf is not issued for server use */
+    X509_NAME_NOT_PERMITTED /* a name in the leaf lies outside an authority's name constraints */
 } x509_status;
 
 #define X509_MAX_CHAIN 8

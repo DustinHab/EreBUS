@@ -39,6 +39,7 @@
 #include <eb/web.h>
 #include <eb/string.h>
 #include <eb/syscall.h>
+#include <eb/crypto.h>
 #include <eb/pic.h>
 #include <eb/apic.h>
 #include <eb/smp.h>
@@ -1279,6 +1280,10 @@ void kmain(eb_boot_info *bi)
      * wrong with the framebuffer. */
     bool com = serial_init();
     if (com) kout_add_sink(serial_putc);
+
+    /* Replace the stack-protector guard with a random value before any
+     * of the code below could return into a canary check. */
+    stack_guard_init();
 
     /* The loader hands over a physical pointer, because it built the
      * structure before there was an address space to speak of. Move it

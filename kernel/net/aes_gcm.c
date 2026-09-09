@@ -5,6 +5,7 @@
 #include <eb/crypto.h>
 #include <eb/cpu.h>
 #include <eb/io.h>
+#include <eb/spin.h>
 
 /* ------------------------------------------------------------------ */
 /* AES-128                                                             */
@@ -219,6 +220,17 @@ bool aes128_gcm_open(const u8 key[16], const u8 iv[12],
     return true;
 }
 
+/* Compares two byte strings without an early exit, so the time taken
+ * does not reveal how many leading bytes matched. For anything a mismatch
+ * must not be timed on -- a message tag, a key confirmation. */
+bool ct_equal(const void *a, const void *b, u32 len)
+{
+    const u8 *x = (const u8 *)a, *y = (const u8 *)b;
+    u8 diff = 0;
+    for (u32 i = 0; i < len; i++) diff |= (u8)(x[i] ^ y[i]);
+    return diff == 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Randomness                                                          */
 /* ------------------------------------------------------------------ */
@@ -230,31 +242,67 @@ static bool rdrand64(u64 *v)
     return ok != 0;
 }
 
+static bool rdseed64(u64 *v)
+{
+    u8 ok = 0;
+    __asm__ volatile ("rdseed %0; setc %1" : "=r"(*v), "=qm"(ok) :: "cc");
+    return ok != 0;
+}
+
+/* A hash-based entropy pool.
+ *
+ * The pool accumulates whatever true randomness the hardware offers --
+ * RDSEED first, the seeded source; then RDRAND -- folded together with
+ * the cycle counter through SHA-256, so no output rests on a single
+ * sample. Each request stirs in fresh entropy and then returns
+ * H(pool || counter): the counter keeps successive blocks distinct, and
+ * hashing the pool rather than emitting it means an output never reveals
+ * the pool it came from. On a machine with neither RDSEED nor RDRAND the
+ * cycle counter is all there is, which is weak and predictable -- the
+ * hardware's limit, said plainly, not a choice this makes. */
+static u8       entropy_pool[32];
+static u64      rng_counter;
+static bool     rng_ready;
+static bool     have_rdrand, have_rdseed;
+static spinlock rng_lock;
+
+static void pool_stir(void)
+{
+    u64 s[4] = { 0, 0, rdtsc(), rng_counter };
+    if (have_rdseed)
+        for (u32 t = 0; t < 32 && !rdseed64(&s[0]); t++) __asm__ volatile ("pause");
+    if (have_rdrand)
+        for (u32 t = 0; t < 10 && !rdrand64(&s[1]); t++) { }
+
+    u8 buf[32 + sizeof(s)];
+    for (u32 i = 0; i < 32; i++) buf[i] = entropy_pool[i];
+    for (u32 i = 0; i < sizeof(s); i++) buf[32 + i] = ((const u8 *)s)[i];
+    sha256(buf, sizeof(buf), entropy_pool);
+}
+
 void rand_bytes(u8 *out, u32 len)
 {
-    static bool checked;
-    static bool have_rdrand;
-    if (!checked) {
+    u64 flags = spin_lock_irq(&rng_lock);
+
+    if (!rng_ready) {
         cpu_info c;
         cpu_detect(&c);
         have_rdrand = c.rdrand;
-        checked = true;
+        have_rdseed = c.rdseed;
+        for (u32 i = 0; i < 24; i++) pool_stir();   /* fill the pool before first use */
+        rng_ready = true;
     }
 
     u32 i = 0;
     while (i < len) {
-        u64 v = 0;
-        bool got = false;
-        if (have_rdrand) {
-            for (u32 try = 0; try < 10 && !got; try++) got = rdrand64(&v);
-        }
-        /* Fold the cycle counter in whether or not the hardware
-         * answered: on real silicon it hardens an already-good source,
-         * and under an emulator without rdrand it is what there is. */
-        v ^= rdtsc();
-        v = v * 0x2545F4914F6CDD1DULL + 0x9E3779B97F4A7C15ULL;
-        u8 hashed[32];
-        sha256(&v, sizeof(v), hashed);
-        for (u32 j = 0; j < 32 && i < len; j++) out[i++] = hashed[j];
+        pool_stir();                                /* fresh entropy per block */
+        u8 buf[32 + 8], block[32];
+        for (u32 j = 0; j < 32; j++) buf[j] = entropy_pool[j];
+        u64 ctr = ++rng_counter;
+        for (u32 j = 0; j < 8; j++) buf[32 + j] = (u8)(ctr >> (j * 8));
+        sha256(buf, sizeof(buf), block);            /* output = H(pool || counter) */
+        for (u32 j = 0; j < 32 && i < len; j++) out[i++] = block[j];
     }
+
+    spin_unlock_irq(&rng_lock, flags);
 }

@@ -234,7 +234,7 @@ Measured on 32 cores under KVM, six at a time: about 10 minutes for all 37 tests
 - A pci device with neither msi nor a legacy line the firmware routed is polled, every 10 ms for the network card and every 4 ms for the usb controller; the disk controller then waits by looking.
 - The browser reads no scripts; a page that is nothing without them is nothing here. Of a stylesheet it honours what changes the words (hiding, weight, colour, alignment, size in whole steps, block or inline) and lays out no boxes, so a page that is its layout reads in its order; selectors with pseudo-classes never match, `@import` is not followed, up to eight sheets of 2 MiB together and 10800 rules are read per page. The one font grows only by whole factors, so a size is rounded to the body's, twice it, or three times. Progressive jpeg and interlaced png show as their alternative text (so do svg and webp); a page is 2 MiB at most, a picture 1600 x 1200; pictures and sheets are fetched anew with every page; one connection at a time, so a page with many pictures fills in one by one.
 - No wireless chip driver.
-- TLS: thirty-four roots from the Mozilla bundle and the intermediates of github.com and its release cdn are built in; a host under another root is unverified unless its authority is written into the settings. No revocation checking, no name constraints. The self-update does not depend on any of it (the package is ed25519-signed).
+- TLS: thirty-four roots from the Mozilla bundle and the intermediates of github.com and its release cdn are built in; a host under another root is unverified unless its authority is written into the settings. A leaf whose names fall outside a signing authority's name constraints is refused (RFC 5280 dNSName permitted and excluded subtrees). No revocation checking. The self-update does not depend on any of it (the package is ed25519-signed).
 - Self-update: the release private key, if lost, means deployed machines can no longer be sent a signed update.
 - Far-work answers are signed by the node that produced them and checked against its key, but the computation itself is not otherwise verified; running the same task on several nodes and comparing is left for later.
 - Node identity is trust on first use; `trust <name> <key>` pins one beforehand, `forget` re-pins a changed key, `renew key` rotates a key under the old key's signature, `vouch` lets a node you have marked `vouch` pin a key for you and `unvouch` takes that back -- but a vouch is only as good as your trust in the voucher.
@@ -280,4 +280,13 @@ You may use, study, share and modify it. If you distribute it — or run a
 modified version that people reach over a network — you must pass on the
 complete corresponding source under the same license (see section 13 for the
 network case). There is no warranty. The full text is in the
-[LICENSE](LICENSE) file.
+[LICENSE](LICENSE) file; third-party material (GNU Unifont, the TLS root
+authorities) is credited in [NOTICE](NOTICE).
+
+## Contributing and security
+
+How to build, test, and submit a change: [CONTRIBUTING.md](CONTRIBUTING.md).
+The battery (`sh build/battery.sh`) must be green before a change ships.
+
+To report a security flaw, and for the threat model and known limits:
+[SECURITY.md](SECURITY.md). Report privately, not in a public issue.
