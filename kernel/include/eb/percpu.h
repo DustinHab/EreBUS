@@ -19,7 +19,7 @@ typedef struct percpu {
     struct thread *current;       /* 32 -- the thread this core runs */
     struct thread *idle;          /* 40 -- runs when nothing else is ready */
     u32            slice_left;     /* 48 -- ticks until preemption */
-    u32            _pad;          /* 52 */
+    u32            resched;       /* 52 -- this core owes itself a reschedule */
     u64            switch_stamp;  /* 56 -- when the running thread took the core */
 } percpu;
 

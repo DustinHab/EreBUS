@@ -1370,7 +1370,6 @@ void kmain(eb_boot_info *bi)
     /* --- descriptor tables and interrupts -------------------------- */
 
     gdt_init();
-    tss_set_kernel_stack((u64)stack_top);
     trap_init();
 
     /* Move the controllers off the exception vectors and start with
@@ -1504,8 +1503,11 @@ void kmain(eb_boot_info *bi)
     if (!kernel_domain) panic("no memory for the kernel domain");
 
     /* This processor's gs base has to point at its own block before the
-     * scheduler runs: the scheduler keeps the running thread there. */
+     * scheduler runs: the scheduler keeps the running thread there, and
+     * the task segment it stamps with each thread's kernel stack is found
+     * through it. A sane default until the first switch sets a real one. */
     percpu_init(0, lapic_present() ? lapic_id() : 0);
+    tss_set_kernel_stack((u64)stack_top);
 
     sched_init(kernel_domain);
     port_init();
@@ -1516,12 +1518,6 @@ void kmain(eb_boot_info *bi)
                 "spinning thread is preempted\n");
     else
         panic("the scheduler failed its own test");
-
-    /* With more than one processor, prove the application processors run
-     * kernel threads in parallel, then park them again. Not fatal: a
-     * machine that cannot is still a working single-processor one. */
-    if (!smp_selftest())
-        kprintf("smp:  parallel self test inconclusive\n");
 
     if (msg_selftest())
         kprintf("msg:  self test passed -- capabilities survive transit "
@@ -2303,6 +2299,16 @@ void kmain(eb_boot_info *bi)
     *bad = 0x1234;
     kprintf("kern: fault test did not fault -- that is itself a bug\n");
 #endif
+
+    /* The single-threaded part of start-up is finished, including the
+     * one-time device probing -- kept on this processor alone so the
+     * drivers, which are not built to be driven from an interrupt while
+     * another core runs, do not have to be. Let the application
+     * processors into the scheduler now; from here kernel threads and
+     * user processes both run on any core, and the self test confirms it. */
+    smp_release();
+    if (!smp_selftest())
+        kprintf("smp:  parallel self test inconclusive\n");
 
     kprintf("kern: idle\n");
 

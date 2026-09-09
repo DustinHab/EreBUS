@@ -98,7 +98,8 @@ void thread_set_pml4(thread *t, phys_addr pml4)
 }
 
 static thread *run_queue;      /* circular; ready and running threads */
-static thread *boot_thread;    /* the boot processor's idle; its time is idle time */
+static thread *boot_thread;    /* the boot thread, adopted from start.S */
+static thread *bsp_idle;       /* the boot processor's idle; its time is idle time */
 
 /* One lock over the run queue, the sleepers and finished lists, the
  * counters, and the act of switching itself. It is held with interrupts
@@ -121,7 +122,6 @@ static u64 next_id = 1;
 static u64 switches;
 static u64 thread_count;
 static u64 runnable_count;
-static bool resched_due;
 static volatile bool started;   /* the timer may tick before sched_init runs */
 static u8 slot_taken[TSTACK_MAX / 8];
 
@@ -214,6 +214,33 @@ static void trampoline(void)
  * processor's idle thread can be created in the same one. */
 static domain *sched_kernel_domain;
 
+/* The idle thread's body: halt until an interrupt, then look for work.
+ * There is one per processor, off the run queue, and it is the only place
+ * a processor halts. A thread that blocks switches here rather than
+ * stopping in place, which is what keeps a woken thread from being
+ * resumed on its old processor and picked up by another at the same
+ * time. */
+void sched_idle_run(void)
+{
+    for (;;) {
+        __asm__ volatile ("sti; hlt");
+        sched_yield();
+    }
+}
+static void idle_entry(void *arg) { (void)arg; sched_idle_run(); }
+
+/* Makes a dedicated idle thread and takes it off the ready ring, so the
+ * scheduler reaches it only as the fallback when nothing else runs. */
+static thread *make_idle(const char *name, domain *d)
+{
+    thread *t = thread_create(name, idle_entry, NULL, d);
+    if (!t) return NULL;
+    u64 flags = spin_lock_irq(&sched_lock);
+    queue_remove(t);
+    spin_unlock_irq(&sched_lock, flags);
+    return t;
+}
+
 void sched_init(domain *boot_domain)
 {
     sched_kernel_domain = boot_domain;
@@ -230,12 +257,20 @@ void sched_init(domain *boot_domain)
     t->kstack_top = (u64)stack_top_symbol;
 
     set_cur(t);
-    this_cpu()->idle = t;
     this_cpu()->switch_stamp = time_ns();
     this_cpu()->slice_left = slice_ticks;
     boot_thread = t;
     thread_count = 1;
     queue_add(t);
+
+    /* The boot processor's own idle thread, separate from the boot
+     * thread: the boot thread does real work and must never be the thing
+     * a blocking thread switches away to. */
+    thread *idle = make_idle("idle", boot_domain);
+    if (!idle) panic("no memory for the boot processor's idle thread");
+    this_cpu()->idle = idle;
+    bsp_idle = idle;
+
     started = true;      /* from here the timer tick may schedule */
 }
 
@@ -402,16 +437,23 @@ static void switch_to_next(void)
     set_cur(to);
     switches++;
     me->slice_left = slice_ticks;
-    resched_due = false;
+    me->resched = 0;
 
     /* Two things have to follow the thread, not the code: the address
      * space it runs in, and where the processor should land if an
      * interrupt arrives while it is in ring 3. Both are per thread, and
-     * both are wrong the instant a switch forgets them. */
-    if (to->pml4 && to->pml4 != from->pml4)
-        __asm__ volatile ("movq %0, %%cr3" :: "r"(to->pml4) : "memory");
-    else if (!to->pml4 && from->pml4)
-        __asm__ volatile ("movq %0, %%cr3" :: "r"(vmm_kernel_pml4()) : "memory");
+     * both are wrong the instant a switch forgets them.
+     *
+     * The address space is reloaded on every switch, even between two
+     * kernel threads that share the kernel's tables. Writing cr3 flushes
+     * this processor's translations, and that flush is what lets several
+     * processors share one address space safely without sending each
+     * other messages to invalidate it: a thread's stack is freed only
+     * after it stops running, by which point every processor that ran it
+     * has switched away and flushed. It costs a flush per switch; the
+     * alternative is a round of inter-processor interrupts per unmap. */
+    u64 target = to->pml4 ? to->pml4 : vmm_kernel_pml4();
+    __asm__ volatile ("movq %0, %%cr3" :: "r"(target) : "memory");
 
     tss_set_kernel_stack(to->kstack_top);
     percpu_set_kernel_stack(to->kstack_top);
@@ -455,20 +497,16 @@ void sched_block(void)
     me->state = THREAD_BLOCKED;
     queue_remove(me);
 
-    /* Run something else until a wakeup marks us ready again. When there
-     * is nothing to run -- early in start-up, or a lone waiter -- halt
-     * with the lock released and interrupts on until an interrupt (a
-     * wakeup among them) arrives, then look again. Whatever wakes us
-     * marks us ready and puts us back on the queue. */
-    while (me->state == THREAD_BLOCKED) {
-        if (run_queue) {
-            switch_to_next();
-        } else {
-            spin_unlock(&sched_lock);
-            __asm__ volatile ("sti; hlt; cli" ::: "memory");
-            spin_lock(&sched_lock);
-        }
-    }
+    /* Switch away -- to another ready thread, or to this processor's idle
+     * thread, which is where the processor halts. It never halts in place
+     * here: a thread that halted in place would still be this processor's
+     * current thread while a wakeup put it back on the ready ring, and
+     * another processor could then run it from its stale saved context at
+     * the same time. Going through switch_to_next means a woken thread is
+     * only ever claimed once, under the lock. */
+    switch_to_next();
+
+    /* Resumed: a wakeup marked us ready and some processor picked us up. */
     me->state = THREAD_RUNNING;
 }
 
@@ -596,9 +634,10 @@ static void wake_locked(thread *t)
     if (t->state != THREAD_BLOCKED) return;
     t->state = THREAD_READY;
     queue_add(t);
-    /* The idle thread holds nothing anyone wants: when it is the one
-     * running, the woken thread gets the processor on the way out. */
-    if (boot_idle && cur() == boot_thread) resched_due = true;
+    /* If this processor is idle, it owes itself a reschedule so the woken
+     * thread gets a processor on the way out. Idle processors elsewhere
+     * pick it up at their next tick. */
+    if (cur() == this_cpu()->idle) this_cpu()->resched = 1;
 }
 
 void sched_wake(thread *t)
@@ -632,16 +671,16 @@ void sched_tick(void)
     sleepers_tick();
     percpu *me = this_cpu();
     if (me->slice_left > 0) me->slice_left--;
-    if (me->slice_left == 0) resched_due = true;
+    if (me->slice_left == 0) me->resched = 1;
     spin_unlock_irq(&sched_lock, flags);
 }
 
 void sched_preempt_if_due(void)
 {
-    if (!started || !resched_due) return;
+    if (!started || !this_cpu()->resched) return;
     u64 flags = spin_lock_irq(&sched_lock);
-    if (resched_due) {
-        resched_due = false;
+    if (this_cpu()->resched) {
+        this_cpu()->resched = 0;
         switch_to_next();
     }
     spin_unlock_irq(&sched_lock, flags);
@@ -719,7 +758,7 @@ const char *thread_name(const thread *t)     { return t ? t->name : "?"; }
 u64         thread_id(const thread *t)       { return t ? t->id : 0; }
 u64         sched_switches(void)             { return switches; }
 u64         thread_ran_ns(const thread *t)   { return t ? t->ran_ns : 0; }
-u64         sched_idle_ns(void)              { return boot_thread ? boot_thread->ran_ns : 0; }
+u64         sched_idle_ns(void)              { return bsp_idle ? bsp_idle->ran_ns : 0; }
 
 void sched_set_slice_ticks(u32 t)
 {

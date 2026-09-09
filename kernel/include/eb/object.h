@@ -74,6 +74,11 @@ void obj_retain(object *o);
  * the object held must not travel with it. */
 void obj_release(object *o);
 
+/* Drops a reference with the object store's lock already held. Only the
+ * teardown paths that run inside that lock use it -- a dying port letting
+ * go of its queued cargo. Ordinary code wants obj_release. */
+void obj_release_held(object *o);
+
 type_id obj_type(const object *o);
 u64     obj_id(const object *o);
 u64     obj_refs(const object *o);

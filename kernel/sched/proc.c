@@ -14,6 +14,7 @@
 #include <eb/journal.h>
 #include <eb/time.h>
 #include <eb/panic.h>
+#include <eb/spin.h>
 
 /* The user section of the kernel image, from the linker script. */
 #include <eb/asm.h>
@@ -58,7 +59,14 @@ static u64 next_pid = 1;
 static process *live[MAX_PROCESSES];
 static u32      live_count;
 
-static bool is_live(const process *p)
+/* One lock over the live table, the process id counter, and the counts.
+ * Processes are created, started, reaped and inspected from threads on
+ * any processor. Held with interrupts off; a leaf, taking no other lock
+ * while held. */
+static spinlock proc_lock;
+
+/* Assumes proc_lock is held. */
+static bool is_live_locked(const process *p)
 {
     for (u32 i = 0; i < live_count; i++) if (live[i] == p) return true;
     return false;
@@ -82,7 +90,10 @@ bool proc_is_running(object *program)
     if (obj_size(program) < sizeof(program_ref)) return false;
 
     const program_ref *ref = (const program_ref *)obj_data(program);
-    return is_live(ref->p) && ref->p->stamp == ref->stamp;
+    u64 flags = spin_lock_irq(&proc_lock);
+    bool ok = is_live_locked(ref->p) && ref->p->stamp == ref->stamp;
+    spin_unlock_irq(&proc_lock, flags);
+    return ok;
 }
 static u64 process_count;
 static u64 fault_count;
@@ -219,7 +230,9 @@ static process *proc_begin(const char *name)
     if (!p->dom) { addrspace_destroy(p->pml4); kfree(p); return NULL; }
 
     p->magic = PROC_MAGIC;
+    u64 flags = spin_lock_irq(&proc_lock);
     p->id = next_pid++;
+    spin_unlock_irq(&proc_lock, flags);
     p->name = name;
     return p;
 }
@@ -282,8 +295,10 @@ static process *proc_finish(process *p, const char *name, object *console)
     ref->stamp = p->stamp;
     obj_set_name(p->self, name);
 
+    u64 flags = spin_lock_irq(&proc_lock);
     if (live_count < MAX_PROCESSES) live[live_count++] = p;
     process_count++;
+    spin_unlock_irq(&proc_lock, flags);
     return p;
 }
 
@@ -357,8 +372,8 @@ bool proc_live_at(u32 i, const char **name, u64 *id, u64 *holds,
     /* One row of the living, for the activity table. Kernel-side only,
      * like the capability inspection: no system call leads here, and
      * what it reveals -- that programs exist -- the graph shows anyway. */
-    u64 flags = irq_save();
-    if (i >= live_count) { irq_restore(flags); return false; }
+    u64 flags = spin_lock_irq(&proc_lock);
+    if (i >= live_count) { spin_unlock_irq(&proc_lock, flags); return false; }
 
     process *p = live[i];
     if (name)   *name = p->name;
@@ -366,7 +381,7 @@ bool proc_live_at(u32 i, const char **name, u64 *id, u64 *holds,
     if (holds)  *holds = domain_used(p->dom);
     if (ran_ns) *ran_ns = p->first ? thread_ran_ns(p->first) : 0;
     if (mem_kib) *mem_kib = addrspace_frames(p->pml4) * (PAGE_SIZE / 1024);
-    irq_restore(flags);
+    spin_unlock_irq(&proc_lock, flags);
     return true;
 }
 
@@ -557,14 +572,14 @@ static void proc_reap(void *arg)
     process *p = (process *)arg;
     if (!p || p->magic != PROC_MAGIC) return;
 
-    u64 flags = irq_save();
+    u64 flags = spin_lock_irq(&proc_lock);
     for (u32 i = 0; i < live_count; i++) {
         if (live[i] != p) continue;
         live[i] = live[live_count - 1];
         live_count--;
         break;
     }
-    irq_restore(flags);
+    spin_unlock_irq(&proc_lock, flags);
 
     /* The program object stays as long as the graph points at it -- it
      * is the record that a program was here. What must not stay is the
@@ -668,7 +683,9 @@ bool copy_to_user(virt_addr dst, const void *src, u64 len)
 void proc_fault(const char *what, virt_addr where)
 {
     thread *t = sched_current();
+    u64 fflags = spin_lock_irq(&proc_lock);
     fault_count++;
+    spin_unlock_irq(&proc_lock, fflags);
 
     kprintf("proc: thread %llu (%s) faulted in ring 3: %s at %p\n",
             thread_id(t), thread_name(t), what, (void *)where);

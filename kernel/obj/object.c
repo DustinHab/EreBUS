@@ -10,6 +10,7 @@
 #include <eb/kheap.h>
 #include <eb/fmt.h>
 #include <eb/panic.h>
+#include <eb/spin.h>
 
 #define OBJ_MAGIC 0x4F424A454354ULL   /* "OBJECT" */
 
@@ -79,6 +80,16 @@ static object *all_objects;
 static u64 next_id = 1;
 static u64 live_objects;
 static u64 created_objects;
+
+/* One lock over the store: reference counts, the all-objects list, the
+ * counts, and slot edits. Held with interrupts off. Ports take it while
+ * moving capabilities (the order is always sched_lock then obj_lock);
+ * nothing under this lock ever reaches back for the scheduler, so the
+ * order never reverses. The heap and frame allocators sit below it. */
+static spinlock obj_lock;
+
+static void retain_locked(object *o)  { o->refs++; }
+static void release_locked(object *o);   /* the teardown, obj_lock held */
 
 /* ------------------------------------------------------------------ */
 /* Type registry                                                       */
@@ -153,40 +164,33 @@ object *obj_create(type_id type, u64 payload_size, u64 slot_count)
     o->size   = payload_size;
     o->nslots = slot_count;
 
-    /* The list link, the counts, and every reference count change below
-     * happen with interrupts off. Threads mutate the graph and the
-     * timer switches between them mid-operation; a release preempted
-     * between the decrement and the unlink would leave a half-dead
-     * object on the list for anything else -- another release, the
-     * collector -- to trip over. */
-    u64 flags = irq_save();
+    /* The list link, the counts, and every reference count change happen
+     * under obj_lock. Threads on several processors mutate the graph at
+     * once; a release caught between the decrement and the unlink would
+     * leave a half-dead object on the list for anything else -- another
+     * release, the collector -- to trip over. */
+    u64 flags = spin_lock_irq(&obj_lock);
+    o->id       = next_id++;
     o->all_next = all_objects;
     if (all_objects) all_objects->all_prev = o;
     all_objects = o;
 
     live_objects++;
     created_objects++;
-    irq_restore(flags);
+    spin_unlock_irq(&obj_lock, flags);
     return o;
 }
 
-void obj_retain(object *o)
+/* The teardown, with obj_lock held. A dead object is referenced by
+ * nobody: the port ring it may carry and the objects its slots point at
+ * are reached by no one else, so letting them go here, under the one
+ * lock, needs no further exclusion. Recurses through the slots; the depth
+ * is the graph's, the same as it always was. */
+static void release_locked(object *o)
 {
-    check(o, "retain");
-    u64 flags = irq_save();
-    o->refs++;
-    irq_restore(flags);
-}
-
-void obj_release(object *o)
-{
-    check(o, "release");
-
     if (o->refs == 0)
         panic("object %llu released more often than it was held", o->id);
-
-    u64 flags = irq_save();
-    if (--o->refs > 0) { irq_restore(flags); return; }
+    if (--o->refs > 0) return;
 
     /* A port dying with messages still queued is holding their cargo,
      * and those holds live in the payload where the generic teardown
@@ -197,11 +201,9 @@ void obj_release(object *o)
     if (o->type >= TYPE_BUILTIN_COUNT && o->type == port_type())
         port_drop_queued(o);
 
-    /* Let go of everything this object was holding, which may in turn
-     * be the last reference to those. */
     obj_slot *slots = slots_of(o);
     for (u64 i = 0; i < o->nslots; i++)
-        if (slots[i].target) obj_release(slots[i].target);
+        if (slots[i].target) release_locked(slots[i].target);
 
     /* Wipe the header before the memory goes back. The heap clears the
      * payload on release; the header is ours to clear, and leaving a
@@ -220,7 +222,31 @@ void obj_release(object *o)
     live_objects--;
     if (o->slots) kfree(o->slots);
     kfree(o);
-    irq_restore(flags);
+}
+
+void obj_retain(object *o)
+{
+    check(o, "retain");
+    u64 flags = spin_lock_irq(&obj_lock);
+    retain_locked(o);
+    spin_unlock_irq(&obj_lock, flags);
+}
+
+void obj_release(object *o)
+{
+    check(o, "release");
+    u64 flags = spin_lock_irq(&obj_lock);
+    release_locked(o);
+    spin_unlock_irq(&obj_lock, flags);
+}
+
+/* Release with obj_lock already held. Only the teardown paths that run
+ * inside the store lock use it: a port shedding its queued cargo as it
+ * dies, and the collector letting go of a cycle. */
+void obj_release_held(object *o)
+{
+    check(o, "release held");
+    release_locked(o);
 }
 
 type_id obj_type(const object *o)  { check(o, "type"); return o->type; }
@@ -293,15 +319,15 @@ bool obj_set_slot(object *o, u64 index, object *target, u32 rights)
     if (index >= o->nslots) return false;
     if (target) check(target, "set slot target");
 
-    u64 flags = irq_save();           /* swap and counts in one piece */
+    u64 flags = spin_lock_irq(&obj_lock);   /* swap and counts in one piece */
     obj_slot *slots = slots_of(o);
     object *old = slots[index].target;
 
-    if (target) obj_retain(target);
+    if (target) retain_locked(target);
     slots[index].target = target;
     slots[index].rights = target ? rights : 0;
-    if (old) obj_release(old);
-    irq_restore(flags);
+    if (old) release_locked(old);
+    spin_unlock_irq(&obj_lock, flags);
     return true;
 }
 
@@ -319,12 +345,12 @@ bool obj_grow_slots(object *o, u64 count)
     obj_slot *bigger = (obj_slot *)kzalloc(count * sizeof(obj_slot));
     if (!bigger) return false;
 
-    u64 flags = irq_save();           /* the array swap must be whole */
+    u64 flags = spin_lock_irq(&obj_lock);   /* the array swap must be whole */
     for (u64 i = 0; i < o->nslots; i++) bigger[i] = o->slots[i];
     obj_slot *old = o->slots;
     o->slots = bigger;
     o->nslots = count;
-    irq_restore(flags);
+    spin_unlock_irq(&obj_lock, flags);
 
     if (old) kfree(old);
     return true;
@@ -445,13 +471,13 @@ u64 obj_collect(void)
      * The worklist is sized inside the same stillness, for the same
      * reason: a count taken before the world stops is a count something
      * may have outgrown by the time it matters. */
-    u64 flags = irq_save();
+    u64 flags = spin_lock_irq(&obj_lock);
 
     u64 room = live_objects;
-    if (room == 0) { irq_restore(flags); return 0; }
+    if (room == 0) { spin_unlock_irq(&obj_lock, flags); return 0; }
 
     grey = (object **)kzalloc(room * sizeof(object *));
-    if (!grey) { irq_restore(flags); return 0; }
+    if (!grey) { spin_unlock_irq(&obj_lock, flags); return 0; }
     grey_count = 0;
 
     /* How much of each count the graph itself explains. */
@@ -476,7 +502,7 @@ u64 obj_collect(void)
 
     if (doomed == 0) {
         for (object *o = all_objects; o; o = o->all_next) o->mark = 0;
-        irq_restore(flags);
+        spin_unlock_irq(&obj_lock, flags);
         kfree(grey);
         grey = NULL;
         return 0;
@@ -493,7 +519,7 @@ u64 obj_collect(void)
         obj_slot *slots = slots_of(o);
         for (u64 i = 0; i < o->nslots; i++) {
             if (!slots[i].target) continue;
-            obj_release(slots[i].target);
+            release_locked(slots[i].target);
             slots[i].target = NULL;
             slots[i].rights = 0;
         }
@@ -506,7 +532,7 @@ u64 obj_collect(void)
     object *o = all_objects;
     while (o) {
         object *next = o->all_next;
-        if (!(o->mark & COLLECT_REACHED)) obj_release(o);
+        if (!(o->mark & COLLECT_REACHED)) release_locked(o);
         o = next;
     }
 
@@ -514,7 +540,7 @@ u64 obj_collect(void)
      * snapshot walk expects to find. */
     for (object *s = all_objects; s; s = s->all_next) s->mark = 0;
 
-    irq_restore(flags);
+    spin_unlock_irq(&obj_lock, flags);
     kfree(grey);
     grey = NULL;
     return doomed;

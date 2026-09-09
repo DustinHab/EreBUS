@@ -82,23 +82,24 @@ void port_drop_queued(object *p)
      * its target, and a port that dies with messages inside would
      * otherwise take those holds to the grave: never released, never
      * again releasable. Called when a port is torn down, however the
-     * teardown came about. */
+     * teardown came about -- always with the object store lock held, on a
+     * port that is already unreferenced, so the ring is reached by no one
+     * else and needs no lock of its own. The queued capabilities are let
+     * go through the held form, since the store lock is already ours. */
     if (!p || obj_type(p) != TYPE_PORT) return;
 
-    u64 flags = sched_lock_hold();
     port_state *s = state_of(p);
     queued *ring = ring_of(s);
     while (s->count > 0) {
         queued *q = &ring[s->head];
         for (u32 i = 0; i < q->ncaps; i++) {
-            if (q->caps[i]) obj_release(q->caps[i]);
+            if (q->caps[i]) obj_release_held(q->caps[i]);
             q->caps[i] = NULL;
         }
         q->ncaps = 0;
         s->head = (s->head + 1) % s->capacity;
         s->count--;
     }
-    sched_lock_drop(flags);
 }
 
 void port_visit_queued(object *p, void (*visit)(object *o))

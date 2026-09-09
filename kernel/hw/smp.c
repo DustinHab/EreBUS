@@ -21,6 +21,7 @@
 #include <eb/io.h>
 #include <eb/thread.h>
 #include <eb/percpu.h>
+#include <eb/syscall.h>
 
 #define MAX_CPUS 8
 #define TRAMP_PA 0x8000u        /* real-mode start page (below 1 MiB), reserved at boot */
@@ -32,14 +33,14 @@ static struct cpu cpus[MAX_CPUS];
 static u32 cpu_count = 1;                 /* the boot processor */
 static bool tramp_reserved;               /* the start page is ours, not a live table */
 
-/* Hand-off flags between the boot processor and the application ones:
- * go lets them into the scheduler, park_req asks them back out, and
- * parked counts how many have stood down. */
+/* The boot processor sets this once start-up is finished and the kernel
+ * is safe to run on more than one core; until then the application
+ * processors wait, and everything runs on the boot processor alone. */
 static volatile u32 smp_go;
-static volatile u32 smp_park_req;
-static volatile u32 smp_parked_count;
 
 u32 smp_cpu_count(void) { return cpu_count; }
+
+void smp_release(void) { __sync_synchronize(); smp_go = 1; }
 
 /* The trampoline runs at a fixed physical address the assembly is built
  * for. Claim that page before anything else can, so the frame allocator
@@ -177,35 +178,31 @@ static void ap_main(u32 cpu)
     /* leave the trampoline's tables for the kernel's own */
     __asm__ volatile ("movq %0, %%cr3" :: "r"((u64)vmm_kernel_pml4()) : "memory");
     gdt_load_ap();
+    gdt_setup_ap(cpu);              /* this processor's own task segment */
     idt_load();
     u32 aid = lapic_enable_ap();
     percpu_init(cpu, aid);          /* this processor's gs base, before it schedules */
+    syscall_init();                 /* its own syscall entry, for ring-3 threads */
     cpus[cpu].apic_id = aid;
     __sync_synchronize();
     cpus[cpu].up = 1;
     kprintf("cpu%u: up, apic id %u\n", cpu, aid);
 
-    /* Wait until the boot processor has the scheduler ready for us. */
+    /* Wait until the boot processor has finished the single-threaded part
+     * of start-up and released us into the scheduler. */
     while (!smp_go) __asm__ volatile ("pause");
 
-    /* Join the scheduler: adopt this execution as the idle thread, start
-     * the local timer for preemption, and run whatever is ready. */
+    /* Join the scheduler for good: adopt this execution as the idle
+     * thread, start the local timer for preemption, and run whatever is
+     * ready -- kernel threads and user processes alike. */
     sched_adopt_ap(cpus[cpu].stack);
     lapic_timer_start();
     cpu_sti();
 
     for (;;) {
         __asm__ volatile ("hlt");   /* wait for the next tick, then look for work */
-        if (smp_park_req) break;
         sched_yield();
     }
-
-    /* Told to stand down: stop the tick and halt for good. Until the
-     * object and capability layers are locked, only the boot processor
-     * runs the shell and user programs. */
-    lapic_timer_stop();
-    __sync_fetch_and_add(&smp_parked_count, 1);
-    for (;;) __asm__ volatile ("cli; hlt");
 }
 
 /* --- proving they run in parallel ------------------------------------ */
@@ -230,19 +227,16 @@ bool smp_selftest(void)
     if (cpu_count < 2) return true;    /* one processor: nothing to prove */
 
     smp_seen = 0; smp_work = 0; smp_stop = false;
-    smp_parked_count = 0;
 
     domain *d = thread_domain(sched_current());
     const u32 workers = 6;
     for (u32 i = 0; i < workers; i++)
         if (!thread_create("smp-worker", smp_worker, NULL, d)) return false;
 
-    /* Pin the boot thread on this processor with interrupts off, so it
-     * cannot be preempted onto a worker or migrate: the application
-     * processors run the workers, this thread only watches shared memory
-     * the atomics keep coherent. */
+    /* Pin the boot thread here with interrupts off while the measurement
+     * runs, so it cannot itself migrate and the count reflects only the
+     * application processors. They are already released by now. */
     u64 flags = irq_save();
-    smp_go = 1;
 
     u64 t0 = time_ns();
     while (smp_work < 200000u && time_ns() - t0 < 400000000ULL)
@@ -250,22 +244,24 @@ bool smp_selftest(void)
 
     smp_stop = true;
 
-    /* Give the workers time to reach their exit and the processors to
-     * fall idle, then ask them to park and wait until they have. */
+    /* Let the workers reach their exit before looking at the tally. */
     u64 t1 = time_ns();
-    while (time_ns() - t1 < 60000000ULL) __asm__ volatile ("pause");
-    smp_park_req = 1;
-    u64 t2 = time_ns();
-    while (smp_parked_count < cpu_count - 1 && time_ns() - t2 < 500000000ULL)
-        __asm__ volatile ("pause");
+    while (time_ns() - t1 < 40000000ULL) __asm__ volatile ("pause");
 
     irq_restore(flags);
 
     u32 seen = smp_seen, ran = 0;
     for (u32 i = 0; i < 32; i++) if (seen & (1u << i)) ran++;
-    kprintf("smp:  work ran on %u application processor%s, %llu iterations, "
-            "%u of %u parked\n",
-            ran, ran == 1 ? "" : "s", smp_work, smp_parked_count, cpu_count - 1);
+    kprintf("smp:  kernel work ran on %u application processor%s, %llu iterations\n",
+            ran, ran == 1 ? "" : "s", smp_work);
 
-    return ran >= 1 && smp_parked_count >= cpu_count - 1;
+    /* And the user side: which processors have run a ring-3 system call,
+     * from the programs that started while the boot went on. */
+    u32 umask = syscall_cpu_mask(), ucount = 0, uaps = 0;
+    for (u32 i = 0; i < 32; i++)
+        if (umask & (1u << i)) { ucount++; if (i != 0) uaps++; }
+    kprintf("smp:  ring-3 system calls ran on %u processor%s (%u application)\n",
+            ucount, ucount == 1 ? "" : "s", uaps);
+
+    return ran >= 1;
 }

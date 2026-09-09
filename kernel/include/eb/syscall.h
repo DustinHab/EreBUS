@@ -40,6 +40,9 @@
 /* Sets up the MSRs the syscall instruction reads, and points it here. */
 void syscall_init(void);
 
+/* A bit per processor that has run a ring-3 system call. */
+u32 syscall_cpu_mask(void);
+
 /* percpu_init / percpu_set_kernel_stack live in eb/percpu.h, included above. */
 
 #endif /* EB_SYSCALL_H */

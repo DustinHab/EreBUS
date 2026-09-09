@@ -18,6 +18,11 @@ void smp_reserve_trampoline(void);
 /* Processors up, including the boot processor. */
 u32 smp_cpu_count(void);
 
+/* Lets the application processors into the scheduler. The boot processor
+ * calls this once the single-threaded part of start-up is done, after
+ * which kernel threads and user processes run on every processor. */
+void smp_release(void);
+
 /* Proves the application processors run kernel threads in parallel: it
  * releases them into the scheduler, runs a batch of worker threads, and
  * checks that more than one processor took part, then parks the

@@ -5,8 +5,17 @@
 #include <eb/kheap.h>
 #include <eb/fmt.h>
 #include <eb/panic.h>
+#include <eb/spin.h>
 
 #define DOMAIN_MAGIC 0x444F4D41494EULL   /* "DOMAIN" */
+
+/* One lock over every domain's capability table. A message delivered on
+ * one processor inserts into the receiver's table while the receiver, on
+ * another, looks a handle up; both go through here. Ports take it while
+ * holding the scheduler lock (delivery), so the order is always
+ * sched_lock then cap_lock, and cap_lock then obj_lock when a slot's
+ * reference count changes -- never the other way. */
+static spinlock cap_lock;
 
 typedef struct {
     object *target;      /* NULL when the slot is empty */
@@ -79,14 +88,9 @@ u64 domain_capacity(const domain *d) { check(d, "capacity"); return d->capacity 
 
 /* ------------------------------------------------------------------ */
 
-cap_handle cap_insert(domain *d, object *o, u32 rights)
+/* The insert itself, with cap_lock held. */
+static cap_handle insert_locked(domain *d, object *o, u32 rights)
 {
-    check(d, "insert");
-    if (!o) return CAP_INVALID;
-
-    rights &= CAP_ALL;
-    if (rights == 0) return CAP_INVALID;   /* a capability to do nothing */
-
     for (u64 i = 1; i < d->capacity; i++) {
         if (d->slots[i].target) continue;
 
@@ -101,6 +105,20 @@ cap_handle cap_insert(domain *d, object *o, u32 rights)
         return make_handle(i, d->slots[i].generation);
     }
     return CAP_INVALID;
+}
+
+cap_handle cap_insert(domain *d, object *o, u32 rights)
+{
+    check(d, "insert");
+    if (!o) return CAP_INVALID;
+
+    rights &= CAP_ALL;
+    if (rights == 0) return CAP_INVALID;   /* a capability to do nothing */
+
+    u64 flags = spin_lock_irq(&cap_lock);
+    cap_handle h = insert_locked(d, o, rights);
+    spin_unlock_irq(&cap_lock, flags);
+    return h;
 }
 
 /* The single point where a handle turns back into an object. Every path
@@ -120,17 +138,21 @@ static cap_slot *resolve(domain *d, cap_handle h)
 object *cap_lookup(domain *d, cap_handle h, u32 needed)
 {
     check(d, "lookup");
+    u64 flags = spin_lock_irq(&cap_lock);
     cap_slot *s = resolve(d, h);
-    if (!s) return NULL;
-    if ((s->rights & needed) != needed) return NULL;
-    return s->target;
+    object *o = (s && (s->rights & needed) == needed) ? s->target : NULL;
+    spin_unlock_irq(&cap_lock, flags);
+    return o;
 }
 
 u32 cap_rights(domain *d, cap_handle h)
 {
     check(d, "rights");
+    u64 flags = spin_lock_irq(&cap_lock);
     cap_slot *s = resolve(d, h);
-    return s ? s->rights : 0;
+    u32 r = s ? s->rights : 0;
+    spin_unlock_irq(&cap_lock, flags);
+    return r;
 }
 
 cap_handle cap_delegate(domain *from, cap_handle h, domain *to, u32 mask)
@@ -138,35 +160,40 @@ cap_handle cap_delegate(domain *from, cap_handle h, domain *to, u32 mask)
     check(from, "delegate");
     check(to, "delegate");
 
+    /* Resolve the source and insert into the destination under one hold
+     * of the lock, so neither table shifts between the two steps. */
+    u64 flags = spin_lock_irq(&cap_lock);
     cap_slot *s = resolve(from, h);
-    if (!s) return CAP_INVALID;
 
-    /* Passing on is itself a right. A capability can be usable without
-     * being shareable. */
-    if (!(s->rights & CAP_GRANT)) return CAP_INVALID;
-
-    /* The intersection, and nothing else. This one line is why
-     * authority in this system can only ever shrink as it travels. */
-    u32 rights = s->rights & mask;
-    if (rights == 0) return CAP_INVALID;
-
-    return cap_insert(to, s->target, rights);
+    /* Passing on is itself a right; and the intersection, nothing else --
+     * the one line that makes authority only ever shrink as it travels. */
+    cap_handle nh = CAP_INVALID;
+    if (s && (s->rights & CAP_GRANT)) {
+        u32 rights = s->rights & mask;
+        if (rights) nh = insert_locked(to, s->target, rights);
+    }
+    spin_unlock_irq(&cap_lock, flags);
+    return nh;
 }
 
 bool cap_revoke(domain *d, cap_handle h)
 {
     check(d, "revoke");
 
+    u64 flags = spin_lock_irq(&cap_lock);
     cap_slot *s = resolve(d, h);
-    if (!s) return false;
+    object *target = NULL;
+    if (s) {
+        target = s->target;
+        s->target = NULL;
+        s->rights = 0;
+        /* The generation is not touched here: it is bumped on the next
+         * insert. Either way this handle can never match again. */
+        d->used--;
+    }
+    spin_unlock_irq(&cap_lock, flags);
 
-    object *target = s->target;
-    s->target = NULL;
-    s->rights = 0;
-    /* The generation is not touched here: it is bumped on the next
-     * insert. Either way this handle can never match again. */
-    d->used--;
-
+    if (!target) return false;
     obj_release(target);
     return true;
 }
@@ -182,9 +209,11 @@ object *domain_cap_at(const domain *d, u64 slot, u32 *rights)
      * who delegated it would be authority handed out and forgotten. */
     check(d, "inspect");
     if (slot == 0 || slot >= d->capacity) return NULL;
-    if (!d->slots[slot].target) return NULL;
-    if (rights) *rights = d->slots[slot].rights;
-    return d->slots[slot].target;
+    u64 flags = spin_lock_irq(&cap_lock);
+    object *o = d->slots[slot].target;
+    if (o && rights) *rights = d->slots[slot].rights;
+    spin_unlock_irq(&cap_lock, flags);
+    return o;
 }
 
 u32 cap_revoke_object(domain *d, object *o)
@@ -200,15 +229,20 @@ u32 cap_revoke_object(domain *d, object *o)
      * finds, the next time it tries, that the handle it has names
      * nothing -- which is the same answer it would get for a handle it
      * had invented. */
+    u64 flags = spin_lock_irq(&cap_lock);
     u32 gone = 0;
     for (u64 i = 1; i < d->capacity; i++) {
         if (d->slots[i].target != o) continue;
         d->slots[i].target = NULL;
         d->slots[i].rights = 0;
         d->used--;
-        obj_release(o);
         gone++;
     }
+    spin_unlock_irq(&cap_lock, flags);
+
+    /* Each cleared slot held one reference; let them go now the table is
+     * consistent again and the lock is free. */
+    for (u32 i = 0; i < gone; i++) obj_release(o);
     return gone;
 }
 

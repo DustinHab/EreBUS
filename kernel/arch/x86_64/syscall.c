@@ -187,10 +187,18 @@ static u64 do_pass(domain *d, u64 port, u64 tag, u64 cap, u64 mask, u64 w0)
     return SYS_OK;
 }
 
+/* Which processors have run a ring-3 system call. Proof, once the
+ * application processors are in the scheduler, that user code runs on
+ * them and not only on the boot processor. */
+static volatile u32 syscall_cpus;
+u32 syscall_cpu_mask(void) { return syscall_cpus; }
+
 u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4);
 
 u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4)
 {
+    __sync_fetch_and_or(&syscall_cpus, 1u << (this_cpu_id() & 31u));
+
     /* A condemned thread ends here, at the door, in its own context
      * and on its own kernel stack -- the same exit a voluntary end
      * takes. Every program in this system asks the kernel for
