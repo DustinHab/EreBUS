@@ -1,17 +1,13 @@
 #!/bin/sh
 # kvm-battery.sh -- the pre-release full gate: the regression battery under
-# KVM, then the self-build check (tools/selfbuild.sh build), which compiles
-# every kernel source with the machine's own compiler on the host.
+# KVM, then the self-hosting test.
 #
-# The battery hard-gates the release (exit non-zero on any failure).
-#
-# The self-build reports every file it cannot compile, not just the first.
-# Two are known and documented (README, Known limits): bn.c uses 128-bit
-# integers and ap_boot.S is 16-bit real-mode assembly, neither of which
-# the machine's compiler implements yet. Any OTHER failure is a regression
-# and fails the gate -- which is how a broken directive/comment or a lost
-# header shows up (both have happened). When the two limits are lifted the
-# self-build succeeds outright and tools/selfkernel.sh can boot the result.
+# The battery hard-gates the release. Then the machine's own compiler,
+# assembler and linker build the whole kernel on the host
+# (tools/selfbuild.sh build), and the self-built kernel is booted: it must
+# reach idle and pass its certificate self-test, which is bn.c's 128-bit
+# arithmetic exercised through rsa and ecdsa. A source the machine cannot
+# compile, or a self-built kernel that does not boot, fails the gate.
 cd "$(dirname "$0")/.."
 rc=0
 
@@ -21,21 +17,25 @@ if ! grep -q 'battery done:.* 0 tests with failures' build/kvm-battery.log; then
     rc=1
 fi
 
-echo "== self-build (host, every source)"
-sb=$(sh tools/selfbuild.sh build 2>&1)
-echo "$sb" | grep -E 'FAILED|link:|did not become|kernel.elf'
-got=$(echo "$sb" | sed -n 's/^FAILED  \([^:]*\):.*/\1/p' | sort)
-known=$(printf '%s\n' kernel/arch/x86_64/ap_boot.S kernel/net/bn.c | sort)
-if [ -z "$got" ]; then
-    echo "self-build: every source compiled -- the documented limits are gone"
-elif [ "$got" = "$known" ]; then
-    echo "self-build: reaches the two documented limits (bn.c 128-bit, ap_boot.S 16-bit); no regression"
-else
-    echo "self-build: unexpected failures -- a regression beyond the known limits:"
-    echo "$got"
+echo "== self-build (host: build the kernel with the machine's own tools)"
+sh tools/selfbuild.sh build 2>&1 | tee build/selfbuild.log
+if ! grep -q 'link: ok:' build/selfbuild.log; then
+    echo "self-build did not link:"
+    grep -E 'FAILED|did not become' build/selfbuild.log
     rc=1
+else
+    echo "== boot the self-built kernel"
+    KERNEL=build/self/kernel.elf sh tools/kvm.sh tools/selfbuild.sh >/dev/null 2>&1
+    if grep -qa 'kern: idle' build/self/serial.log &&
+       grep -qa 'certificate checks ready' build/self/serial.log; then
+        echo "self-build: the machine built its own kernel; it boots and its crypto self-tests pass"
+    else
+        echo "self-build: the self-built kernel did not boot cleanly"
+        tail -20 build/self/serial.log
+        rc=1
+    fi
 fi
 
-[ $rc = 0 ] && echo "== kvm-battery: green (battery; self-build at the documented limits)" \
+[ $rc = 0 ] && echo "== kvm-battery: green (battery and a booting self-built kernel)" \
             || echo "== kvm-battery: FAILED"
 exit $rc

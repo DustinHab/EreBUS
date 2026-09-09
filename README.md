@@ -245,11 +245,7 @@ Measured on 32 cores under KVM, six at a time: about 10 minutes for all 37 tests
 - The ssh door serves up to four visitors at once (a fifth displaces the longest-idle); it honours a client-driven rekey but does not force one.
 - RTL8168/8169 driver written from documentation, untested on silicon.
 - Two HID inputs on one device: implemented, not tested on a real device.
-- The machine's own compiler builds every kernel source but two, so a full self-build is not yet possible. It now handles the comments, the segment-relative and basic inline assembly, the SMP atomic builtins and `rdseed` that the self-hosting build once tripped over; what remains:
-  - **No 128-bit integer type.** `bn.c`'s big-number arithmetic uses `unsigned __int128`; supporting it means a two-register value model through the code generator.
-  - **No 16-bit assembly.** `ap_boot.S`, the SMP real-mode trampoline, uses `.code16`, which the assembler does not do. The pragmatic path is to assemble the trampoline once with `nasm` and check it in as a byte table, so the assembler need not learn 16-bit mode.
-
-  `tools/selfbuild.sh build` compiles every source with the machine's tools and lists what it cannot; `tools/kvm-battery.sh` runs it and fails only on a regression beyond those two known limits.
+- The machine builds its own kernel with its own compiler, assembler and linker: `tools/selfbuild.sh` compiles every source, links `kernel.elf`, and boots it. This includes `bn.c`'s 128-bit big-number arithmetic (the compiler grew an `__int128` type) and the SMP real-mode trampoline (`ap_boot.S`, checked in as a byte table since the assembler does no 16-bit mode). The self-built kernel passes every self-test, the rsa/ecdsa certificate checks among them. `tools/kvm-battery.sh` is the release gate: the battery, then a self-build that must link and boot.
 
 ## Releases
 
