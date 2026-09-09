@@ -930,12 +930,13 @@ static bool do_system(as *a, const char *mn, u32 ml, operand *d, u32 nops)
         modrm_rr(a, 3, d->reg);
         return true;
     }
-    if (word_is(mn, ml, "rdrand")) {
-        if (nops != 1 || d->kind != OP_REG || !(d->size == 16 || d->size == 32 || d->size == 64)) { fail(a, "rdrand wants a register", NULL); return true; }
+    if (word_is(mn, ml, "rdrand") || word_is(mn, ml, "rdseed")) {
+        /* 0F C7 with the register in r/m; /6 for rdrand, /7 for rdseed. */
+        if (nops != 1 || d->kind != OP_REG || !(d->size == 16 || d->size == 32 || d->size == 64)) { fail(a, "that wants a register", NULL); return true; }
         if (d->size == 16) emit8(a, 0x66);
         rex(a, d->size == 64, 0, 0, d->reg, false);
         emit8(a, 0x0F); emit8(a, 0xC7);
-        modrm_rr(a, 6, d->reg);
+        modrm_rr(a, mn[2] == 'r' ? 6 : 7, d->reg);
         return true;
     }
     if (word_is(mn, ml, "int")) {
