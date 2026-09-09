@@ -752,6 +752,9 @@ static const char compiler_text[] =
     "\n"
     "#define SEND 2\n"
     "#define TEXT 0x54584554\n"
+    "/* a string in a #define keeps its // and /* -- they are text,\n"
+    "   not comments; the compiler must not cut the line at them. */\n"
+    "#define GREET \"from // and /* in\"\n"
     "\n"
     "long say(long console, char *s)\n"
     "{\n"
@@ -779,6 +782,7 @@ static const char compiler_text[] =
     "    digits[i] = 0;\n"
     "    do { digits[--i] = '0' + v % 10; v /= 10; } while (v);\n"
     "    say(console, \"hello from c\");\n"
+    "    say(console, GREET);\n"
     "    say(console, digits + i);\n"
     "    return 0;\n"
     "}\n";

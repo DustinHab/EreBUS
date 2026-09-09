@@ -564,6 +564,24 @@ static u32 read_line(char *buf, u32 max)
             if (n && buf[n - 1] == '\\') { n--; getc_(); if (n < max - 1) buf[n++] = ' '; continue; }
             break;
         }
+        /* A string or char literal is copied whole, so // or /* inside it
+         * (a url in a #define, say) is not mistaken for a comment. */
+        if (c == '"' || c == '\'') {
+            char q = (char)c;
+            getc_(); if (n < max - 1) buf[n++] = (char)c;
+            for (;;) {
+                i32 d = peekc(0);
+                if (d < 0 || d == '\n') break;
+                getc_(); if (n < max - 1) buf[n++] = (char)d;
+                if (d == '\\') {
+                    i32 e = peekc(0);
+                    if (e >= 0 && e != '\n') { getc_(); if (n < max - 1) buf[n++] = (char)e; }
+                    continue;
+                }
+                if (d == q) break;
+            }
+            continue;
+        }
         /* Comments are stripped here too, not only in the token lexer, so
          * a directive carrying one behaves. A line comment ends the
          * directive's text; a block comment becomes a single space, even

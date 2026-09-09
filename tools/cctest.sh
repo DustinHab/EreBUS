@@ -42,3 +42,7 @@ python3 tools/ppm2png.py $BUILD/cctest.ppm $BUILD/cctest.png 2>/dev/null
 
 echo "--- compiled and run ---"
 grep -a 'running an image\|user: hello from c\|user: 5050' $LOG
+# The // and /* inside GREET's string must survive the #define; if the
+# compiler cut the line there, "the compiler" would not compile and this
+# line would be missing.
+grep -aq 'user: from // and' $LOG && echo "a comment marker inside a string survived a #define" || echo "FAILED: the // in a #define string did not survive"
