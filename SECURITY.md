@@ -10,24 +10,47 @@ EreBUS is an object-based, capability-secured operating system for a
 single-person x86_64 UEFI machine. A program reaches only the objects it
 was handed: there is no global namespace, no `obj_find()`, no way to name
 an object one was not given. Authority travels as a reference; holding
-the reference is the permission. The kernel, its own UEFI loader, and the
-built-in tools are the whole trusted base -- no foreign code runs in it.
+the reference is the permission.
 
-The machine speaks outward as a client (http, https, ssh, a node pipe to
-other EreBUS machines). It runs no listening internet service other than
-the ssh door, which serves the machine's owner.
+Capability isolation governs what a running program can name and reach.
+It is not, today, a privilege boundary for most of the code. The browser
+and its HTML/CSS renderer, the C compiler, and the shell are compiled
+into the kernel and run in ring 0 (`kernel/gfx/`, `kernel/lang/`); only a
+small set of user programs -- about two and a half thousand lines under
+`kernel/user/` -- runs in ring 3 behind the system-call ABI, against some
+fifty thousand lines of ring-0 C. So a bug in a parser that reads
+outside input -- a page, a stylesheet, an image, a certificate, a
+compiled task -- is a bug in ring 0. Moving those parsers into ring 3 to
+shrink the trusted base is the largest open piece of work and is not
+done; until it is, capability isolation is what a correct kernel
+enforces between programs, not a wall that contains a broken parser.
+
+The machine speaks outward mostly as a client (http, https, ssh). Two
+services listen:
+- the ssh door, which authenticates a client against the door keys in
+  the settings before it serves;
+- the node pipe on UDP 7800 (`kernel/net/pipe.c`), which answers a
+  discovery probe (`SEEK`) from any address with the machine's name,
+  version, free memory and the claim of a public key. It is
+  unauthenticated at this layer: node identity is trust on first use, so
+  a probe both learns those facts and can assert a key, pinned only on
+  first contact.
 
 ## Trusted computing base
 
 - The UEFI loader (`boot/`), written here; no third-party boot code.
 - The kernel (`kernel/`): scheduler, memory, object store, capabilities,
-  drivers, the network stack, and the cryptographic primitives.
+  drivers, the network stack, the cryptographic primitives, and -- until
+  the ring-3 move above -- the browser, the renderer, the compiler and
+  the shell.
 - The built-in trust anchors: the TLS root authorities in
   `kernel/net/authorities.h` and the release-signing public key compiled
   into the kernel.
 
-Everything else -- user programs, the browser, the compiler, the shell --
-runs in ring 3 and reaches the kernel only through the system-call ABI.
+No foreign code runs in the trusted base: every line of it is in this
+repository. That bounds who wrote it, not how large it is -- the base is
+tens of thousands of lines of ring-0 C, which the ring-3 move is meant to
+cut down.
 
 ## Cryptographic posture
 
