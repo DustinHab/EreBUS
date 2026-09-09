@@ -44,6 +44,7 @@ struct thread {
     domain      *dom;
     thread_state state;
     bool         condemned;    /* marked to end at its next kernel step */
+    bool         may_roam;     /* false: only the boot processor runs it */
     u32          slot;         /* which stack slot is ours */
     virt_addr    stack_low;    /* first mapped byte */
     thread_entry entry;
@@ -78,6 +79,17 @@ struct thread {
 
 extern void switch_stack(u64 *save_rsp, u64 load_rsp);
 extern char stack_top_symbol[] __asm__("stack_top");
+
+/* Lets a thread run on any processor. Kernel threads default to the boot
+ * processor only, because they are the ones that reach the device drivers
+ * and those are not built for more than one core touching them. A user
+ * process reaches hardware only by sending a message to one of those
+ * threads, so it is free to run anywhere. */
+void thread_set_roam(thread *t, bool roam)
+{
+    if (!t || t->magic != THREAD_MAGIC) return;
+    t->may_roam = roam;
+}
 
 void thread_set_pml4(thread *t, phys_addr pml4)
 {
@@ -392,8 +404,12 @@ static void switch_to_next(void)
                         ? from->next : run_queue;
         thread *p = start;
         do {
+            /* A thread that may not roam runs only on the boot processor,
+             * which is where the device interrupts land: its drivers keep
+             * their single-processor habits and stay correct. */
             if (p->state == THREAD_READY &&
-                !(boot_idle && p == boot_thread)) { to = p; break; }
+                !(boot_idle && p == boot_thread) &&
+                (p->may_roam || me->index == 0)) { to = p; break; }
             p = p->next;
         } while (p != start);
 

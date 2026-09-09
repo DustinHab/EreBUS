@@ -230,8 +230,11 @@ bool smp_selftest(void)
 
     domain *d = thread_domain(sched_current());
     const u32 workers = 6;
-    for (u32 i = 0; i < workers; i++)
-        if (!thread_create("smp-worker", smp_worker, NULL, d)) return false;
+    for (u32 i = 0; i < workers; i++) {
+        thread *w = thread_create("smp-worker", smp_worker, NULL, d);
+        if (!w) return false;
+        thread_set_roam(w, true);   /* the point is to run them on the aps */
+    }
 
     /* Pin the boot thread here with interrupts off while the measurement
      * runs, so it cannot itself migrate and the count reflects only the

@@ -616,6 +616,9 @@ bool proc_start(process *p)
     if (!p->first) return false;
 
     thread_set_pml4(p->first, p->pml4);
+    /* A user process reaches hardware only through the kernel's server
+     * threads, so it is safe to run on any processor. */
+    thread_set_roam(p->first, true);
     thread_on_reap(p->first, proc_reap, p);
     return true;
 }

@@ -63,6 +63,11 @@ void sched_block(void);
 /* Gives a thread its own address space. Zero means the kernel's. */
 void thread_set_pml4(thread *t, phys_addr pml4);
 
+/* Lets a thread run on any processor. Kernel threads are pinned to the
+ * boot processor by default (they touch the device drivers); user
+ * processes and pure-compute threads are freed to roam. */
+void thread_set_roam(thread *t, bool roam);
+
 /* Runs fn(arg) after the thread has finished and left its stack, from
  * whoever reaps it. Where a process hangs its teardown. */
 void thread_on_reap(thread *t, void (*fn)(void *), void *arg);
