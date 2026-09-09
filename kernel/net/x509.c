@@ -400,9 +400,9 @@ static bool dns_in_subtree(const u8 *cons, u32 clen, const u8 *name, u32 nlen)
 {
     if (clen && cons[0] == '.') { cons++; clen--; }
     if (clen == 0) return true;
-    if (nlen == clen) return name_eq(cons, clen, name, nlen);
+    if (nlen == clen) return name_eq(cons, clen, (const char *)name, nlen);
     if (nlen > clen && name[nlen - clen - 1] == '.')
-        return name_eq(cons, clen, name + (nlen - clen), clen);
+        return name_eq(cons, clen, (const char *)(name + (nlen - clen)), clen);
     return false;
 }
 

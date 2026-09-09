@@ -1,6 +1,13 @@
 /*
  * aes_gcm.c -- AES-128 in Galois/Counter mode, software only (vector units stay off).
- * - table lookups are not constant-time; noted, single-user machine
+ * - constant-time: the S-box is computed by inversion in GF(2^8), not
+ *   looked up, so no secret byte indexes memory; ShiftRows is a fixed
+ *   permutation and MixColumns is arithmetic (xtime). GHASH multiplies
+ *   without a data-dependent branch. Nothing secret steers a memory
+ *   access or a branch, so there is no table-timing side channel.
+ * - this is slower than a table lookup; runtime is not the constraint
+ *   here. The computed S-box is checked against the reference table for
+ *   all 256 inputs at boot (aes_sbox_ct_ok), so an error cannot hide.
  */
 #include <eb/crypto.h>
 #include <eb/cpu.h>
@@ -11,6 +18,9 @@
 /* AES-128                                                             */
 /* ------------------------------------------------------------------ */
 
+/* The reference S-box. Used only to check the computed one at boot
+ * (aes_sbox_ct_ok); the cipher itself never indexes it, so no secret
+ * ever selects a row of it. */
 static const u8 sbox[256] = {
 0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
 0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
@@ -32,6 +42,52 @@ static const u8 sbox[256] = {
 
 static u8 xtime(u8 x) { return (u8)((x << 1) ^ ((x >> 7) * 0x1b)); }
 
+/* Multiply in GF(2^8) modulo x^8 + x^4 + x^3 + x + 1 (0x11b), constant
+ * time: eight fixed rounds, every conditional turned into a mask, no
+ * branch or lookup on the operands. */
+static u8 gf_mul8(u8 a, u8 b)
+{
+    u8 p = 0;
+    for (u32 i = 0; i < 8; i++) {
+        p ^= (u8)(0 - (b & 1)) & a;              /* add a when b's low bit is set */
+        u8 hi = (u8)(0 - (a >> 7));               /* 0xff when a's high bit is set */
+        a = (u8)(a << 1) ^ (u8)(hi & 0x1b);       /* times x, reduced */
+        b >>= 1;
+    }
+    return p;
+}
+
+/* The multiplicative inverse in GF(2^8): x^254 = x^-1 for x != 0, and
+ * 0 maps to 0 (which is what the S-box wants). Built by the
+ * Itoh-Tsujii chain x -> x^(2^7 - 1) -> squared, so the exponent is
+ * fixed and the work does not depend on x. */
+static u8 gf_inv8(u8 x)
+{
+    u8 a = x;                                     /* x^(2^1 - 1) */
+    for (u32 i = 0; i < 6; i++)
+        a = gf_mul8(gf_mul8(a, a), x);            /* -> x^(2^7 - 1) = x^127 */
+    return gf_mul8(a, a);                         /* x^254 */
+}
+
+static u8 rotl8(u8 x, u32 n) { return (u8)((x << n) | (x >> (8 - n))); }
+
+/* The forward S-box, computed: inverse in GF(2^8) then the affine map
+ * s = v ^ rotl(v,1) ^ rotl(v,2) ^ rotl(v,3) ^ rotl(v,4) ^ 0x63. */
+static u8 sbox_ct(u8 x)
+{
+    u8 v = gf_inv8(x);
+    return (u8)(v ^ rotl8(v, 1) ^ rotl8(v, 2) ^ rotl8(v, 3) ^ rotl8(v, 4) ^ 0x63);
+}
+
+/* Checked at boot: the computed S-box equals the reference for every
+ * input. TLS stays down if it does not. */
+bool aes_sbox_ct_ok(void)
+{
+    for (u32 i = 0; i < 256; i++)
+        if (sbox_ct((u8)i) != sbox[i]) return false;
+    return true;
+}
+
 static void aes128_expand(aes_key *k, const u8 key[16])
 {
     for (u32 i = 0; i < 16; i++) k->rk[i] = key[i];
@@ -41,10 +97,10 @@ static void aes128_expand(aes_key *k, const u8 key[16])
         for (u32 j = 0; j < 4; j++) t[j] = k->rk[i - 4 + j];
         if (i % 16 == 0) {
             u8 tmp = t[0];
-            t[0] = (u8)(sbox[t[1]] ^ rcon);
-            t[1] = sbox[t[2]];
-            t[2] = sbox[t[3]];
-            t[3] = sbox[tmp];
+            t[0] = (u8)(sbox_ct(t[1]) ^ rcon);
+            t[1] = sbox_ct(t[2]);
+            t[2] = sbox_ct(t[3]);
+            t[3] = sbox_ct(tmp);
             rcon = xtime(rcon);
         }
         for (u32 j = 0; j < 4; j++) k->rk[i + j] = k->rk[i - 16 + j] ^ t[j];
@@ -58,7 +114,7 @@ static void aes128_encrypt(const aes_key *k, const u8 in[16], u8 out[16])
 
     for (u32 round = 1; round <= 10; round++) {
         u8 t[16];
-        for (u32 i = 0; i < 16; i++) t[i] = sbox[s[i]];
+        for (u32 i = 0; i < 16; i++) t[i] = sbox_ct(s[i]);
 
         /* ShiftRows: row r rotates left by r, in column-major order. */
         u8 sr[16];
@@ -107,11 +163,15 @@ static void gf_mul(u8 x[16], const u8 y[16])
     u64 z0 = 0, z1 = 0;
 
     for (u32 i = 0; i < 128; i++) {
-        if ((x[i >> 3] >> (7 - (i & 7))) & 1) { z0 ^= v0; z1 ^= v1; }
+        /* The bit index i runs 0..127 and is public; only the bit's
+         * value is secret, so it is folded in with a mask, not a branch. */
+        u64 bit = (u64)((x[i >> 3] >> (7 - (i & 7))) & 1);
+        u64 m = (u64)0 - bit;                 /* all ones when the bit is set */
+        z0 ^= v0 & m; z1 ^= v1 & m;
         u64 lsb = v1 & 1;
         v1 = (v1 >> 1) | (v0 << 63);
         v0 >>= 1;
-        if (lsb) v0 ^= 0xe100000000000000ULL;
+        v0 ^= 0xe100000000000000ULL & ((u64)0 - lsb);
     }
     put_be64(x, z0);
     put_be64(x + 8, z1);

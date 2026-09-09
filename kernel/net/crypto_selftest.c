@@ -98,6 +98,10 @@ bool crypto_selftest(void)
         if (!eq(out, want, 32)) { kprintf("crypto: x25519 vector failed\n"); return false; }
     }
 
+    /* The computed S-box must equal the reference for every input; a
+     * single wrong byte would corrupt the cipher only for some data. */
+    if (!aes_sbox_ct_ok()) { kprintf("crypto: computed s-box mismatch\n"); return false; }
+
     /* AES-128-GCM, a NIST CAVS vector with authenticated data and no
      * plaintext: this drives the ghash over real bytes and a length
      * block, the part the empty and single-block cases leave untested. */

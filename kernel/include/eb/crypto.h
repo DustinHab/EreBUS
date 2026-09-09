@@ -9,12 +9,14 @@
  * needs, because every primitive beyond the needed ones is attack
  * surface wearing a feature's clothes.
  *
- * The AES is software, tables and all. The kernel keeps the vector
- * units off everywhere -- there is no SSE state to save because
- * nothing may use it -- and honest table lookups beat a half-done
- * hardware path. Table timing is a real side channel; for a
- * single-person machine speaking outward it is noted, bounded, and
- * accepted rather than hidden. */
+ * The AES is software and constant-time: its S-box is computed by
+ * inversion in GF(2^8), not looked up, so no secret byte indexes a
+ * table, and GHASH multiplies without a data-dependent branch. The
+ * kernel keeps the vector units off everywhere -- there is no SSE state
+ * to save because nothing may use it -- so this is arithmetic, not a
+ * half-done hardware path. It is slower than a table; runtime is not the
+ * constraint here, and a timing side channel is worth more to close than
+ * the cycles it costs. */
 
 typedef struct {
     u32 h[8];
@@ -71,6 +73,8 @@ bool ed25519_verify(const u8 pk[32], const void *msg, u32 len,
 typedef struct { u8 rk[176]; } aes_key;
 void aes128_setkey(aes_key *k, const u8 key[16]);
 void aes128_block(const aes_key *k, const u8 in[16], u8 out[16]);
+/* True when the computed S-box matches the reference for all 256 inputs. */
+bool aes_sbox_ct_ok(void);
 
 /* SHA-1, and the constructions on it that wireless security still
  * leans on: the keyed hash, the slow key derivation from a passphrase
