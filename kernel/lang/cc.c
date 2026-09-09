@@ -4138,8 +4138,15 @@ static char att_operand(asm_block *b, u32 bi, const char *s, u32 len, char *out,
         PUT("]"); out[o] = 0; return 'm';
     }
 
-    /* %%reg */
-    if (len > 2 && s[0] == '%' && s[1] == '%') { PUTN(s + 2, len - 2); out[o] = 0; return 'r'; }
+    /* %%reg, or %%seg:disp -- a segment-relative memory operand such as
+     * %%gs:16, which becomes the assembler's [gs:16] rather than a
+     * register named "gs:16". */
+    if (len > 2 && s[0] == '%' && s[1] == '%') {
+        u32 colon = 0;
+        for (u32 i = 2; i < len; i++) if (s[i] == ':') { colon = i; break; }
+        if (colon) { PUT("["); PUTN(s + 2, len - 2); PUT("]"); out[o] = 0; return 'm'; }
+        PUTN(s + 2, len - 2); out[o] = 0; return 'r';
+    }
 
     /* %N, %[name], with an optional width letter: %b0 %w0 %k0 %q0 */
     if (s[0] == '%') {
