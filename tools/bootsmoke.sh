@@ -12,7 +12,11 @@ OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
 LIMIT=${LIMIT:-300}
 
-make build/esp.img "$BUILD/teststore.img" >/dev/null 2>&1 || { echo "build failed"; exit 2; }
+touch kernel/gfx/font8x16.h    # use the committed font, do not regenerate
+make >/dev/null 2>&1 || { echo "build failed"; make 2>&1 | tail -20; exit 2; }
+# A scratch object-graph disk; the store rule's target is an absolute
+# path, so make it here rather than asking make for a relative name.
+[ -f "$BUILD/teststore.img" ] || dd if=/dev/zero of="$BUILD/teststore.img" bs=1M count=32 status=none
 cp "$OVMF_VARS" "$BUILD/smoke-vars.fd"
 LOG=$BUILD/smoke-serial.log
 : > "$LOG"
