@@ -7,6 +7,10 @@ build/
 *.log
 *.obj
 tools/cc/*.c.asm
+# cchost writes these beside a source it compiles (build/cchost <file.c>)
+*.c.asm
+*.c.img
+*.c.obj
 
 # Generated, but worth having in the tree to look things up -- kept on
 # purpose: kernel/gfx/font8x16.h
