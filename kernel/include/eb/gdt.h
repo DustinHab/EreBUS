@@ -26,6 +26,10 @@
 
 void gdt_init(void);
 
+/* An application processor loading the shared table and kernel
+ * selectors (no task register -- see gdt.c). */
+void gdt_load_ap(void);
+
 /* Stack the hardware switches to when entering ring 0 from ring 3.
  * Only becomes relevant once there are processes. */
 void tss_set_kernel_stack(u64 rsp0);

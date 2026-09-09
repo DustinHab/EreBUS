@@ -85,7 +85,7 @@ void port_drop_queued(object *p)
      * teardown came about. */
     if (!p || obj_type(p) != TYPE_PORT) return;
 
-    u64 flags = irq_save();
+    u64 flags = sched_lock_hold();
     port_state *s = state_of(p);
     queued *ring = ring_of(s);
     while (s->count > 0) {
@@ -98,7 +98,7 @@ void port_drop_queued(object *p)
         s->head = (s->head + 1) % s->capacity;
         s->count--;
     }
-    irq_restore(flags);
+    sched_lock_drop(flags);
 }
 
 void port_visit_queued(object *p, void (*visit)(object *o))
@@ -128,11 +128,11 @@ bool port_post(object *p, const message *m,
     if (!p || obj_type(p) != TYPE_PORT || !m) return false;
     if (ncaps > MSG_MAX_CAPS) return false;
 
-    u64 flags = irq_save();
+    u64 flags = sched_lock_hold();
     port_state *s = state_of(p);
 
     if (s->count >= s->capacity) {
-        irq_restore(flags);
+        sched_lock_drop(flags);
         return false;
     }
 
@@ -158,7 +158,7 @@ bool port_post(object *p, const message *m,
         for (u32 i = 1; i < s->nwaiters; i++) s->waiters[i - 1] = s->waiters[i];
         s->nwaiters--;
     }
-    irq_restore(flags);
+    sched_lock_drop(flags);
 
     if (woken) sched_wake(woken);
     return true;
@@ -237,9 +237,9 @@ bool port_try_receive(domain *to, cap_handle h, message *out)
     object *p = cap_lookup(to, h, CAP_READ);
     if (!p || obj_type(p) != TYPE_PORT || !out) return false;
 
-    u64 flags = irq_save();
+    u64 flags = sched_lock_hold();
     bool got = dequeue(to, state_of(p), out, NULL);
-    irq_restore(flags);
+    sched_lock_drop(flags);
     return got;
 }
 
@@ -250,16 +250,16 @@ bool port_receive_labelled(domain *to, cap_handle h, message *out,
     if (!p || obj_type(p) != TYPE_PORT || !out) return false;
 
     for (;;) {
-        u64 flags = irq_save();
+        u64 flags = sched_lock_hold();
         port_state *s = state_of(p);
 
         if (dequeue(to, s, out, from)) {
-            irq_restore(flags);
+            sched_lock_drop(flags);
             return true;
         }
 
         if (s->nwaiters >= MAX_WAITERS) {
-            irq_restore(flags);
+            sched_lock_drop(flags);
             return false;
         }
 
@@ -280,10 +280,10 @@ bool port_receive_labelled(domain *to, cap_handle h, message *out,
                 s->nwaiters--;
                 break;
             }
-            irq_restore(flags);
+            sched_lock_drop(flags);
             return false;
         }
-        irq_restore(flags);
+        sched_lock_drop(flags);
     }
 }
 

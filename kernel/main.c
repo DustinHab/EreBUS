@@ -41,6 +41,7 @@
 #include <eb/syscall.h>
 #include <eb/pic.h>
 #include <eb/apic.h>
+#include <eb/smp.h>
 #include <eb/pmm.h>
 #include <eb/ps2.h>
 #include <eb/xhci.h>
@@ -1409,6 +1410,11 @@ void kmain(eb_boot_info *bi)
     else
         panic("the frame allocator failed its own test");
 
+    /* Claim the application-processor trampoline page before the page
+     * tables and heap start allocating, so that fixed low address stays
+     * ours to write later. */
+    smp_reserve_trampoline();
+
     vmm_init(bi);
 
     vmm_protections p = vmm_active_protections();
@@ -1447,6 +1453,10 @@ void kmain(eb_boot_info *bi)
      * now, with page tables to map its window. */
     if (!lapic_init())
         kprintf("apic: no local controller; devices use their legacy lines or are polled\n");
+    else {
+        lapic_timer_calibrate();      /* learn the local timer's rate for the aps */
+        smp_start(bi->acpi_rsdp);
+    }
 
     /* The screen gets its back buffer here, at the first moment there is
      * an allocator to ask -- not at the end of start-up where it used to
@@ -1493,6 +1503,10 @@ void kmain(eb_boot_info *bi)
     kernel_domain = domain_create("kernel", 256);
     if (!kernel_domain) panic("no memory for the kernel domain");
 
+    /* This processor's gs base has to point at its own block before the
+     * scheduler runs: the scheduler keeps the running thread there. */
+    percpu_init(0, lapic_present() ? lapic_id() : 0);
+
     sched_init(kernel_domain);
     port_init();
     kprintf("sched: round robin, %u ms slice, boot thread adopted\n", 50u);
@@ -1502,6 +1516,12 @@ void kmain(eb_boot_info *bi)
                 "spinning thread is preempted\n");
     else
         panic("the scheduler failed its own test");
+
+    /* With more than one processor, prove the application processors run
+     * kernel threads in parallel, then park them again. Not fatal: a
+     * machine that cannot is still a working single-processor one. */
+    if (!smp_selftest())
+        kprintf("smp:  parallel self test inconclusive\n");
 
     if (msg_selftest())
         kprintf("msg:  self test passed -- capabilities survive transit "
@@ -1582,7 +1602,6 @@ void kmain(eb_boot_info *bi)
 
     /* --- user mode --------------------------------------------------- */
 
-    percpu_init();
     syscall_init();
     kprintf("cpu0: syscall entry armed, %u calls in the interface\n", SYS_MAX);
 

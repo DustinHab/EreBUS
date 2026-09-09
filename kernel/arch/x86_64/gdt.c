@@ -108,3 +108,30 @@ void gdt_init(void)
     kprintf("cpu0: GDT loaded, TSS with three %u KiB fault stacks\n",
             (u32)(sizeof(stack_double_fault) / 1024));
 }
+
+/* An application processor loading the shared descriptor table and its
+ * kernel selectors. No task register: the one TSS is the boot
+ * processor's and a busy TSS cannot be loaded twice -- a parked ap needs
+ * none. A per-cpu TSS comes with the scheduler on more than one core. */
+void gdt_load_ap(void)
+{
+    table_ptr gdtr = { .limit = sizeof(gdt) - 1, .base = (u64)gdt };
+    __asm__ volatile (
+        "lgdt   %[gdtr]                 \n"
+        "movw   %[data], %%ax           \n"
+        "movw   %%ax, %%ds              \n"
+        "movw   %%ax, %%es              \n"
+        "movw   %%ax, %%ss              \n"
+        "movw   %%ax, %%fs              \n"
+        "movw   %%ax, %%gs              \n"
+        "pushq  %[code]                 \n"
+        "leaq   1f(%%rip), %%rax        \n"
+        "pushq  %%rax                   \n"
+        "lretq                          \n"
+        "1:                             \n"
+        :
+        : [gdtr] "m" (gdtr),
+          [data] "i" ((u16)SEL_KERNEL_DATA),
+          [code] "i" ((u64)SEL_KERNEL_CODE)
+        : "rax", "memory");
+}

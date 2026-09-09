@@ -2,6 +2,7 @@
 #define EB_SYSCALL_H
 
 #include <eb/types.h>
+#include <eb/percpu.h>
 
 /* The whole system call interface.
  *
@@ -39,9 +40,6 @@
 /* Sets up the MSRs the syscall instruction reads, and points it here. */
 void syscall_init(void);
 
-/* Per-processor data reachable through GS while in the kernel. The
- * offsets are fixed: syscall.S reads them directly. */
-void percpu_init(void);
-void percpu_set_kernel_stack(u64 stack_top);
+/* percpu_init / percpu_set_kernel_stack live in eb/percpu.h, included above. */
 
 #endif /* EB_SYSCALL_H */

@@ -30,6 +30,10 @@ phys_addr pmm_alloc(void);
  * contiguous physical memory (device buffers, large tables). */
 phys_addr pmm_alloc_contig(u64 count);
 
+/* Reserves one specific frame before general allocation begins. Returns
+ * false if the frame is out of range or already taken. */
+bool pmm_reserve(phys_addr frame);
+
 void pmm_free(phys_addr frame);
 void pmm_free_contig(phys_addr first, u64 count);
 

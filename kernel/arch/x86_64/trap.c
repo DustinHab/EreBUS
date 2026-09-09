@@ -315,6 +315,17 @@ void trap_dispatch(trap_frame *f)
         return;
     }
 
+    if (f->vector == LAPIC_TIMER_VECTOR) {
+        /* This processor's own periodic tick: accounting, then, on the
+         * way out, the switch itself. The application processors run on
+         * this; the boot processor keeps the pit. */
+        irq_total++;
+        sched_tick();
+        lapic_eoi();
+        sched_preempt_if_due();
+        return;
+    }
+
     if (f->vector >= MSI_BASE && f->vector < MSI_BASE + MSI_COUNT) {
         u32 i = (u32)(f->vector - MSI_BASE);
         irq_total++;
@@ -349,8 +360,15 @@ void trap_init(void)
     set_gate(8,  IST_DOUBLE_FAULT, GATE_INTERRUPT);
     set_gate(18, IST_DOUBLE_FAULT, GATE_INTERRUPT);  /* machine check */
 
-    table_ptr idtr = { .limit = sizeof(idt) - 1, .base = (u64)idt };
-    __asm__ volatile ("lidt %0" :: "m"(idtr));
+    idt_load();
 
     kprintf("cpu0: IDT loaded, 256 vectors, %u on separate stacks\n", 5u);
+}
+
+/* Load the shared interrupt table -- the boot processor here, and every
+ * application processor as it comes up. */
+void idt_load(void)
+{
+    table_ptr idtr = { .limit = sizeof(idt) - 1, .base = (u64)idt };
+    __asm__ volatile ("lidt %0" :: "m"(idtr));
 }

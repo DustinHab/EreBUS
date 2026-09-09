@@ -10,6 +10,14 @@
 #include <eb/io.h>
 #include <eb/fmt.h>
 #include <eb/panic.h>
+#include <eb/spin.h>
+
+/* One lock over the block list and its counts. Held with interrupts off,
+ * for the same reasons the frame allocator's is: a handler that allocates
+ * must not deadlock on it, and two cores must not walk the list at once.
+ * It nests outside the frame allocator's lock (grow() asks it for pages);
+ * nothing takes them the other way round. */
+static spinlock kheap_lock;
 
 /* Well clear of the direct map, which stops at PHYSMAP_BASE + 64 GiB. */
 #define KHEAP_BASE      0xFFFFFF8000000000ULL
@@ -156,7 +164,7 @@ void *kmalloc(u64 size)
      * heap carried an unspoken single-thread assumption from the days
      * when only the boot path allocated; threads that create and tear
      * things down made it a lie. */
-    u64 flags = irq_save();
+    u64 flags = spin_lock_irq(&kheap_lock);
 
     /* Next fit, not first fit. Starting every search at the head means
      * every allocation re-walks every block already handed out, and the
@@ -179,7 +187,7 @@ void *kmalloc(u64 size)
                 used_bytes += b->size;
                 free_bytes -= b->size;
                 rover = b->next ? b->next : first;
-                irq_restore(flags);
+                spin_unlock_irq(&kheap_lock, flags);
                 return (u8 *)b + sizeof(block);
             }
             b = b->next;
@@ -188,7 +196,7 @@ void *kmalloc(u64 size)
         }
         if (attempt == 0 && !grow(size)) break;
     }
-    irq_restore(flags);
+    spin_unlock_irq(&kheap_lock, flags);
     return NULL;
 }
 
@@ -229,7 +237,7 @@ void kfree(void *p)
     if (b->free)
         panic("heap block at %p released twice", p);
 
-    u64 flags = irq_save();           /* same reason as in kmalloc */
+    u64 flags = spin_lock_irq(&kheap_lock);   /* same reason as in kmalloc */
     b->free = 1;
     used_bytes -= b->size;
     free_bytes += b->size;
@@ -242,7 +250,7 @@ void kfree(void *p)
 
     merge_forward(b);
     if (b->prev && b->prev->free) merge_forward(b->prev);
-    irq_restore(flags);
+    spin_unlock_irq(&kheap_lock, flags);
 }
 
 u64 kheap_bytes_used(void) { return used_bytes; }

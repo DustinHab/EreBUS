@@ -20,6 +20,10 @@ typedef void (*irq_handler)(trap_frame *f);
 /* Builds and loads the interrupt descriptor table. */
 void trap_init(void);
 
+/* Loads the (already built) table -- an application processor as it
+ * comes up shares the boot processor's descriptors. */
+void idt_load(void);
+
 /* Attaches a handler to one of the 16 legacy interrupt lines. A line
  * may carry several devices (pci pins are shared); each handler looks
  * at its own device and does nothing when it was not the one. */

@@ -39,10 +39,25 @@ void sched_yield(void);
  * thread is ready. */
 void sched_idle_from_here(void);
 
+/* An application processor joins the scheduler: it adopts the execution
+ * it is already running as its own idle thread. Interrupts off; called
+ * once per application processor, its gs base already set. */
+void sched_adopt_ap(u64 kstack_top);
+
+/* The scheduler lock, for code outside the scheduler that has to add a
+ * thread to a wait list and block it without a wakeup slipping in
+ * between: hold across the list change and sched_block, drop after. It is
+ * the same lock the scheduler switches under, so wait lists guarded by it
+ * are safe against the scheduler on every processor. Interrupts are off
+ * while it is held. */
+u64  sched_lock_hold(void);
+void sched_lock_drop(u64 flags);
+
 /* Takes the calling thread off the run queue until somebody wakes it.
- * Interrupts must already be off; the caller has put the thread on
- * whatever wait list will wake it, and losing the race between those
- * two steps would lose the wakeup. */
+ * The scheduler lock must be held (see sched_lock_hold); the caller has
+ * put the thread on whatever wait list will wake it, and the lock keeps
+ * the race between those two steps from losing the wakeup. Returns with
+ * the lock still held. */
 void sched_block(void);
 
 /* Gives a thread its own address space. Zero means the kernel's. */

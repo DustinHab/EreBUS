@@ -11,6 +11,8 @@
 #include <eb/io.h>
 #include <eb/gdt.h>
 #include <eb/syscall.h>
+#include <eb/percpu.h>
+#include <eb/spin.h>
 #include <eb/time.h>
 #include <eb/panic.h>
 
@@ -95,15 +97,23 @@ void thread_set_pml4(thread *t, phys_addr pml4)
     }
 }
 
-static thread *current;
-static thread *run_queue;      /* circular; points at some ready thread */
-static thread *boot_thread;    /* the one that idles; its time is idle time */
+static thread *run_queue;      /* circular; ready and running threads */
+static thread *boot_thread;    /* the boot processor's idle; its time is idle time */
 
-/* When the running thread last took the processor. Every switch closes
- * the interval and books it to whoever is leaving, which is the whole
- * of the accounting: no sampling, no estimate, just the clock read at
- * each handover. */
-static u64 switch_stamp;
+/* One lock over the run queue, the sleepers and finished lists, the
+ * counters, and the act of switching itself. It is held with interrupts
+ * off, and -- the one unusual part -- it is held across a context switch:
+ * whoever the processor lands on releases it, the thread being switched
+ * away from having handed it over. On one processor it is never
+ * contended; it is what makes the same code correct on several. */
+static spinlock sched_lock;
+
+/* The running thread and the moment it took the processor are per cpu,
+ * kept in that processor's block; the accounting reads the clock at each
+ * handover and books the interval to whoever is leaving. */
+static inline thread *cur(void)          { return this_cpu()->current; }
+static inline void    set_cur(thread *t) { this_cpu()->current = t; }
+
 static u32 slice_ticks = SLICE_TICKS;
 
 static void reap_finished(void);   /* defined beside thread_exit below */
@@ -111,8 +121,8 @@ static u64 next_id = 1;
 static u64 switches;
 static u64 thread_count;
 static u64 runnable_count;
-static u32 slice_left;
 static bool resched_due;
+static volatile bool started;   /* the timer may tick before sched_init runs */
 static u8 slot_taken[TSTACK_MAX / 8];
 
 /* ------------------------------------------------------------------ */
@@ -188,14 +198,26 @@ static virt_addr map_stack(u32 slot)
 
 static void trampoline(void)
 {
-    thread *t = current;
+    /* The switch that first ran us was holding the scheduler lock, and a
+     * thread resumed through switch_stack is the one that releases it.
+     * Every other thread does that on its way out of switch_to_next; a
+     * brand new one has never been there, so it does it here. */
+    spin_unlock(&sched_lock);
+
+    thread *t = cur();
     cpu_sti();                 /* the first thing a new thread wants */
     t->entry(t->arg);
     thread_exit();
 }
 
+/* The domain the boot thread runs in, kept so that each application
+ * processor's idle thread can be created in the same one. */
+static domain *sched_kernel_domain;
+
 void sched_init(domain *boot_domain)
 {
+    sched_kernel_domain = boot_domain;
+
     thread *t = (thread *)kzalloc(sizeof(thread));
     if (!t) panic("no memory for the boot thread");
 
@@ -207,11 +229,43 @@ void sched_init(domain *boot_domain)
     t->slot  = 0xFFFFFFFFu;    /* runs on the stack from start.S */
     t->kstack_top = (u64)stack_top_symbol;
 
-    current = t;
+    set_cur(t);
+    this_cpu()->idle = t;
+    this_cpu()->switch_stamp = time_ns();
+    this_cpu()->slice_left = slice_ticks;
     boot_thread = t;
     thread_count = 1;
-    slice_left = slice_ticks;
     queue_add(t);
+    started = true;      /* from here the timer tick may schedule */
+}
+
+/* An application processor adopts the execution it is already running as
+ * its own idle thread, the way sched_init does for the boot processor.
+ * That idle thread is deliberately not on the run queue: the scheduler
+ * falls back to this processor's idle only when it has nothing else to
+ * run, so no other processor ever picks it up. Interrupts are off; called
+ * once, as the processor joins the scheduler, its gs base already set. */
+void sched_adopt_ap(u64 kstack_top)
+{
+    thread *t = (thread *)kzalloc(sizeof(thread));
+    if (!t) panic("no memory for an application processor's idle thread");
+
+    t->magic = THREAD_MAGIC;
+    t->name  = "idle";
+    t->dom   = sched_kernel_domain;
+    t->state = THREAD_RUNNING;
+    t->slot  = 0xFFFFFFFFu;        /* runs on the trampoline stack */
+    t->kstack_top = kstack_top;
+
+    u64 flags = spin_lock_irq(&sched_lock);
+    t->id = next_id++;
+    thread_count++;
+    spin_unlock_irq(&sched_lock, flags);
+
+    set_cur(t);
+    this_cpu()->idle = t;
+    this_cpu()->switch_stamp = time_ns();
+    this_cpu()->slice_left = slice_ticks;
 }
 
 thread *thread_create(const char *name, thread_entry entry, void *arg,
@@ -220,13 +274,26 @@ thread *thread_create(const char *name, thread_entry entry, void *arg,
     thread *t = (thread *)kzalloc(sizeof(thread));
     if (!t) return NULL;
 
-    if (!claim_slot(&t->slot)) { kfree(t); return NULL; }
+    /* The slot map and the id counter are shared; claiming a slot and
+     * taking an id are quick and go under the lock. Mapping the stack
+     * afterwards is not: it asks the frame allocator and the page tables
+     * for memory, each with its own lock, so it runs outside this one. */
+    u64 flags = spin_lock_irq(&sched_lock);
+    bool got = claim_slot(&t->slot);
+    if (got) t->id = next_id++;
+    spin_unlock_irq(&sched_lock, flags);
+    if (!got) { kfree(t); return NULL; }
 
     virt_addr low = map_stack(t->slot);
-    if (!low) { release_slot(t->slot); kfree(t); return NULL; }
+    if (!low) {
+        flags = spin_lock_irq(&sched_lock);
+        release_slot(t->slot);
+        spin_unlock_irq(&sched_lock, flags);
+        kfree(t);
+        return NULL;
+    }
 
     t->magic = THREAD_MAGIC;
-    t->id    = next_id++;
     t->name  = name;
     t->dom   = d;
     t->entry = entry;
@@ -249,10 +316,10 @@ thread *thread_create(const char *name, thread_entry entry, void *arg,
     *--sp = 0x002;             /* rflags, interrupts still off */
     t->rsp = (u64)sp;
 
-    u64 flags = irq_save();
+    flags = spin_lock_irq(&sched_lock);
     queue_add(t);
     thread_count++;
-    irq_restore(flags);
+    spin_unlock_irq(&sched_lock, flags);
 
     return t;
 }
@@ -267,33 +334,52 @@ static bool boot_idle;
 
 void sched_idle_from_here(void) { boot_idle = true; }
 
-/* Moves to the next runnable thread. Interrupts must be off. */
+/* Picks the next thread this processor should run and switches to it.
+ *
+ * Called with sched_lock held and interrupts off. It does not release the
+ * lock: the lock crosses the switch. When switch_stack lands the
+ * processor on another thread, that thread is somewhere in its own
+ * switch_to_next (or, brand new, in trampoline) and releases the lock
+ * there. Execution returns here only when some processor switches back to
+ * us, still holding the lock, and the caller lets it go. */
 static void switch_to_next(void)
 {
-    if (!run_queue) return;
+    thread *from = cur();
+    percpu *me = this_cpu();
 
-    thread *from = current;
-    thread *to;
+    /* Walk the ring for a thread that is ready and not already running on
+     * another processor. Starting after the current one keeps it round
+     * robin. The idle thread is passed over while any real work waits,
+     * and taken only when nothing else is ready. */
+    thread *to = NULL;
+    if (run_queue) {
+        thread *start = (from->state == THREAD_RUNNING && from->next)
+                        ? from->next : run_queue;
+        thread *p = start;
+        do {
+            if (p->state == THREAD_READY &&
+                !(boot_idle && p == boot_thread)) { to = p; break; }
+            p = p->next;
+        } while (p != start);
 
-    if (from->state == THREAD_RUNNING && from->next) {
-        to = from->next;
-    } else {
-        to = run_queue;
+        /* Nothing else was ready: keep running the current thread if it
+         * still can, otherwise fall to this processor's own idle. */
+        if (!to) {
+            if (from->state == THREAD_RUNNING && !from->condemned) to = from;
+            else to = this_cpu()->idle;
+        }
     }
-    /* The idle thread only when nobody else is ready: a yield should
-     * reach the next thread with work, not a halt that lasts until
-     * the next tick. It is still taken when the yielding thread is the
-     * only other one, so that one sleeps between its turns. Until the
-     * boot thread has said it is idle it is an ordinary thread with
-     * the start-up still to finish, and is not passed over. */
-    if (boot_idle && to == boot_thread && to->next && to->next != to && to->next != from)
-        to = to->next;
-    if (to == from) { slice_left = slice_ticks; return; }
+    if (!to) to = this_cpu()->idle;   /* empty run queue: idle */
+
+    if (!to || to == from) {
+        me->slice_left = slice_ticks;
+        return;                        /* nothing to switch to; lock stays held */
+    }
 
     /* Book the interval to whoever is leaving. */
     u64 now = time_ns();
-    from->ran_ns += now - switch_stamp;
-    switch_stamp = now;
+    from->ran_ns += now - me->switch_stamp;
+    me->switch_stamp = now;
 
     if (from->state == THREAD_RUNNING) {
         if (from->condemned) {
@@ -313,9 +399,9 @@ static void switch_to_next(void)
         }
     }
     to->state = THREAD_RUNNING;
-    current = to;
+    set_cur(to);
     switches++;
-    slice_left = slice_ticks;
+    me->slice_left = slice_ticks;
     resched_due = false;
 
     /* Two things have to follow the thread, not the code: the address
@@ -338,8 +424,14 @@ static void switch_to_next(void)
     if (to->fx)   __asm__ volatile ("fxrstor (%0)" :: "r"(to->fx) : "memory");
 
     switch_stack(&from->rsp, to->rsp);
-    /* Execution resumes here when somebody switches back to us. */
+    /* Execution resumes here when somebody switches back to us, with the
+     * lock held; our caller releases it. */
 }
+
+/* The scheduler lock, lent to code that has to block a thread on a wait
+ * list of its own (a port with nobody sending yet, say). */
+u64  sched_lock_hold(void)        { return spin_lock_irq(&sched_lock); }
+void sched_lock_drop(u64 flags)   { spin_unlock_irq(&sched_lock, flags); }
 
 void sched_yield(void)
 {
@@ -348,35 +440,36 @@ void sched_yield(void)
      * the ones that have finished. */
     reap_finished();
 
-    u64 flags = irq_save();
+    u64 flags = spin_lock_irq(&sched_lock);
     switch_to_next();
-    irq_restore(flags);
+    spin_unlock_irq(&sched_lock, flags);
 }
 
+/* Called with sched_lock held and interrupts off, having already put the
+ * caller on whatever wait list it waits on, so a wakeup cannot slip in
+ * between. Returns, still holding the lock, once the thread is running
+ * again. */
 void sched_block(void)
 {
-    /* The caller has interrupts off and has already put us on a wait
-     * list, so a wakeup cannot slip between the two. */
-    current->state = THREAD_BLOCKED;
-    queue_remove(current);
+    thread *me = cur();
+    me->state = THREAD_BLOCKED;
+    queue_remove(me);
 
-    /* Nobody else to run: early in the start-up, before the other
-     * threads exist. Then the wait happens right here, halted with
-     * interrupts on until the wakeup -- which puts us back on the queue
-     * as ready -- and the thread carries on as the running one. A
-     * thread that becomes ready meanwhile is given the processor, and
-     * the wait goes on when it is done. */
-    if (!run_queue) {
-        thread *me = current;
-        for (;;) {
-            if (me->state != THREAD_BLOCKED) break;
-            if (run_queue) { switch_to_next(); continue; }
+    /* Run something else until a wakeup marks us ready again. When there
+     * is nothing to run -- early in start-up, or a lone waiter -- halt
+     * with the lock released and interrupts on until an interrupt (a
+     * wakeup among them) arrives, then look again. Whatever wakes us
+     * marks us ready and puts us back on the queue. */
+    while (me->state == THREAD_BLOCKED) {
+        if (run_queue) {
+            switch_to_next();
+        } else {
+            spin_unlock(&sched_lock);
             __asm__ volatile ("sti; hlt; cli" ::: "memory");
+            spin_lock(&sched_lock);
         }
-        me->state = THREAD_RUNNING;
-        return;
     }
-    switch_to_next();
+    me->state = THREAD_RUNNING;
 }
 
 /* ------------------------------------------------------------------ */
@@ -386,6 +479,8 @@ void sched_block(void)
 /* Threads with a deadline, unordered: there are a handful at most, and
  * the tick walks them all. */
 static thread *sleepers;
+
+static void wake_locked(thread *t);   /* defined with sched_wake below */
 
 /* Interrupts off. */
 static void sleepers_add(thread *t, u64 wake_at)
@@ -420,7 +515,7 @@ static void sleepers_tick(void)
             *p = t->sleep_next;
             t->sleep_next = NULL;
             t->wake_at = 0;
-            sched_wake(t);
+            wake_locked(t);
         } else {
             p = &t->sleep_next;
         }
@@ -430,24 +525,24 @@ static void sleepers_tick(void)
 void sched_sleep_ns(u64 ns)
 {
     reap_finished();
-    u64 flags = irq_save();
-    sleepers_add(current, time_ns() + ns);
+    u64 flags = spin_lock_irq(&sched_lock);
+    sleepers_add(cur(), time_ns() + ns);
     sched_block();
-    sleepers_remove(current);
-    irq_restore(flags);
+    sleepers_remove(cur());
+    spin_unlock_irq(&sched_lock, flags);
 }
 
 void event_signal(event *e)
 {
     if (!e) return;
-    u64 flags = irq_save();
+    u64 flags = spin_lock_irq(&sched_lock);
     e->pending = 1;
     thread *woken[EVENT_WAITERS];
     u32 n = e->nwaiters;
     for (u32 i = 0; i < n; i++) woken[i] = e->waiters[i];
     e->nwaiters = 0;
-    for (u32 i = 0; i < n; i++) sched_wake(woken[i]);
-    irq_restore(flags);
+    for (u32 i = 0; i < n; i++) wake_locked(woken[i]);
+    spin_unlock_irq(&sched_lock, flags);
 }
 
 /* Interrupts off. */
@@ -466,45 +561,51 @@ bool event_wait(event *e, u64 timeout_ns)
     if (!e) { sched_sleep_ns(timeout_ns); return false; }
     reap_finished();
 
-    u64 flags = irq_save();
+    u64 flags = spin_lock_irq(&sched_lock);
     if (e->pending) {
         e->pending = 0;
-        irq_restore(flags);
+        spin_unlock_irq(&sched_lock, flags);
         return true;
     }
     if (e->nwaiters >= EVENT_WAITERS) {
         /* More waiters than the event has room for: not a state the
          * kernel gets into on purpose, so the wait becomes a sleep. */
-        irq_restore(flags);
+        spin_unlock_irq(&sched_lock, flags);
         sched_sleep_ns(timeout_ns);
         return false;
     }
-    e->waiters[e->nwaiters++] = current;
-    if (timeout_ns) sleepers_add(current, time_ns() + timeout_ns);
+    e->waiters[e->nwaiters++] = cur();
+    if (timeout_ns) sleepers_add(cur(), time_ns() + timeout_ns);
     sched_block();
 
     /* Awake: by the signal, by the deadline, or to be ended. Off both
      * lists either way -- whichever woke us left the other one. */
-    sleepers_remove(current);
-    event_forget(e, current);
+    sleepers_remove(cur());
+    event_forget(e, cur());
     bool signalled = e->pending != 0;
     e->pending = 0;
-    irq_restore(flags);
+    spin_unlock_irq(&sched_lock, flags);
     return signalled;
 }
 
-void sched_wake(thread *t)
+/* Puts a blocked thread back on the run queue. Assumes sched_lock is held
+ * and interrupts are off. */
+static void wake_locked(thread *t)
 {
     if (!t || t->magic != THREAD_MAGIC) return;
     if (t->state != THREAD_BLOCKED) return;
-
-    u64 flags = irq_save();
     t->state = THREAD_READY;
     queue_add(t);
     /* The idle thread holds nothing anyone wants: when it is the one
      * running, the woken thread gets the processor on the way out. */
-    if (boot_idle && current == boot_thread) resched_due = true;
-    irq_restore(flags);
+    if (boot_idle && cur() == boot_thread) resched_due = true;
+}
+
+void sched_wake(thread *t)
+{
+    u64 flags = spin_lock_irq(&sched_lock);
+    wake_locked(t);
+    spin_unlock_irq(&sched_lock, flags);
 }
 
 /* Marks a thread to end. It finishes itself at its next step into
@@ -526,17 +627,24 @@ bool thread_condemned(const thread *t)
 
 void sched_tick(void)
 {
-    if (!current) return;               /* timer runs before we do */
+    if (!started) return;               /* the timer runs before we do */
+    u64 flags = spin_lock_irq(&sched_lock);
     sleepers_tick();
-    if (slice_left > 0) slice_left--;
-    if (slice_left == 0) resched_due = true;
+    percpu *me = this_cpu();
+    if (me->slice_left > 0) me->slice_left--;
+    if (me->slice_left == 0) resched_due = true;
+    spin_unlock_irq(&sched_lock, flags);
 }
 
 void sched_preempt_if_due(void)
 {
-    if (!current || !resched_due) return;
-    resched_due = false;
-    switch_to_next();
+    if (!started || !resched_due) return;
+    u64 flags = spin_lock_irq(&sched_lock);
+    if (resched_due) {
+        resched_due = false;
+        switch_to_next();
+    }
+    spin_unlock_irq(&sched_lock, flags);
 }
 
 /* The exiting thread puts itself on finished_list (declared above) with
@@ -544,9 +652,9 @@ void sched_preempt_if_due(void)
  * free the stack it is still standing on. */
 void thread_exit(void)
 {
-    u64 flags = irq_save();
+    u64 flags = spin_lock_irq(&sched_lock);
 
-    thread *t = current;
+    thread *t = cur();
     t->state = THREAD_FINISHED;
     queue_remove(t);
     thread_count--;
@@ -554,11 +662,13 @@ void thread_exit(void)
     t->wait_next = finished_list;
     finished_list = t;
 
-    /* The stack cannot be released here: we are standing on it. The
-     * next thread that passes through sched_yield picks it up. */
+    /* The stack cannot be released here: we are standing on it. The next
+     * thread that passes through sched_yield picks it up. switch_to_next
+     * hands the lock across to whoever runs next and never returns to a
+     * finished thread. */
     switch_to_next();
 
-    irq_restore(flags);
+    spin_unlock_irq(&sched_lock, flags);
     panic("a finished thread was scheduled again");
 }
 
@@ -577,10 +687,10 @@ void thread_on_reap(thread *t, void (*fn)(void *), void *arg)
 static void reap_finished(void)
 {
     for (;;) {
-        u64 flags = irq_save();
+        u64 flags = spin_lock_irq(&sched_lock);
         thread *t = finished_list;
         if (t) finished_list = t->wait_next;
-        irq_restore(flags);
+        spin_unlock_irq(&sched_lock, flags);
         if (!t) return;
 
         if (t->on_reap) t->on_reap(t->on_reap_arg);
@@ -592,7 +702,9 @@ static void reap_finished(void)
                                    t->stack_low + off, &frame))
                     pmm_free(frame);
             }
+            flags = spin_lock_irq(&sched_lock);
             release_slot(t->slot);
+            spin_unlock_irq(&sched_lock, flags);
         }
 
         if (t->fx_raw) kfree(t->fx_raw);
@@ -601,7 +713,7 @@ static void reap_finished(void)
     }
 }
 
-thread     *sched_current(void)              { return current; }
+thread     *sched_current(void)              { return cur(); }
 domain     *thread_domain(const thread *t)   { return t ? t->dom : NULL; }
 const char *thread_name(const thread *t)     { return t ? t->name : "?"; }
 u64         thread_id(const thread *t)       { return t ? t->id : 0; }
@@ -651,7 +763,7 @@ static void spinner_thread(void *arg)
 
 bool sched_selftest(void)
 {
-    domain *d = thread_domain(current);
+    domain *d = thread_domain(cur());
 
     tally[0] = tally[1] = tally[2] = 0;
     order_marks = 0;

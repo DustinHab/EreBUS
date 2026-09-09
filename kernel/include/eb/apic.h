@@ -24,4 +24,20 @@ void lapic_eoi(void);
 u32  lapic_msi_address(void);
 u32  lapic_msi_data(u8 vector);
 
+/* Starting the other processors: an INIT then a startup at the given
+ * trampoline vector, and an application processor enabling its own apic. */
+void lapic_send_init(u32 apic_id);
+void lapic_send_sipi(u32 apic_id, u8 vector);
+u32  lapic_enable_ap(void);
+
+/* The local timer, one per processor, for preemption. The boot processor
+ * measures its rate once (against the calibrated wall clock); each
+ * processor then starts its own periodic tick on this vector, and stops
+ * it before parking. The boot processor keeps its tick from the pit and
+ * does not start this one. */
+#define LAPIC_TIMER_VECTOR 0xF0u
+void lapic_timer_calibrate(void);
+void lapic_timer_start(void);
+void lapic_timer_stop(void);
+
 #endif /* EB_APIC_H */

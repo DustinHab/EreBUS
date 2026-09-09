@@ -3,11 +3,13 @@
  */
 #include <eb/fmt.h>
 #include <eb/io.h>
+#include <eb/spin.h>
 
 #define MAX_SINKS 4
 static kout_sink sinks[MAX_SINKS];
 static u32       sink_count;
 static bool      screen_muted;
+static spinlock  print_lock;    /* one line at a time across all processors */
 
 static u64 (*clock_ns)(void);
 static bool at_line_start = true;
@@ -220,10 +222,12 @@ void kvprintf(const char *fmt, va_list ap)
  * takes a few milliseconds on the serial port; the timer waits. */
 void kprintf(const char *fmt, ...)
 {
-    u64 flags = irq_save();
+    u64 flags = irq_save();       /* off on this processor first, so the */
+    spin_lock(&print_lock);       /* lock is safe to hold from any context */
     va_list ap;
     va_start(ap, fmt);
     kvprintf(fmt, ap);
     va_end(ap);
+    spin_unlock(&print_lock);
     irq_restore(flags);
 }

@@ -7,6 +7,7 @@
 #include <eb/mm.h>
 #include <eb/io.h>
 #include <eb/fmt.h>
+#include <eb/spin.h>
 
 static u8  *bitmap;          /* direct-map pointer, not physical */
 static u64  bitmap_bytes;
@@ -15,6 +16,12 @@ static phys_addr bitmap_phys;
 static u64 total_frames;     /* frames the bitmap describes */
 static u64 free_frames;
 static u64 hint;             /* where the last search left off */
+
+/* One lock over the bitmap and its counts. Interrupts go off while it is
+ * held so a handler that allocates cannot deadlock against the code it
+ * interrupted; on more than one processor it also keeps two cores from
+ * handing out the same frame. */
+static spinlock pmm_lock;
 
 static inline void mark_used(u64 frame)
 {
@@ -121,13 +128,13 @@ static void zero_frame(phys_addr frame)
 
 phys_addr pmm_alloc(void)
 {
-    /* Finding a clear bit and setting it must be one step. Two threads
+    /* Finding a clear bit and setting it must be one step. Two cores
      * scanning at once would find the same bit, and the frame would be
      * handed out twice -- the exact corruption the bitmap exists to
      * make impossible. */
-    u64 flags = irq_save();
+    u64 flags = spin_lock_irq(&pmm_lock);
 
-    if (free_frames == 0) { irq_restore(flags); return PMM_NO_FRAME; }
+    if (free_frames == 0) { spin_unlock_irq(&pmm_lock, flags); return PMM_NO_FRAME; }
 
     /* Two passes: from the hint to the end, then from the start. The
      * hint keeps the common case from rescanning ground that is known
@@ -145,11 +152,11 @@ phys_addr pmm_alloc(void)
             free_frames--;
             hint = f + 1;
             zero_frame(f * PAGE_SIZE);
-            irq_restore(flags);
+            spin_unlock_irq(&pmm_lock, flags);
             return f * PAGE_SIZE;
         }
     }
-    irq_restore(flags);
+    spin_unlock_irq(&pmm_lock, flags);
     return PMM_NO_FRAME;
 }
 
@@ -157,7 +164,9 @@ phys_addr pmm_alloc_contig(u64 count)
 {
     if (count == 0) return PMM_NO_FRAME;
     if (count == 1) return pmm_alloc();
-    if (free_frames < count) return PMM_NO_FRAME;
+
+    u64 flags = spin_lock_irq(&pmm_lock);
+    if (free_frames < count) { spin_unlock_irq(&pmm_lock, flags); return PMM_NO_FRAME; }
 
     u64 run = 0;
     for (u64 f = 0; f < total_frames; f++) {
@@ -170,9 +179,26 @@ phys_addr pmm_alloc_contig(u64 count)
             zero_frame(k * PAGE_SIZE);
         }
         free_frames -= count;
+        spin_unlock_irq(&pmm_lock, flags);
         return first * PAGE_SIZE;
     }
+    spin_unlock_irq(&pmm_lock, flags);
     return PMM_NO_FRAME;
+}
+
+/* Takes one specific frame out of circulation, if it is real and still
+ * free. Used before any general allocation runs, to keep a fixed
+ * physical address (the application-processor trampoline needs one below
+ * 1 MiB) from being handed to something else first. */
+bool pmm_reserve(phys_addr frame)
+{
+    u64 f = frame / PAGE_SIZE;
+    u64 flags = spin_lock_irq(&pmm_lock);
+    if (f == 0 || f >= total_frames || is_used(f)) { spin_unlock_irq(&pmm_lock, flags); return false; }
+    mark_used(f);
+    free_frames--;
+    spin_unlock_irq(&pmm_lock, flags);
+    return true;
 }
 
 void pmm_free(phys_addr frame)
@@ -180,7 +206,7 @@ void pmm_free(phys_addr frame)
     u64 f = frame / PAGE_SIZE;
     if (f == 0 || f >= total_frames) return;
 
-    u64 flags = irq_save();           /* same reason as in pmm_alloc */
+    u64 flags = spin_lock_irq(&pmm_lock);   /* same reason as in pmm_alloc */
 
     /* Releasing a frame that is already free means somebody freed it
      * twice, and the second owner is about to be handed memory that a
@@ -191,7 +217,7 @@ void pmm_free(phys_addr frame)
         free_frames++;
         if (f < hint) hint = f;
     }
-    irq_restore(flags);
+    spin_unlock_irq(&pmm_lock, flags);
 }
 
 void pmm_free_contig(phys_addr first, u64 count)

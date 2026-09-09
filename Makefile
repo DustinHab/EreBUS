@@ -75,6 +75,7 @@ KERN_C   := kernel/main.c \
             kernel/hw/cpu.c \
             kernel/hw/pic.c \
             kernel/hw/apic.c \
+            kernel/hw/smp.c \
             kernel/hw/time.c \
             kernel/gfx/fb.c \
             kernel/gfx/shell.c \
@@ -152,6 +153,7 @@ KERN_S   := kernel/arch/x86_64/start.S \
             kernel/arch/x86_64/isr.S \
             kernel/arch/x86_64/switch.S \
             kernel/arch/x86_64/entry.S \
+            kernel/arch/x86_64/ap_boot.S \
             kernel/user/programs.S \
             kernel/user/agent.S \
             kernel/user/courier.S \

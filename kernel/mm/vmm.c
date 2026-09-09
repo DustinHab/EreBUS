@@ -11,12 +11,20 @@
 #include <eb/fmt.h>
 #include <eb/io.h>
 #include <eb/panic.h>
+#include <eb/spin.h>
 
 #define SIZE_2M 0x200000ULL
 #define ADDR_MASK 0x000FFFFFFFFFF000ULL
 
 static phys_addr kernel_pml4;
 static vmm_protections active;
+
+/* One lock over page-table edits, so two processors mapping or unmapping
+ * at once -- thread stacks coming and going is the usual case -- do not
+ * corrupt a table walk. Held with interrupts off; it nests outside the
+ * frame allocator's lock (a walk asks it for table pages) and nothing
+ * takes them the other way round. */
+static spinlock vmm_lock;
 
 /* ------------------------------------------------------------------ */
 /* Walking and building                                                */
@@ -87,20 +95,19 @@ bool vmm_map(phys_addr pml4, virt_addr va, phys_addr pa, u64 size, u64 flags)
     u64 *pml4v = table_at(pml4);
     u64 done = 0;
 
+    u64 lock_flags = spin_lock_irq(&vmm_lock);
     while (done < size) {
         u64 left = size - done;
         bool huge = ((va + done) % SIZE_2M) == 0 &&
                     ((pa + done) % SIZE_2M) == 0 &&
                     left >= SIZE_2M;
 
-        if (huge) {
-            if (!map_2m(pml4v, va + done, pa + done, flags)) return false;
-            done += SIZE_2M;
-        } else {
-            if (!map_4k(pml4v, va + done, pa + done, flags)) return false;
-            done += PAGE_SIZE;
-        }
+        bool ok = huge ? map_2m(pml4v, va + done, pa + done, flags)
+                       : map_4k(pml4v, va + done, pa + done, flags);
+        if (!ok) { spin_unlock_irq(&vmm_lock, lock_flags); return false; }
+        done += huge ? SIZE_2M : PAGE_SIZE;
     }
+    spin_unlock_irq(&vmm_lock, lock_flags);
     return true;
 }
 
@@ -111,31 +118,38 @@ bool vmm_unmap_page(phys_addr pml4, virt_addr va, phys_addr *out_frame)
      * be freed is the caller's knowledge -- a stack page is owned, a
      * shared code page emphatically is not -- and the table pages
      * themselves stay for whoever tears down the whole space. */
+    u64 lock_flags = spin_lock_irq(&vmm_lock);
     u64 *t = table_at(pml4);
+    bool ok = false;
 
     u64 e = t[(va >> 39) & 0x1FF];
-    if (!(e & PTE_PRESENT)) return false;
-    t = table_at(e);
-
-    e = t[(va >> 30) & 0x1FF];
-    if (!(e & PTE_PRESENT) || (e & PTE_HUGE)) return false;
-    t = table_at(e);
-
-    e = t[(va >> 21) & 0x1FF];
-    if (!(e & PTE_PRESENT) || (e & PTE_HUGE)) return false;
-    t = table_at(e);
-
-    u64 *leaf = &t[(va >> 12) & 0x1FF];
-    if (!(*leaf & PTE_PRESENT)) return false;
-
-    if (out_frame) *out_frame = *leaf & ADDR_MASK;
-    *leaf = 0;
-
-    /* The processor may still hold the old translation. Flushing it
-     * here rather than trusting the next CR3 write means the moment
-     * this returns, the page really is gone. */
-    __asm__ volatile ("invlpg (%0)" :: "r"(va) : "memory");
-    return true;
+    if (e & PTE_PRESENT) {
+        t = table_at(e);
+        e = t[(va >> 30) & 0x1FF];
+        if ((e & PTE_PRESENT) && !(e & PTE_HUGE)) {
+            t = table_at(e);
+            e = t[(va >> 21) & 0x1FF];
+            if ((e & PTE_PRESENT) && !(e & PTE_HUGE)) {
+                t = table_at(e);
+                u64 *leaf = &t[(va >> 12) & 0x1FF];
+                if (*leaf & PTE_PRESENT) {
+                    if (out_frame) *out_frame = *leaf & ADDR_MASK;
+                    *leaf = 0;
+                    /* The processor may still hold the old translation.
+                     * Flushing it here rather than trusting the next CR3
+                     * write means the moment this returns, the page really
+                     * is gone -- on this processor. Other processors that
+                     * hold it are a job for TLB shootdown, a later slice;
+                     * until then the callers arrange that no other core is
+                     * using the address being removed. */
+                    __asm__ volatile ("invlpg (%0)" :: "r"(va) : "memory");
+                    ok = true;
+                }
+            }
+        }
+    }
+    spin_unlock_irq(&vmm_lock, lock_flags);
+    return ok;
 }
 
 bool vmm_resolve(virt_addr va, phys_addr *out_pa, u64 *out_flags)

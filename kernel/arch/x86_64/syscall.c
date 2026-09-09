@@ -11,16 +11,14 @@
 #include <eb/time.h>
 #include <eb/settings.h>
 
-/* Per-processor data. syscall.S reads gs:0 and gs:8 directly, so the
- * layout is not free to change. */
-typedef struct {
-    u64 kernel_rsp;   /* offset 0: where a system call lands */
-    u64 user_rsp;     /* offset 8: where it came from */
-} percpu;
+/* Per-processor blocks. syscall.S reads gs:0 and gs:8 directly, and
+ * this_cpu() reads gs:16, so those offsets are not free to change. */
+#define MAX_CPUS 8
+static percpu cpus[MAX_CPUS];
 
-static percpu cpu0;
-
-_Static_assert(sizeof(percpu) == 16, "syscall.S depends on this layout");
+_Static_assert(__builtin_offsetof(percpu, kernel_rsp) == 0, "syscall.S reads gs:0");
+_Static_assert(__builtin_offsetof(percpu, user_rsp)   == 8, "syscall.S reads gs:8");
+_Static_assert(__builtin_offsetof(percpu, self)       == 16, "this_cpu() reads gs:16");
 
 #define MSR_EFER          0xC0000080u
 #define MSR_STAR          0xC0000081u
@@ -35,20 +33,26 @@ _Static_assert(sizeof(percpu) == 16, "syscall.S depends on this layout");
 
 extern void syscall_entry(void);
 
-void percpu_init(void)
+void percpu_init(u32 index, u32 apic_id)
 {
-    /* While in the kernel GS points at this structure; while in user
-     * mode it points at whatever the program set, and ours is parked in
-     * the shadow register. swapgs exchanges the two, which is how the
-     * entry path finds a trustworthy stack without dereferencing
-     * anything the program controls. */
-    wrmsr(MSR_GS_BASE, (u64)&cpu0);
+    if (index >= MAX_CPUS) return;
+    percpu *pc = &cpus[index];
+    pc->self    = pc;
+    pc->index   = index;
+    pc->apic_id = apic_id;
+
+    /* While in the kernel GS points at this block; while in user mode it
+     * points at whatever the program set, and ours is parked in the
+     * shadow register. swapgs exchanges the two, which is how the entry
+     * path finds a trustworthy stack without dereferencing anything the
+     * program controls. */
+    wrmsr(MSR_GS_BASE, (u64)pc);
     wrmsr(MSR_KERNEL_GS_BASE, 0);
 }
 
 void percpu_set_kernel_stack(u64 stack_top)
 {
-    cpu0.kernel_rsp = stack_top;
+    this_cpu()->kernel_rsp = stack_top;
 }
 
 void syscall_init(void)
