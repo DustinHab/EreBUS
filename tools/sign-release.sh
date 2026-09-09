@@ -2,9 +2,11 @@
 # sign-release.sh -- build the signed update package the self-updater fetches.
 #   build/update.pkg = "EBUPDATE" (8) | signature (64) | version (24, padded) | kernel.elf
 # The signature is ed25519 over the version and kernel together, made with
-# release-key.pem at the repo root (never committed). Publish update.pkg and
-# build/version as release assets ("update.pkg", "version"); the machine
-# reads <base>/version first and fetches <base>/update.pkg only when newer.
+# release-key.pem at the repo root (never committed). Publish update.pkg,
+# build/version and build/SHA256SUMS as release assets ("update.pkg",
+# "version", "SHA256SUMS"); the machine reads <base>/version first and
+# fetches <base>/update.pkg only when newer. SHA256SUMS lets a third party
+# check a published file against a reproducible build of the same tag.
 cd "$(dirname "$0")/.."
 KEY=${RELEASE_KEY:-release-key.pem}
 [ -f "$KEY" ] || { echo "no release key at $KEY"; exit 1; }
@@ -27,4 +29,16 @@ rm -f build/pkg.signed build/pkg.sig
 # The small file the updater reads first: publish it as the asset "version" beside update.pkg.
 printf '%s\n' "$VER" > build/version
 
+# A manifest of the release artifacts. The build is reproducible
+# (tools/reproduce.sh; the loader carries no timestamp), so a third party
+# who builds the same tag gets the same bytes and can confirm against
+# these hashes that a published file came from this source -- determinism
+# turned into provenance. Publish it as the release asset "SHA256SUMS".
+: > build/SHA256SUMS
+for f in kernel.elf BOOTX64.EFI erebus.iso update.pkg; do
+    [ -f "build/$f" ] && ( cd build && sha256sum "$f" ) >> build/SHA256SUMS
+done
+
 echo "built build/update.pkg ($(wc -c < build/update.pkg) bytes) and build/version for version $VER"
+echo "wrote build/SHA256SUMS:"
+cat build/SHA256SUMS

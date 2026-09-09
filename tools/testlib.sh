@@ -29,7 +29,10 @@ else
 fi
 
 # The QEMU options every test shares; the caller adds drives, devices, the serial log.
-QEMU_BASE="-machine q35 -m 512M -cpu max \
+# SMP, when set, gives the guest that many processors, so a test can run
+# the kernel and its user programs across cores (battery.sh sets it for a
+# few lanes); unset, the guest has one, as before.
+QEMU_BASE="-machine q35 -m 512M -cpu max${SMP:+ -smp $SMP} \
   -drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE \
   -vga none -device VGA,edid=on,xres=1280,yres=800 \
   -display none -monitor stdio"

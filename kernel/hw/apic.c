@@ -2,7 +2,7 @@
  * apic.c -- the local interrupt controller: enabled for message-signalled interrupts, legacy lines untouched.
  * - xapic: memory window from IA32_APIC_BASE; x2apic: the same registers as msrs, when the firmware chose that
  * - lint0 kept as the 8259's way in (ExtINT), so the timer and the keyboard keep arriving as before
- * - no timer, no ipi: one processor, and the pit is the clock
+ * - a local apic timer drives preemption on each processor, and inter-processor interrupts are sent between them; the pit still seeds the clock at boot
  */
 #include <eb/apic.h>
 #include <eb/vmm.h>

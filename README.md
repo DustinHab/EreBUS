@@ -63,6 +63,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - Serial as first output; it costs 20 ms per log line at 115200 baud (`make shot SERIAL=null` to compare).
 - No SSE/MMX in the kernel; the vector unit is enabled for user programs only and saved per process.
 - The 8259 pair for the legacy lines, the local APIC for message-signalled interrupts: no ACPI parsing needed for either.
+- Symmetric multiprocessing: the application processors are found in the ACPI MADT and run the same scheduler as the boot processor, kernel threads and ring-3 programs alike; device-touching threads stay on the boot processor by affinity. TLB is flushed on every switch rather than shot down by IPI. Exercised under QEMU `-smp` in the boot smoke and three battery lanes.
 - Interrupt stubs as a 16-byte table; `tools/check-isr.sh` verifies the layout.
 - No task bar, no window frames; every visible control is clickable; keyboard is a shortcut.
 - Names live on the reference, not the object.
@@ -82,6 +83,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Local APIC on; MSI and MSI-X for pci devices (ahci, xhci, e1000e, igb, the I2xx cards), the legacy line through the 8259 where a device has none; the disk, usb and network threads sleep on their interrupts; the processor halts when nothing happens (`load`)
 - [x] Ring-3 processes, own address spaces, 8 system calls, registers zeroed on return to user; `yield` rests a program until the next tick
 - [x] Processes reaped by the next thread through the scheduler
+- [x] SMP: application processors brought up from the ACPI MADT (real-mode trampoline, per-cpu GDT/TSS/syscall/idle/APIC timer); one scheduler across all cores under `spin.h` locks; kernel threads and ring-3 programs roam, device-touching threads pinned to the boot processor; exercised under QEMU `-smp` (boot smoke, three battery lanes)
 - [x] Kernel version from `git describe` (build/version.c), shown in the boot log and the desktop
 
 ### Objects

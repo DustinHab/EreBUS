@@ -169,11 +169,15 @@ KERN_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(KERN_C)) \
             $(patsubst %.S,$(BUILD)/%.o,$(KERN_S)) \
             $(BUILD)/version.o
 
-# What this build calls itself: the nearest tag, how far past it, and
-# the commit -- with "-dirty" when the tree has changes not committed.
+# What this build calls itself: the nearest version tag, how far past it,
+# and the commit -- with "-dirty" when the tree has changes not committed.
 # Every kernel had said "0.1" until now, which made two builds a
 # fortnight apart indistinguishable on a screen.
-VERSION ?= $(shell git -C $(ROOT) describe --tags --always --dirty 2>/dev/null || echo unnumbered)
+# --match '[0-9]*' keeps this to release tags (0.9.6, ...); tags for the
+# separate tools (gate-*) must not stand in as the kernel's version, or a
+# name like "gate-0.2" leads the update comparator, which reads leading
+# digits, to treat any dotted version as newer.
+VERSION ?= $(shell git -C $(ROOT) describe --tags --match '[0-9]*' --always --dirty 2>/dev/null || echo unnumbered)
 
 
 FONT   := kernel/gfx/font8x16.h

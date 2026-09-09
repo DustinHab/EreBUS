@@ -1,11 +1,15 @@
 /*
- * smp.c -- bring up the application processors.
+ * smp.c -- bring up and run the application processors.
  *
- * Slice one: find the processors in the ACPI MADT, start each through
- * the real-mode trampoline (ap_boot.S) into ap_main, where it enables
- * its local apic and parks. The scheduler still runs on the bsp alone;
- * this only proves the cores come up. Locking, a per-cpu scheduler and a
- * per-cpu timer are the next slice.
+ * Find the processors in the ACPI MADT and start each through the
+ * real-mode trampoline (ap_boot.S) into ap_main, where it takes its own
+ * GDT and TSS, enables its local apic, sets up its per-cpu state and
+ * syscall entry, and joins the scheduler as that processor's idle thread
+ * with its local apic timer running. From there the scheduler runs on
+ * every processor -- kernel threads and ring-3 programs alike -- under
+ * the locks in spin.h and the thread affinity in sched/thread.c, which
+ * keeps device-touching threads on the boot processor. smp_selftest runs
+ * workers on the aps and reports how many actually took part.
  */
 #include <eb/smp.h>
 #include <eb/apic.h>

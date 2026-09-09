@@ -8,9 +8,18 @@
 #include <eb/time.h>
 #include <eb/io.h>
 #include <eb/fmt.h>
+#include <eb/spin.h>
 
 #define JOURNAL_BYTES 8192
 #define ATTENTION_BYTES 4096
+
+/* The record is written from every processor -- a program that faults on
+ * an application processor is logged from there while the boot processor
+ * may be logging too. Interrupts-off alone guards only the local core, so
+ * a lock serialises the append across cores. It is a leaf: the append
+ * touches only the text object's bytes and takes no other lock, so it
+ * cannot figure in a lock-order cycle. */
+static spinlock journal_lock;
 
 static object *journal;
 static u64 sequence;
@@ -47,7 +56,7 @@ void journal_adopt(object *o)
     obj_retain(o);
     obj_set_fleeting(o, true);  /* a restored record is a record still */
     journal = o;
-    sequence++;                 /* whoever displays it should look again */
+    __sync_fetch_and_add(&sequence, 1);   /* whoever displays it should look again */
 }
 
 bool attention_create(void)
@@ -109,11 +118,11 @@ static void append_line(object *o, const char *who, const char *what)
     while (at > 0 && line[at - 1] == ' ') at--;
     line[at++] = '\n';
 
-    u64 flags = irq_save();
+    u64 flags = spin_lock_irq(&journal_lock);
 
     u8 *d = (u8 *)obj_data(o);
     u64 size = obj_size(o);
-    if (!d || size < sizeof(line) + 2) { irq_restore(flags); return; }
+    if (!d || size < sizeof(line) + 2) { spin_unlock_irq(&journal_lock, flags); return; }
 
     u64 len = line_len(d, size);
 
@@ -131,14 +140,14 @@ static void append_line(object *o, const char *who, const char *what)
     memcpy(d + len, line, at);
     d[len + at] = 0;
 
-    irq_restore(flags);
+    spin_unlock_irq(&journal_lock, flags);
 }
 
 void journal_says(const char *who, const char *what)
 {
     if (!journal) return;
     append_line(journal, who, what);
-    sequence++;
+    __sync_fetch_and_add(&sequence, 1);
 }
 
 /* A notable event: it goes to the full log like any other line, and also
@@ -148,7 +157,7 @@ void attention_note(const char *who, const char *what)
     journal_says(who, what);
     if (attention) {
         append_line(attention, who, what);
-        attn_unseen++;
+        __sync_fetch_and_add(&attn_unseen, 1);
     }
     kprintf("attention: %s: %s\n", who ? who : "?", what ? what : "");
 }
@@ -157,10 +166,10 @@ bool journal_latest(char *out, u64 max)
 {
     if (!journal || !out || max == 0) return false;
 
-    u64 flags = irq_save();
+    u64 flags = spin_lock_irq(&journal_lock);
     const u8 *d = (const u8 *)obj_data(journal);
     u64 len = d ? line_len(d, obj_size(journal)) : 0;
-    if (len == 0) { irq_restore(flags); return false; }
+    if (len == 0) { spin_unlock_irq(&journal_lock, flags); return false; }
 
     u64 end = len;
     while (end > 0 && d[end - 1] == '\n') end--;
@@ -170,6 +179,6 @@ bool journal_latest(char *out, u64 max)
     u64 n = 0;
     while (start + n < end && n < max - 1) { out[n] = (char)d[start + n]; n++; }
     out[n] = 0;
-    irq_restore(flags);
+    spin_unlock_irq(&journal_lock, flags);
     return n > 0;
 }
