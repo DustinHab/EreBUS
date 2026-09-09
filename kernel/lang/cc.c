@@ -564,6 +564,22 @@ static u32 read_line(char *buf, u32 max)
             if (n && buf[n - 1] == '\\') { n--; getc_(); if (n < max - 1) buf[n++] = ' '; continue; }
             break;
         }
+        /* Comments are stripped here too, not only in the token lexer, so
+         * a directive carrying one behaves. A line comment ends the
+         * directive's text; a block comment becomes a single space, even
+         * when it spans lines -- otherwise a trailing block comment split
+         * over two lines leaves its tail as stray tokens on the next. */
+        if (c == '/' && peekc(1) == '/') {
+            while (peekc(0) >= 0 && peekc(0) != '\n') getc_();
+            continue;
+        }
+        if (c == '/' && peekc(1) == '*') {
+            getc_(); getc_();
+            while (peekc(0) >= 0 && !(peekc(0) == '*' && peekc(1) == '/')) getc_();
+            if (peekc(0) >= 0) { getc_(); getc_(); }
+            if (n < max - 1) buf[n++] = ' ';
+            continue;
+        }
         getc_();
         if (n < max - 1) buf[n++] = (char)c;
     }
