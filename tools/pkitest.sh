@@ -86,6 +86,26 @@ mkleaf leafbyfake ec256 fakeca sha256
 mkleaf leafother ec256 other sha256
 cp leafec.der tampered.der
 printf '\377' | dd of=tampered.der bs=1 seek=$(( $(wc -c < leafec.der) - 1 )) conv=notrunc 2>/dev/null
+
+# name-constrained intermediates: one permits example.test, one excludes
+# evil.test. Signing an intermediate needs its own openssl run rather than
+# mkca, because the constraint extension differs per CA.
+mknc() {   # mknc <name> <permitted|excluded> <dns>
+    printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\nnameConstraints=critical,%s;DNS:%s\n' "$2" "$3" > $1.ext
+    openssl ecparam -name prime256v1 -genkey -noout -out $1.key 2>/dev/null
+    openssl req -new -key $1.key -subj "/CN=Test $1" -out $1.csr 2>/dev/null
+    openssl x509 -req -in $1.csr -CA root.pem -CAkey root.key -CAcreateserial -days 1000 -sha256 -extfile $1.ext -out $1.pem 2>/dev/null
+    openssl x509 -in $1.pem -outform DER -out $1.der 2>/dev/null
+}
+mknc ncperm permitted example.test
+mknc ncexcl excluded evil.test
+# leaves with a single SAN, so only the tested name is in play
+printf 'subjectAltName=DNS:example.test\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature\nextendedKeyUsage=serverAuth\n' > ncin.ext
+printf 'subjectAltName=DNS:evil.test\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature\nextendedKeyUsage=serverAuth\n' > ncbad.ext
+mkleaf leafncin  ec256 ncperm sha256 ncin.ext
+mkleaf leafncout ec256 ncperm sha256 ncbad.ext
+mkleaf leafncx   ec256 ncexcl sha256 ncbad.ext
+
 NOW=$(date +%s)
 cd $ROOT
 
@@ -114,6 +134,9 @@ expect "not yet valid"  "not yet valid"                         example.test $((
 expect "not marked as an authority" "signed by a leaf"          example.test $NOW -a $W/root.der $W/leafbyfake.der $W/fakeca.der $W/iec.der
 expect "did not verify" "tampered signature"                    example.test $NOW -a $W/root.der $W/tampered.der $W/iec.der
 expect "could not be read" "not a certificate"                  example.test $NOW -a $W/root.der $W/leaf.ext
+expect verified "leaf within a permitted dNSName constraint"    example.test $NOW -a $W/root.der $W/leafncin.der $W/ncperm.der
+expect "outside an authority's name constraints" "leaf outside a permitted dNSName constraint" evil.test $NOW -a $W/root.der $W/leafncout.der $W/ncperm.der
+expect "outside an authority's name constraints" "leaf inside an excluded dNSName constraint"  evil.test $NOW -a $W/root.der $W/leafncx.der $W/ncexcl.der
 
 # --- the live chains against the built-in authorities, at the dates they were taken ---
 F=tools/pki/fixtures
