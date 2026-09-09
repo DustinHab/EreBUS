@@ -245,7 +245,7 @@ Measured on 32 cores under KVM, six at a time: about 10 minutes for all 37 tests
 - The ssh door serves up to four visitors at once (a fifth displaces the longest-idle); it honours a client-driven rekey but does not force one.
 - RTL8168/8169 driver written from documentation, untested on silicon.
 - Two HID inputs on one device: implemented, not tested on a real device.
-- No 128-bit integer type in the compiler.
+- No 128-bit integer type in the compiler. This is the last thing that keeps the machine's own compiler from rebuilding the whole kernel: it now handles the comments, the segment-relative and basic inline assembly, the SMP atomic builtins and `rdseed` that the self-hosting build once tripped over, and stops only at `bn.c`, whose big-number arithmetic uses `unsigned __int128`. Implementing that (a two-register value model) is the open piece for a full self-build; `build/kvm-battery.sh` runs the self-build and reports how far it gets.
 
 ## Releases
 
