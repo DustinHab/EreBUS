@@ -748,8 +748,12 @@ static int iabs(int v) { return v < 0 ? -v : v; }
 
 /* ---- the inverse transforms ---- */
 
-#define AC3_MUL1(a) ((((a) * 20091) >> 16) + (a))
-#define AC3_MUL2(a) (((a) * 35468) >> 16)
+/* The multiply is done in 64 bits: a malformed stream can drive the
+ * second-pass operands past what a 32-bit product holds (signed overflow
+ * is undefined), while a valid stream stays well inside 32 bits, so the
+ * result is unchanged for real images and merely well-defined for junk. */
+#define AC3_MUL1(a) ((int)((((i64)(a) * 20091) >> 16) + (a)))
+#define AC3_MUL2(a) ((int)(((i64)(a) * 35468) >> 16))
 
 static void tr_one(const i16 *in, u8 *dst)
 {
