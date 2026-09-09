@@ -75,6 +75,8 @@ void aes128_setkey(aes_key *k, const u8 key[16]);
 void aes128_block(const aes_key *k, const u8 in[16], u8 out[16]);
 /* True when the computed S-box matches the reference for all 256 inputs. */
 bool aes_sbox_ct_ok(void);
+/* The inverse S-box, computed in constant time (for the RFC 3394 unwrap). */
+u8 aes_sbox_inv(u8 x);
 
 /* SHA-1, and the constructions on it that wireless security still
  * leans on: the keyed hash, the slow key derivation from a passphrase

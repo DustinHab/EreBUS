@@ -79,12 +79,28 @@ static u8 sbox_ct(u8 x)
     return (u8)(v ^ rotl8(v, 1) ^ rotl8(v, 2) ^ rotl8(v, 3) ^ rotl8(v, 4) ^ 0x63);
 }
 
-/* Checked at boot: the computed S-box equals the reference for every
- * input. TLS stays down if it does not. */
+/* The inverse S-box, computed: the inverse affine map first
+ * (s = rotl(x,1) ^ rotl(x,3) ^ rotl(x,6) ^ 0x05), then inversion in
+ * GF(2^8). Used by the RFC 3394 key unwrap, the one place AES runs
+ * backwards. Constant time, no table. */
+static u8 sbox_inv_ct(u8 x)
+{
+    u8 v = (u8)(rotl8(x, 1) ^ rotl8(x, 3) ^ rotl8(x, 6) ^ 0x05);
+    return gf_inv8(v);
+}
+u8 aes_sbox_inv(u8 x) { return sbox_inv_ct(x); }
+
+/* Checked at boot: the computed forward S-box equals the reference for
+ * every input, and the computed inverse undoes it for every input --
+ * which, given the forward is correct, is the whole inverse table proved
+ * without carrying one. TLS stays down if either fails. */
 bool aes_sbox_ct_ok(void)
 {
-    for (u32 i = 0; i < 256; i++)
-        if (sbox_ct((u8)i) != sbox[i]) return false;
+    for (u32 i = 0; i < 256; i++) {
+        u8 s = sbox_ct((u8)i);
+        if (s != sbox[i]) return false;
+        if (sbox_inv_ct(s) != (u8)i) return false;
+    }
     return true;
 }
 
