@@ -54,3 +54,40 @@ jobs:
             build/BOOTX64.EFI
             build/smoke-serial.log
           if-no-files-found: ignore
+
+  # Build every parser fuzzer and run each briefly under ASan and UBSan.
+  # This does not need KVM. Its first job is to keep the harnesses from
+  # rotting (a fuzzer that stops linking catches no bugs); its second is a
+  # short regression run against the seed corpus. A UBSan runtime error
+  # does not abort the process and run.sh returns zero regardless, so the
+  # output is scanned for any sanitizer report.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld make python3-pil openssl
+
+      - name: Build and smoke-fuzz the parsers
+        run: |
+          touch kernel/gfx/font8x16.h
+          sh tools/fuzz/run.sh 25 2>&1 | tee fuzz.log
+          if grep -Eq 'runtime error|ERROR: |SUMMARY: |deadly signal|does not build|crash-' fuzz.log; then
+            echo "a fuzzer failed to build or reported a fault"; exit 1
+          fi
+
+      - name: Upload the fuzz log and any crash
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-output
+          path: |
+            fuzz.log
+            build/fuzz/*/crashes
+          if-no-files-found: ignore
