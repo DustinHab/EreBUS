@@ -139,6 +139,7 @@ bool net_udp_send(const u8 dst[4], u16 sport, u16 dport, const u8 *data, u32 len
 { (void)dst; (void)sport; (void)dport; (void)data; if (len > 1500) abort(); sent_count++; return true; }
 bool net_crypto_ok(void) { return true; }
 bool net_own_address(u8 ip[4]) { ip[0] = 10; ip[1] = 0; ip[2] = 2; ip[3] = 15; return true; }
+bool net_on_link(const u8 ip[4]) { return ip[0] == 10; }
 
 /* --- the seal, open for inspection ------------------------------------------- */
 
@@ -174,6 +175,9 @@ void settings_name(char *out, u32 max) { strncpy(out, "fuzzbox", max); out[max -
 bool settings_peer(u8 ip[4], u16 *port) { ip[0] = 10; ip[1] = 0; ip[2] = 2; ip[3] = 16; *port = PIPE_PORT; return true; }
 bool settings_peer_name(char *out, u32 max) { (void)out; (void)max; return false; }
 bool settings_work(void) { return true; }
+/* Open, so a SEEK from any source is answered and the fuzzer reaches
+ * that path; the gate itself is a switch on a setting, not a parser. */
+u32  settings_discovery(void) { return DISCOVERY_OPEN; }
 
 /* --- the run ------------------------------------------------------------------------ */
 
