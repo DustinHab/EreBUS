@@ -12,7 +12,10 @@
 #include <eb/fmt.h>
 #include <eb/io.h>
 
-#define NODES_BYTES 4096
+/* Room for NODES_MAX rows of up to 160 bytes and the header; a table
+ * from an older store came at 4096 and is replaced by one this size
+ * when adopted (nodes_adopt), its rows carried over. */
+#define NODES_BYTES 16384
 
 typedef struct {
     char name[24];
@@ -32,6 +35,7 @@ static u32      count;
 
 object *nodes_object(void) { return nodes; }
 u32     nodes_count(void)  { return count; }
+u64     nodes_room(void)   { return NODES_BYTES; }
 
 static const char header[] =
     "name         | key                                         | address           | version       | may       | via\n";

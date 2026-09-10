@@ -10,10 +10,10 @@
 #include <eb/io.h>
 #include <eb/time.h>
 #include <eb/settings.h>
+#include <eb/smp.h>
 
 /* Per-processor blocks. syscall.S reads gs:0 and gs:8 directly, and
  * this_cpu() reads gs:16, so those offsets are not free to change. */
-#define MAX_CPUS 8
 static percpu cpus[MAX_CPUS];
 
 _Static_assert(__builtin_offsetof(percpu, kernel_rsp) == 0, "syscall.S reads gs:0");
@@ -190,14 +190,14 @@ static u64 do_pass(domain *d, u64 port, u64 tag, u64 cap, u64 mask, u64 w0)
 /* Which processors have run a ring-3 system call. Proof, once the
  * application processors are in the scheduler, that user code runs on
  * them and not only on the boot processor. */
-static volatile u32 syscall_cpus;
-u32 syscall_cpu_mask(void) { return syscall_cpus; }
+static volatile u64 syscall_cpus;
+u64 syscall_cpu_mask(void) { return syscall_cpus; }
 
 u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4);
 
 u64 syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4)
 {
-    __sync_fetch_and_or(&syscall_cpus, 1u << (this_cpu_id() & 31u));
+    __sync_fetch_and_or(&syscall_cpus, 1ULL << (this_cpu_id() & 63u));
 
     /* A condemned thread ends here, at the door, in its own context
      * and on its own kernel stack -- the same exit a voluntary end

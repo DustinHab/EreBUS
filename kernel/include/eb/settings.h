@@ -56,10 +56,29 @@ void settings_name(char *out, u32 max);
  * unless the settings say "work | welcomed". */
 bool settings_work(void);
 
+/* Whom a SEEK on the pipe's port is answered for ("discovery |"):
+ * "local" (the default) answers machines on this machine's own network,
+ * "open" answers anyone, "known" only machines in the nodes table,
+ * "quiet" nobody. Whatever the word, a machine not in the nodes table
+ * is told the name and the work flag only -- version, free memory,
+ * uptime, key and the addresses heard are kept for known nodes. */
+#define DISCOVERY_LOCAL 0
+#define DISCOVERY_OPEN  1
+#define DISCOVERY_KNOWN 2
+#define DISCOVERY_QUIET 3
+u32  settings_discovery(void);
+
 /* Self-update: whether "update | auto" is set, and an optional base url
  * from the same line that overrides the built-in release source. */
 bool settings_update_auto(void);
 bool settings_update_from(char *out, u32 max);
+
+/* The release key a rotation moved this machine to ("release key |"):
+ * from then on the one key an update package must be signed with. False
+ * when none was written, and the keys built into the kernel hold. The
+ * writing is the updater's, when a signed rotation verifies. */
+bool settings_release_key(u8 out[32]);
+bool settings_remember_release_key(const u8 key[32]);
 
 /* Whether the keyboard's keys mean their german letters. */
 bool settings_keys_german(void);

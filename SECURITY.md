@@ -74,8 +74,15 @@ cut down.
   inputs at boot. Constant time in the C source is not a guarantee at the
   machine-code level, but no secret-indexed table remains.
 - Self-update packages are ed25519-signed; the signature, not the
-  transport, is what authorises an update. A lost release private key
-  cannot be recovered and cannot be replaced on already-deployed machines.
+  transport, is what authorises an update. Two release keys are built into
+  the kernel: the one that signs releases, and a second kept apart and
+  unused against the loss of the first -- a release signed with either is
+  accepted. A signed rotation (`tools/sign-rotation.sh`, published as the
+  asset `rotate`) moves deployed machines to one key, written into their
+  settings; from then on that key alone is trusted and a package signed
+  with the previous key is refused (`tools/rotate-test.sh`). A key lost
+  after a rotation to it cannot be replaced on already-deployed machines;
+  a key lost before one is covered by the other built-in key.
 - Certificate chains are walked to a trusted authority with dates and host
   names checked, and a leaf whose names fall outside a signing authority's
   name constraints is refused (RFC 5280 dNSName permitted and excluded

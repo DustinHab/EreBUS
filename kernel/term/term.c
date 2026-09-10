@@ -335,6 +335,33 @@ static bool resolve(term_session *s, const char *what, spot *sp)
     return true;
 }
 
+/* A running program by name. 'run' lays the program under the name of
+ * the image or text it came from, so the two stand side by side under
+ * one name and the first of them is not the one that runs. give and
+ * end want the one that runs: when the first reference by that name is
+ * not a running program, the others are looked through for one. */
+static bool resolve_running(term_session *s, const char *what, spot *sp)
+{
+    if (!resolve(s, what, sp)) return false;
+    if (obj_type(sp->o) == TYPE_PROGRAM && proc_is_running(sp->o)) return true;
+    object *f = focus(s);
+    u64 n = obj_slots(f);
+    for (u64 i = 0; i < n; i++) {
+        object *o = obj_get_slot(f, i);
+        if (!o || obj_type(o) != TYPE_PROGRAM || !proc_is_running(o)) continue;
+        const char *nm = shown_name(f, i);
+        u32 j = 0;
+        while (nm[j] && what[j] && low(nm[j]) == low(what[j])) j++;
+        if (nm[j] || what[j]) continue;
+        sp->o = o;
+        sp->r = focus_rights(s) & obj_slot_rights(f, i);
+        sp->nm = nm;
+        sp->slot = (i64)i;
+        return sp->r != 0;
+    }
+    return true;                 /* the first stands; the caller says what it is */
+}
+
 /* Splits "<name> to <name>" at the last joiner, so names keep their
  * spaces. Answers false when there is no joiner. */
 static bool split_at(const char *rest, const char *joiner,
@@ -1770,7 +1797,7 @@ static void cmd_give(term_session *s, const char *rest)
         return;
     }
     spot thing, prog;
-    if (!resolve(s, a, &thing) || !resolve(s, b, &prog)) return;
+    if (!resolve(s, a, &thing) || !resolve_running(s, b, &prog)) return;
     if (obj_type(prog.o) != TYPE_PROGRAM || !proc_is_running(prog.o)) {
         t_say(s, "only a running program can be given to.");
         return;
@@ -1789,7 +1816,7 @@ static void cmd_end(term_session *s, const char *what)
 {
     if (!what[0]) { t_say(s, "end which program?"); return; }
     spot sp;
-    if (!resolve(s, what, &sp)) return;
+    if (!resolve_running(s, what, &sp)) return;
     if (obj_type(sp.o) != TYPE_PROGRAM) { t_say(s, "only a program can be ended."); return; }
     if (!(sp.r & CAP_GRANT)) { t_say(s, "you may not end that one."); return; }
     if (!proc_end(sp.o)) { t_say(s, "it was not running."); return; }

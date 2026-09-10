@@ -146,6 +146,11 @@ bool net_crypto_ok(void);
 /* Our own address, once the machine has one. */
 bool net_own_address(u8 ip[4]);
 
+/* Whether an address is on this machine's own network (the same /24 as
+ * its address), so it is spoken to directly rather than through the
+ * gateway. False until the machine has an address. */
+bool net_on_link(const u8 ip[4]);
+
 /* TLS 1.3 over that stream: connect to addr:443, run the handshake,
  * send the http request (head and body) sealed, and hand back the
  * decrypted response exactly as the plain exchange would. The channel

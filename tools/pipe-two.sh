@@ -21,12 +21,15 @@ fresh_vars $BUILD/test-vars.fd
 cp $BUILD/esp.img $BUILD/peer-esp.img
 
 # --- machine A: claim 10.9.9.20, then wait for the arrival ------------------
+# Discovery is set to local, in so many words: B is on the same network,
+# so the scan must still find A under the setting that keeps strangers out.
 {
     bootwait $ALOG
     keys tab tab tab t h e m e ret \
          ret a d d r e s s spc shift-backslash spc \
          1 0 dot 9 dot 9 dot 2 0 \
-         ret w o r k spc shift-backslash spc w e l c o m e d
+         ret w o r k spc shift-backslash spc w e l c o m e d \
+         ret d i s c o v e r y spc shift-backslash spc l o c a l
     # The settings text is applied whenever typing pauses, and on a
     # loaded host a pause between keystrokes can apply a half-typed
     # address (10.9.9.2 before the last 1). Wait for the exact address,

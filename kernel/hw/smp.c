@@ -27,7 +27,6 @@
 #include <eb/percpu.h>
 #include <eb/syscall.h>
 
-#define MAX_CPUS 8
 #define TRAMP_PA 0x8000u        /* real-mode start page (below 1 MiB), reserved at boot */
 
 extern u8 ap_tramp_start[], ap_tramp_end[], ap_tramp_params[];
@@ -92,21 +91,46 @@ static const u8 *find_madt(u64 rsdp_phys)
     return 0;
 }
 
-static u32 read_ap_ids(u64 rsdp, u32 bsp, u32 *ids, u32 max)
+/* The processors the MADT lists, by local-apic id, the boot processor
+ * left out. Two entry kinds name them: type 0 (a local apic, an 8-bit
+ * id) and type 9 (a local x2apic, a 32-bit id), and firmware may list a
+ * processor under both, so an id already taken is not taken again. An
+ * id above 255 can only be signalled in x2apic mode; when the boot
+ * processor's controller is not in that mode such a processor is left
+ * parked and named in the log. Entries past MAX_CPUS are counted, not
+ * kept, so the log can say how many the machine has beyond the build. */
+static u32 read_ap_ids(u64 rsdp, u32 bsp, u32 *ids, u32 max, u32 *beyond)
 {
     const u8 *madt = find_madt(rsdp);
+    *beyond = 0;
     if (!madt) return 0;
     u32 len = *(const u32 *)(madt + 4);
     u32 off = 44, n = 0;                  /* header 36 + apic address 4 + flags 4 */
-    while (off + 2 <= len && n < max) {
+    while (off + 2 <= len) {
         u8 type = madt[off], elen = madt[off + 1];
-        if (elen < 2) break;
+        if (elen < 2 || off + elen > len) break;
+        u32 aid = 0, flags = 0;
+        bool listed = false;
         if (type == 0 && elen >= 8) {     /* processor local apic */
-            u8 aid = madt[off + 3];
-            u32 flags = *(const u32 *)(madt + off + 4);
-            if ((flags & 1) && aid != bsp) ids[n++] = aid;
+            aid = madt[off + 3];
+            flags = *(const u32 *)(madt + off + 4);
+            listed = true;
+        } else if (type == 9 && elen >= 16) {   /* processor local x2apic */
+            aid = *(const u32 *)(madt + off + 4);
+            flags = *(const u32 *)(madt + off + 8);
+            listed = true;
         }
         off += elen;
+        if (!listed || !(flags & 1) || aid == bsp) continue;   /* bit 0: enabled */
+        bool seen = false;
+        for (u32 i = 0; i < n; i++) if (ids[i] == aid) seen = true;
+        if (seen) continue;
+        if (aid > 255 && !lapic_x2apic()) {
+            kprintf("smp:  apic id %u needs x2apic mode, which the firmware did not set; left parked\n", aid);
+            continue;
+        }
+        if (n < max) ids[n++] = aid;
+        else (*beyond)++;
     }
     return n;
 }
@@ -134,7 +158,11 @@ u32 smp_start(u64 acpi_rsdp)
     cpus[0].apic_id = bsp; cpus[0].up = 1;
 
     u32 ids[MAX_CPUS];
-    u32 n = read_ap_ids(acpi_rsdp, bsp, ids, MAX_CPUS - 1);
+    u32 beyond = 0;
+    u32 n = read_ap_ids(acpi_rsdp, bsp, ids, MAX_CPUS - 1, &beyond);
+    if (beyond)
+        kprintf("smp:  the machine lists %u processors more than this kernel is built for (%u); they stay parked\n",
+                beyond, (u32)MAX_CPUS);
     if (n == 0) { kprintf("smp:  1 processor (apic id %u)\n", bsp); return 1; }
 
     if (!tramp_reserved) {
@@ -182,7 +210,11 @@ static void ap_main(u32 cpu)
     /* leave the trampoline's tables for the kernel's own */
     __asm__ volatile ("movq %0, %%cr3" :: "r"((u64)vmm_kernel_pml4()) : "memory");
     gdt_load_ap();
-    gdt_setup_ap(cpu);              /* this processor's own task segment */
+    if (!gdt_setup_ap(cpu)) {       /* this processor's own task segment and fault stacks */
+        /* No memory for them: park for good. The boot processor times
+         * out waiting for this one and names it in the log. */
+        for (;;) __asm__ volatile ("cli; hlt");
+    }
     idt_load();
     u32 aid = lapic_enable_ap();
     percpu_init(cpu, aid);          /* this processor's gs base, before it schedules */
@@ -211,7 +243,7 @@ static void ap_main(u32 cpu)
 
 /* --- proving they run in parallel ------------------------------------ */
 
-static volatile u32  smp_seen;    /* one bit per processor that ran a worker */
+static volatile u64  smp_seen;    /* one bit per processor that ran a worker */
 static volatile u64  smp_work;    /* iterations the workers completed */
 static volatile bool smp_stop;
 
@@ -219,7 +251,7 @@ static void smp_worker(void *arg)
 {
     (void)arg;
     while (!smp_stop) {
-        __sync_fetch_and_or(&smp_seen, 1u << (this_cpu_id() & 31u));
+        __sync_fetch_and_or(&smp_seen, 1ULL << (this_cpu_id() & 63u));
         __sync_fetch_and_add(&smp_work, 1u);
         for (volatile u32 i = 0; i < 3000; i++) { }   /* a little work */
         sched_yield();
@@ -257,16 +289,18 @@ bool smp_selftest(void)
 
     irq_restore(flags);
 
-    u32 seen = smp_seen, ran = 0;
-    for (u32 i = 0; i < 32; i++) if (seen & (1u << i)) ran++;
+    u64 seen = smp_seen;
+    u32 ran = 0;
+    for (u32 i = 0; i < 64; i++) if (seen & (1ULL << i)) ran++;
     kprintf("smp:  kernel work ran on %u application processor%s, %llu iterations\n",
             ran, ran == 1 ? "" : "s", smp_work);
 
     /* And the user side: which processors have run a ring-3 system call,
      * from the programs that started while the boot went on. */
-    u32 umask = syscall_cpu_mask(), ucount = 0, uaps = 0;
-    for (u32 i = 0; i < 32; i++)
-        if (umask & (1u << i)) { ucount++; if (i != 0) uaps++; }
+    u64 umask = syscall_cpu_mask();
+    u32 ucount = 0, uaps = 0;
+    for (u32 i = 0; i < 64; i++)
+        if (umask & (1ULL << i)) { ucount++; if (i != 0) uaps++; }
     kprintf("smp:  ring-3 system calls ran on %u processor%s (%u application)\n",
             ucount, ucount == 1 ? "" : "s", uaps);
 

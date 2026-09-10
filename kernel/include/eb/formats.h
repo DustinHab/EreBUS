@@ -37,6 +37,10 @@
 /* A release package: "EBUPDATE", the signature, the version, the kernel. */
 #define FORMAT_PACKAGE_MAGIC   "EBUPDATE"
 
+/* A rotation of the release key: "EBROTATE", the signature, the new
+ * public key and a note; signed by a key the machine trusts at the time. */
+#define FORMAT_ROTATE_MAGIC    "EBROTATE"
+
 /* A bundle (a list as one byte stream): "EBB1". */
 #define FORMAT_BUNDLE_MAGIC    0x31424245u             /* "EBB1", little-endian */
 

@@ -1,0 +1,46 @@
+name: nightly
+
+# The pre-release gate, every night, on a machine that has KVM: the full
+# battery, the compiler's stack-frame guard, the host self-build and its
+# boot, the on-machine self-build through the door, and a hundred power
+# cuts inside a store write (tools/kvm-battery.sh). GitHub's own runners
+# have no KVM, so this needs a self-hosted runner registered with the
+# labels below (MANUAL.md 15 says how); until one is registered the
+# workflow waits and the badge stays grey.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'      # 03:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: [self-hosted, linux, kvm]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: The gate
+        run: |
+          touch kernel/gfx/font8x16.h
+          sh tools/kvm-battery.sh
+
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-logs
+          path: |
+            build/kvm-battery.log
+            build/battery.log
+            build/selfbuild.log
+            build/selfkernel.log
+            build/powerloss.log
+            build/par/*.out
+          if-no-files-found: ignore

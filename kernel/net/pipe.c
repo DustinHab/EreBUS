@@ -338,7 +338,7 @@ static void ledger_append(const char *what)
 /* Machines heard on the wire, by address: name, flags, key claim,
  * version, time of the last datagram. "found" = heard since the last
  * scan began. */
-#define HEARD_MAX 16
+#define HEARD_MAX 64
 
 typedef struct {
     bool used;
@@ -467,7 +467,14 @@ static heardrec *heard_note(const u8 *ip, u16 port, const u8 *name, u32 nmax,
 /* SEEK/HERE: magic, kind, pad, name (24); work flag for the recipient;
  * free memory in MiB; own key (32, unverified claim); version (24);
  * count and up to four (ip, port) pairs heard within QUIET_S, for
- * discovery across routers. Older versions read the first 40 bytes. */
+ * discovery across routers. Older versions read the first 40 bytes.
+ *
+ * A machine not in the nodes table is told the name and the work flag
+ * and no more: the version, free memory, uptime, job count, key and the
+ * addresses heard describe this machine and its network, and are kept
+ * for the nodes it knows. A first meeting does not need them -- the
+ * handshake that makes a node known carries the key itself -- and after
+ * it the next heartbeat says everything. */
 static void say_who(u8 kind, const u8 dst[4], u16 dport)
 {
     u8 pkt[128];
@@ -478,12 +485,12 @@ static void say_who(u8 kind, const u8 dst[4], u16 dport)
     settings_name(nm, sizeof(nm));
     for (u32 i = 0; i < 24; i++) pkt[8 + i] = (u8)nm[i];
 
+    i32 row = nodes_by_address(dst);
     bool works = settings_work();
-    if (!works) {
-        i32 row = nodes_by_address(dst);
-        if (row >= 0 && (nodes_may_at((u32)row) & NODE_MAY_WORK)) works = true;
-    }
+    if (!works && row >= 0 && (nodes_may_at((u32)row) & NODE_MAY_WORK)) works = true;
     pkt[32] = works ? 1 : 0;
+    if (row < 0) { net_udp_send(dst, PIPE_PORT, dport, pkt, 40); return; }
+
     /* uptime in minutes at 34..35; older readers stop at byte 32 */
     u64 upm = time_ns() / (60ULL * SECOND);
     if (upm > 65535) upm = 65535;
@@ -508,6 +515,40 @@ static void say_who(u8 kind, const u8 dst[4], u16 dport)
     }
     pkt[96] = (u8)n;
     net_udp_send(dst, PIPE_PORT, dport, pkt, 97 + 6 * n);
+}
+
+/* Whether a SEEK from this address is answered -- and its gossip
+ * believed -- by the discovery setting: anyone, the machine's own
+ * network and the nodes it knows (the default), the nodes table alone,
+ * or nobody. */
+static bool seek_welcome(const u8 *src)
+{
+    switch (settings_discovery()) {
+    case DISCOVERY_OPEN:  return true;
+    case DISCOVERY_KNOWN: return nodes_by_address(src) >= 0;
+    case DISCOVERY_QUIET: return false;
+    default:              return net_on_link(src) || nodes_by_address(src) >= 0;
+    }
+}
+
+/* A SEEK left unanswered is said on the console once a minute per
+ * address, so a probe is visible without the log filling from it. */
+static struct { u8 ip[4]; u64 ns; } seek_refused[8];
+static u32 seek_refused_at;
+
+static void seek_refused_note(const u8 *src)
+{
+    u64 now = time_ns();
+    for (u32 i = 0; i < 8; i++)
+        if (ip4_same(seek_refused[i].ip, src) && seek_refused[i].ns &&
+            now - seek_refused[i].ns < 60 * SECOND)
+            return;
+    memcpy(seek_refused[seek_refused_at].ip, src, 4);
+    seek_refused[seek_refused_at].ns = now;
+    seek_refused_at = (seek_refused_at + 1) % 8;
+    static const char *const words[] = { "local", "open", "known", "quiet" };
+    kprintf("pipe: a seek from %u.%u.%u.%u was not answered (discovery | %s)\n",
+            src[0], src[1], src[2], src[3], words[settings_discovery() & 3]);
 }
 
 /* An address reported by another machine: one SEEK at most per minute,
@@ -763,30 +804,29 @@ static void knock_send(void)
 }
 
 /* Name, version and key from a signed handshake, written into the
- * heard cache. */
+ * heard cache -- over whatever a SEEK or HERE said before: those are
+ * unsigned, and a machine's name can have changed since its first
+ * announcement (a machine that announced itself before its name was
+ * written stayed 'erebus' in the row its handshake then made). */
 static void knock_claims(const u8 *ip, u16 port, const u8 *p, u32 len)
 {
     if (len < KNOCK_NAMED) return;
     heardrec *h = heard_by_ip(ip);
     if (!h) h = heard_note(ip, port, p + KNOCK_SIGNED, 24, false, 0);
-    else if (!h->name[0]) {
-        u32 n = 0;
-        while (n < 23 && p[KNOCK_SIGNED + n]) {
-            char c = (char)p[KNOCK_SIGNED + n];
-            h->name[n] = (c >= 0x20 && c < 0x7F) ? c : ' ';
-            n++;
-        }
-        h->name[n] = 0;
+    u32 n = 0;
+    while (n < 23 && p[KNOCK_SIGNED + n]) {
+        char c = (char)p[KNOCK_SIGNED + n];
+        h->name[n] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+        n++;
     }
-    if (!h->version[0]) {
-        u32 n = 0;
-        while (n < 23 && p[KNOCK_SIGNED + 24 + n]) {
-            char c = (char)p[KNOCK_SIGNED + 24 + n];
-            h->version[n] = (c >= 0x20 && c < 0x7F) ? c : ' ';
-            n++;
-        }
-        h->version[n] = 0;
+    h->name[n] = 0;
+    n = 0;
+    while (n < 23 && p[KNOCK_SIGNED + 24 + n]) {
+        char c = (char)p[KNOCK_SIGNED + 24 + n];
+        h->version[n] = (c >= 0x20 && c < 0x7F) ? c : ' ';
+        n++;
     }
+    h->version[n] = 0;
     h->has_key = true;
     memcpy(h->key, p + 44, 32);
 }
@@ -2652,7 +2692,12 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
             h->version[n] = 0;
             h->jobs = p[95];
         }
-        if (len >= 97) {
+        /* Gossip -- addresses the sender heard -- is followed only from
+         * a machine the discovery setting would answer; otherwise a
+         * stranger's datagram could have this machine probe addresses
+         * of the stranger's choosing. */
+        bool welcome = seek_welcome(src);
+        if (len >= 97 && welcome) {
             u32 n = p[96];
             if (n > 4) n = 4;
             if (97 + 6 * n <= len)
@@ -2660,7 +2705,10 @@ void pipe_input(const u8 src[4], u16 sport, const u8 *p, u32 len)
                     gossip_consider(p + 97 + i * 6,
                                     (u16)(p[101 + i * 6] | (p[102 + i * 6] << 8)));
         }
-        if (kind == K_SEEK) say_who(K_HERE, src, sport);
+        if (kind == K_SEEK) {
+            if (welcome) say_who(K_HERE, src, sport);
+            else seek_refused_note(src);
+        }
 
         /* A known key claimed in a HERE: from the row's own address the
          * version is updated; from another address a handshake is

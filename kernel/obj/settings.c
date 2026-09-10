@@ -64,13 +64,20 @@ typedef struct {
     u8   authority[4][320];
     u32  authority_len[4];
     u32  authorities;
+    /* Whom a SEEK is answered for: DISCOVERY_LOCAL (own network, the
+     * default), OPEN (anyone), KNOWN (the nodes table), QUIET (nobody). */
+    u8   discovery;
+    /* The release key a rotation moved the machine to, from a "release
+     * key |" line; none written, the built-in keys hold. */
+    u8   release_key[32];
+    bool has_release_key;
 } values;
 
 static values current = { DEFAULT_QUIET_NS, 0, 1, 1, 50, true, false, false,
                           false, { 0, 0, 0, 0 }, 0,
                           false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0,
                           { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0, "", false, "",
-                          false, { { 0 } }, { 0 }, 0 };
+                          false, { { 0 } }, { 0 }, 0, DISCOVERY_LOCAL, { 0 }, false };
 
 object *settings_object(void) { return settings; }
 
@@ -220,6 +227,41 @@ void settings_name(char *out, u32 max)
 
 bool settings_update_auto(void) { return current.update_auto; }
 bool settings_tls_strict(void)  { return current.tls_strict; }
+u32  settings_discovery(void)   { return current.discovery; }
+
+bool settings_release_key(u8 out[32])
+{
+    if (!current.has_release_key) return false;
+    if (out) for (u32 i = 0; i < 32; i++) out[i] = current.release_key[i];
+    return true;
+}
+
+/* Writes a "release key |" line: the key in base64. The last line on the
+ * matter wins, so a later rotation is another line under it, and the
+ * page shows the history. */
+bool settings_remember_release_key(const u8 key[32])
+{
+    if (!settings) return false;
+    u8 *d = (u8 *)obj_data(settings);
+    u64 size = obj_size(settings);
+    u64 len = 0;
+    while (len < size && d[len]) len++;
+
+    char line[96];
+    u32 at = 0;
+    const char *k = "release key | ";
+    while (k[at]) { line[at] = k[at]; at++; }
+    at += base64_encode(key, 32, line + at, true);
+
+    if (len + at + 2 >= size) return false;
+    if (len && d[len - 1] != '\n') d[len++] = '\n';
+    for (u32 i = 0; i < at; i++) d[len++] = (u8)line[i];
+    d[len++] = '\n';
+    d[len] = 0;
+    obj_touch(settings);
+    settings_apply();
+    return current.has_release_key && memcmp(current.release_key, key, 32) == 0;
+}
 
 u32 settings_authority_count(void) { return current.authorities; }
 
@@ -263,7 +305,8 @@ static const char seed[] =
     "peer     | nobody\n"
     "work     | refused\n"
     "keys     | english\n"
-    "tls      | marked\n";
+    "tls      | marked\n"
+    "discovery | local\n";
 
 bool settings_create(void)
 {
@@ -476,6 +519,28 @@ static void read_line(values *v, const char *line, u64 len)
         /* What becomes of a sealed page whose server is not verified:
          * "strict" refuses it; anything else lets it through, marked. */
         v->tls_strict = line_has(val, vlen, "strict");
+    } else if (matter_is(line, a, b, "release key")) {
+        /* The key a rotation moved the machine to, in base64 (32 bytes
+         * of ed25519 public key). A line that does not decode to one is
+         * kept as written and means nothing. */
+        u64 i = 0;
+        while (i < vlen && val[i] == ' ') i++;
+        u64 from = i;
+        while (i < vlen && val[i] != ' ' && val[i] != '\r') i++;
+        u8 k[48];
+        if (base64_decode(val + from, (u32)(i - from), k, sizeof(k)) == 32) {
+            for (u32 j = 0; j < 32; j++) v->release_key[j] = k[j];
+            v->has_release_key = true;
+        }
+    } else if (matter_is(line, a, b, "discovery")) {
+        /* Whom a SEEK on the pipe's port is answered for. "local" -- the
+         * machine's own network and the nodes it knows -- is the default
+         * and what any other word means; "open" answers anyone, "known"
+         * only the nodes table, "quiet" nobody. */
+        if (line_has(val, vlen, "open"))       v->discovery = DISCOVERY_OPEN;
+        else if (line_has(val, vlen, "known")) v->discovery = DISCOVERY_KNOWN;
+        else if (line_has(val, vlen, "quiet")) v->discovery = DISCOVERY_QUIET;
+        else                                   v->discovery = DISCOVERY_LOCAL;
     } else if (matter_is(line, a, b, "authority")) {
         /* A certificate authority of one's own: its public key in
          * base64, as `openssl pkey -pubout -outform DER | base64`
@@ -602,6 +667,12 @@ static void note_changes(const values *was, const values *now)
     if (was->hints != now->hints)
         journal_says("settings", now->hints ? "hints are shown again"
                                             : "hints are hidden now");
+    if (was->discovery != now->discovery)
+        journal_says("settings",
+                     now->discovery == DISCOVERY_OPEN  ? "a seek is answered for anyone now"
+                     : now->discovery == DISCOVERY_KNOWN ? "a seek is answered for known nodes only now"
+                     : now->discovery == DISCOVERY_QUIET ? "a seek is answered for nobody now"
+                     : "a seek is answered for the own network and known nodes now");
     if (was->pointer_num != now->pointer_num ||
         was->pointer_den != now->pointer_den)
         journal_says("settings",
@@ -782,7 +853,7 @@ void settings_apply(void)
                     false, { 0, 0, 0, 0 }, 0,
                     false, { 0, 0, 0, 0 }, "erebus", false, false, { { 0 } }, 0,
                     { { 0 } }, { { 0 } }, 0, { { 0 } }, { { 0 } }, 0, "", false, "",
-                    false, { { 0 } }, { 0 }, 0 };
+                    false, { { 0 } }, { 0 }, 0, DISCOVERY_LOCAL, { 0 }, false };
 
     u64 start = 0;
     for (u64 i = 0; i <= size; i++) {

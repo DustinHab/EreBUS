@@ -125,3 +125,5 @@ grep -aq "EreBUS $SAYS" $BUILD/selfk.log && echo "and booted it: it says it was 
 [ "$outcome2" = built ] && echo "the self-built kernel built a kernel too (second generation)" || { echo "FAILED: the self-built kernel's compiler did not build a kernel ($outcome2)"; ok=0; }
 [ $ok = 1 ] && echo "the machine builds, installs and boots its own kernel through the door" || echo "the self-built kernel FAILED"
 echo DONE
+# The exit code says it too, so a gate need not grep for the sentence.
+[ $ok = 1 ] && exit 0 || exit 1

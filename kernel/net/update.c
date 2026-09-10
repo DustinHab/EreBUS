@@ -20,16 +20,37 @@
 
 extern const char erebus_version[];
 
-/* The release signing key's public half. Its private half signs each
- * release on the build machine and never leaves it. A kernel whose
- * signature does not verify against this key is never installed, so the
- * network only decides WHEN to update, never WHAT to. */
-static const u8 release_pub[32] = {
-    0x37,0x30,0x1e,0x25,0x9f,0xb5,0xdd,0x6a,
-    0x72,0x08,0xf1,0x98,0x1a,0x6a,0xf7,0x5b,
-    0x3d,0x67,0x4a,0x88,0xa0,0x37,0xd0,0x21,
-    0xe1,0xbe,0x14,0xe7,0xd6,0x3f,0x5c,0x98
+/* The release signing keys' public halves. The first signs each release
+ * on the build machine; the second is kept apart, unused, against the
+ * loss of the first -- a release signed with it is accepted all the same.
+ * Neither private half is anywhere near a deployed machine. A kernel
+ * whose signature does not verify against a trusted key is never
+ * installed, so the network only decides WHEN to update, never WHAT to.
+ *
+ * A signed rotation (consider_rotation) moves a machine to one key,
+ * written into its settings; from then on that key alone is trusted,
+ * these two included only if the rotation named one of them. */
+static const u8 release_keys[2][32] = {
+    { 0x37,0x30,0x1e,0x25,0x9f,0xb5,0xdd,0x6a,
+      0x72,0x08,0xf1,0x98,0x1a,0x6a,0xf7,0x5b,
+      0x3d,0x67,0x4a,0x88,0xa0,0x37,0xd0,0x21,
+      0xe1,0xbe,0x14,0xe7,0xd6,0x3f,0x5c,0x98 },
+    { 0x05,0x05,0x58,0x22,0x8d,0xbb,0x14,0x76,
+      0x0e,0xfa,0x90,0x74,0x4c,0x35,0x8a,0x7b,
+      0xc0,0x32,0x96,0x94,0x14,0xc4,0x49,0xc1,
+      0x66,0x34,0xef,0x75,0xf7,0x46,0xbc,0x33 }
 };
+
+/* Whether a signature over msg is one this machine trusts: the rotated
+ * key if a rotation was recorded, else either built-in key. */
+static bool release_verifies(const u8 *msg, u32 len, const u8 *sig)
+{
+    u8 k[32];
+    if (settings_release_key(k)) return ed25519_verify(k, msg, len, sig);
+    for (u32 i = 0; i < 2; i++)
+        if (ed25519_verify(release_keys[i], msg, len, sig)) return true;
+    return false;
+}
 
 #define GH_BASE "https://github.com/DustinHab/EreBUS/releases/latest/download"
 #define KERNEL_MAX (4u * 1024 * 1024)   /* room for the elf, a few times over */
@@ -125,11 +146,56 @@ static u32 join(char *out, u32 max, const char *base, const char *tail)
 #define PKG_KERN_AT 96
 #define PKG_MIN     (PKG_KERN_AT + 4096)
 
+/* A rotation of the release key, published beside the package as the
+ * file "rotate":
+ *   magic "EBROTATE"  (8 bytes)
+ *   signature         (64 bytes, ed25519 over the key and the note)
+ *   new public key    (32 bytes)
+ *   note              (24 bytes, space-padded)
+ * Signed by a key the machine trusts at the time (tools/sign-rotation.sh).
+ * Once it verifies, the key is written into the settings and is the one
+ * key packages must be signed with from then on; a package signed with
+ * the previous key is refused. Read on every check, before the version
+ * is compared, so a key can be retired without a release. A rotation
+ * naming the key already in force is nothing; one that does not verify
+ * is said and ignored; one that could not be written is said and not
+ * applied, so a machine never trusts in memory what its disk does not. */
+#define ROT_MAGIC_N 8
+#define ROT_SIG_AT  8
+#define ROT_SIGNED  72
+#define ROT_KEY_AT  72
+#define ROT_LEN     128
+
+static void consider_rotation(const char *base)
+{
+    static u8 rbuf[4096];
+    char url[256];
+    u32 ul = join(url, sizeof url, base, "/rotate");
+    u32 off = 0, len = 0;
+    if (!net_fetch(url, ul, rbuf, sizeof rbuf, &off, &len, NULL) || len < ROT_LEN) return;
+    const u8 *r = rbuf + off;
+    if (memcmp(r, FORMAT_ROTATE_MAGIC, ROT_MAGIC_N) != 0) return;
+
+    u8 cur[32];
+    if (settings_release_key(cur) && memcmp(cur, r + ROT_KEY_AT, 32) == 0) return;
+    if (!release_verifies(r + ROT_SIGNED, ROT_LEN - ROT_SIGNED, r + ROT_SIG_AT)) {
+        attention_note("update", "a release-key rotation was offered but did not verify; ignored");
+        return;
+    }
+    if (!settings_remember_release_key(r + ROT_KEY_AT)) {
+        attention_note("update", "a release-key rotation verified but could not be written into the settings; not applied");
+        return;
+    }
+    attention_note("update", "the release key was rotated; packages signed with the previous key are refused from now on");
+    kprintf("update: the release key was rotated\n");
+}
+
 static void do_check(bool manual)
 {
     char base[192];
     base_url(base, sizeof base);
     kprintf("update: checking %s\n", base);
+    consider_rotation(base);
 
     /* A small file under the base names the newest version. When it is
      * not newer than the running one, the package is not fetched at all.
@@ -216,8 +282,7 @@ static void do_check(bool manual)
      * exactly. This is the check that makes fetching over an
      * unauthenticated channel safe: the bytes are trusted because of who
      * signed them, not because of where they came from. */
-    if (!ed25519_verify(release_pub, pkg + PKG_SIGNED, len - PKG_SIGNED,
-                        pkg + PKG_SIG_AT)) {
+    if (!release_verifies(pkg + PKG_SIGNED, len - PKG_SIGNED, pkg + PKG_SIG_AT)) {
         attention_note("update", "a downloaded update's signature did not verify; refused");
         if (manual) report("a newer version is offered, but its signature did not verify; refused.");
         obj_release(k);

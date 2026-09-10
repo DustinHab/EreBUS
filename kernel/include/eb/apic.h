@@ -17,6 +17,7 @@ bool lapic_init(void);
 
 bool lapic_present(void);
 u32  lapic_id(void);
+bool lapic_x2apic(void);       /* the controller is in x2apic mode: ids above 255 are reachable */
 void lapic_eoi(void);
 
 /* What a pci device writes to raise vector v here: the address and the

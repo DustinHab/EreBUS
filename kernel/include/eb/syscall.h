@@ -41,7 +41,7 @@
 void syscall_init(void);
 
 /* A bit per processor that has run a ring-3 system call. */
-u32 syscall_cpu_mask(void);
+u64 syscall_cpu_mask(void);
 
 /* percpu_init / percpu_set_kernel_stack live in eb/percpu.h, included above. */
 

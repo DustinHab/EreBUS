@@ -17,6 +17,8 @@
 #    stack, not the host compiler's megabytes -- and that kernel's own
 #    compiler builds a kernel again. The host build cannot show this; it was
 #    the missing test behind an earlier false "self-hosting is whole" claim.
+# 5. The power goes out a hundred times inside a write of the store
+#    (tools/powerloss.sh, RUNS=100); the battery's dozen is the quick check.
 cd "$(dirname "$0")/.."
 rc=0
 
@@ -52,12 +54,19 @@ else
 fi
 
 echo "== on-machine self-build (through the door: build, install, boot, build again)"
-sh tools/kvm.sh tools/selfkernel.sh 2>&1 | tee build/selfkernel.log
-if ! grep -q 'the machine builds, installs and boots its own kernel through the door' build/selfkernel.log; then
+sh tools/kvm.sh tools/selfkernel.sh > build/selfkernel.log 2>&1
+srck=$?
+cat build/selfkernel.log
+if [ $srck -ne 0 ]; then
     echo "on-machine self-build failed:"
     grep -E 'FAILED|exception|double fault|stack overflow' build/selfkernel.log build/selfk.log | head
     rc=1
 fi
+
+echo "== power loss, 100 cuts inside a write (the battery ran a dozen)"
+RUNS=100 sh tools/kvm.sh tools/powerloss.sh > build/powerloss.log 2>&1
+cat build/powerloss.log | tail -6
+if grep -q FAILED build/powerloss.log; then rc=1; fi
 
 [ $rc = 0 ] && echo "== kvm-battery: green (battery, and a self-built kernel that boots on the machine)" \
             || echo "== kvm-battery: FAILED"

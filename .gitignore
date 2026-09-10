@@ -15,3 +15,4 @@ tools/cc/*.c.asm
 # Generated, but worth having in the tree to look things up -- kept on
 # purpose: kernel/gfx/font8x16.h
 release-key.pem
+release-key-2.pem

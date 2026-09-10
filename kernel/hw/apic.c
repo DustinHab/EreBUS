@@ -87,6 +87,7 @@ bool lapic_init(void)
 
 bool lapic_present(void) { return present; }
 u32  lapic_id(void)      { return id; }
+bool lapic_x2apic(void)  { return x2; }
 
 void lapic_eoi(void)
 {

@@ -1,5 +1,8 @@
 # EreBUS
 
+[![ci](https://github.com/DustinHab/EreBUS/actions/workflows/ci.yml/badge.svg)](https://github.com/DustinHab/EreBUS/actions/workflows/ci.yml)
+[![nightly](https://github.com/DustinHab/EreBUS/actions/workflows/nightly.yml/badge.svg)](https://github.com/DustinHab/EreBUS/actions/workflows/nightly.yml)
+
 Object-based, capability-secured operating system for x86_64 UEFI. Own boot loader, own kernel, own tools.
 
 | Unix | EreBUS |
@@ -70,6 +73,29 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - Nothing is saved by hand; the kernel writes a snapshot when changes stop.
 - Everything hardware-dependent self-tests at boot and says so in the log.
 
+## What 1.0 guarantees
+
+The list under Status is a build log: what was done, in the order it was done. This is the other list -- what the system promises, each promise with the test that checks it. A 1.0 is the point where every line here holds on real hardware, for a stranger, with formats and an interface that 1.x does not break; until then it is the measure.
+
+| Promise | Checked by |
+|---|---|
+| The machine boots, self-tests every subsystem, and reaches idle on every start | `tools/bootsmoke.sh` (CI, under TCG with `-smp 4`); every test in the battery boots it |
+| What was in the graph is there after a restart, without anyone saving | `tools/persisttest.sh`; `tools/powerloss.sh` cuts the power inside a write, a dozen times in the battery and a hundred in the release gate, and the store comes back whole every time |
+| A store made by the last release is read by this one, and a node of the last release talks to a node of this one | `tools/oldstore.sh`, `tools/oldpipe.sh` (CI and the battery); the formats and their numbers in `kernel/include/eb/formats.h`, MANUAL 17 |
+| The same source gives the same bytes; a published release can be traced to its tag | `tools/reproduce.sh` (CI); `SHA256SUMS` and `PROVENANCE` on every release, `tools/sign-release.sh` |
+| The machine builds, installs and boots its own kernel with its own compiler, assembler and linker, and that kernel builds it again | `tools/selfkernel.sh` on the machine (release gate), `tools/selfbuild.sh` and a boot of its kernel on the host (CI); `tools/stackframe-check.sh` and `tools/tramp-check.sh` guard what makes that possible |
+| Only a release signed with a trusted key is installed; the key can be rotated, and a lost key before a rotation does not strand a machine | `tools/update-test.sh`, `tools/rotate-test.sh`; two keys built in |
+| A program holds what it was given and nothing else; authority only narrows as it passes | `tools/relaytest.sh`, `tools/agenttest.sh`; the capability self-tests at every boot (`cap: self test passed -- isolation, attenuation, revocation, generations`) |
+| A program written against the written interface (MANUAL 18) runs on the machine | `tools/sdktest.sh` with `sdk/hello.c` |
+| A page over https is verified against the built-in authorities or refused under `tls \| strict`; a certificate outside its authority's name constraints is refused | `tools/tlstest.sh`, `tools/pkitest.sh`, `tools/webtest.sh` |
+| Objects cross between machines sealed; a changed key at a known address is refused; discovery answers the own network and not the world | `tools/pipe-two.sh`, `tools/pipe-identity.sh`, `tools/pipe-local.sh`; the wire dump in pipe-two shows nothing in the clear |
+| Far work runs under a deadline and answers are signed by the node that produced them | `tools/pipe-code.sh`, `tools/pipe-quorum.sh`, `tools/pipe-vouch.sh` |
+| Sixty-four processors and sixty-four nodes are the edge, and the edge holds | `tools/limits.sh` |
+| The parsers on the wire and in the browser survive their fuzzers | `tools/fuzz/run.sh` (CI, ASan and UBSan) |
+| It runs on real hardware | one board so far (ASUS X99, below); more boards, Secure Boot and a nightly on hardware are what 1.0 still needs |
+
+What 1.0 needs beyond this list is named in Known limits: more boards, an outside review with fuzzers run for hours, a build of a tag by a third party with the same hash, and the parsers of foreign input out of ring 0.
+
 ## Status
 
 ### Kernel core
@@ -83,7 +109,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Local APIC on; MSI and MSI-X for pci devices (ahci, xhci, e1000e, igb, the I2xx cards), the legacy line through the 8259 where a device has none; the disk, usb and network threads sleep on their interrupts; the processor halts when nothing happens (`load`)
 - [x] Ring-3 processes, own address spaces, 8 system calls, registers zeroed on return to user; `yield` rests a program until the next tick
 - [x] Processes reaped by the next thread through the scheduler
-- [x] SMP: application processors brought up from the ACPI MADT (real-mode trampoline, per-cpu GDT/TSS/syscall/idle/APIC timer); one scheduler across all cores under `spin.h` locks; kernel threads and ring-3 programs roam, device-touching threads pinned to the boot processor; exercised under QEMU `-smp` (boot smoke, three battery lanes)
+- [x] SMP: application processors brought up from the ACPI MADT, local-apic and x2apic entries alike (real-mode trampoline, per-cpu GDT/TSS/syscall/idle/APIC timer), up to 64; one scheduler across all cores under `spin.h` locks; kernel threads and ring-3 programs roam, device-touching threads pinned to the boot processor; exercised under QEMU `-smp` (boot smoke, three battery lanes, `tools/limits.sh` with 64)
 - [x] Kernel version from `git describe` (build/version.c), shown in the boot log and the desktop
 
 ### Objects
@@ -95,7 +121,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Blob log for objects from 4 KiB up, content-addressed (SHA-256), compaction
 - [x] Formats: every disk and wire format with its number and the oldest still read in `kernel/include/eb/formats.h`; `formats` in the terminal; the store's first sector carries format and identity (MANUAL.md 17)
 - [x] Journal as a read-only text object
-- [x] Settings as a text object, applied as typed (`theme`, `save`, `clock`, `pointer`, `hints`, `slice`, `start`, `name`, `address`, `peer` by address or node name, `work`, `keys`, `door |`, `wlan |`, `update |`)
+- [x] Settings as a text object, applied as typed (`theme`, `save`, `clock`, `pointer`, `hints`, `slice`, `start`, `name`, `address`, `peer` by address or node name, `work`, `keys`, `door |`, `wlan |`, `update |`, `tls |`, `authority |`, `discovery |`)
 - [x] Activity table rewritten once a second
 - [x] Nodes table `nodes` (`name | key | address | version | may`): one row per machine met through the pipe; the kernel writes key, address, version; the person writes name and `may` (`work`, `update`, `vouch`, `all`)
 - [x] `network` page: every node with address, version, last heard, free memory, work flag, seal state; machines heard but not met; desk and transfer state
@@ -154,8 +180,10 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 - [x] Rights per node: `allow <node> work|update|vouch|all|nothing`; far work runs for a node when `work | welcomed` or its row contains `work`; a kernel is installed only from a node whose row contains `update`; a node's signed vouches pin keys only when its row contains `vouch`
 - [x] Transfers read from and write into objects directly, windowed (HAVE/TAKEN), up to 8 MiB; refusals carry a reason code
 - [x] `update <node>`: sends this machine's kernel; the receiver installs it and restarts; `update <node> with <kernel.elf>`; `update all`; the loader falls back to kernel.old after two failed starts
-- [x] Self-update: `update | auto` fetches a signed release package (`update.pkg`), verifies its ed25519 signature against a key built into the kernel, installs and restarts; a one-line `version` asset is read first and the package fetched only when it names something newer; `update check` on demand; the signature (not the transport) is the safeguard, the transport's own verification comes on top
-- [x] Discovery: broadcast scan, heartbeat to every known node every 30 s, HERE carries key, version and up to four other addresses (propagation across routers)
+- [x] Self-update: `update | auto` fetches a signed release package (`update.pkg`), verifies its ed25519 signature against the keys built into the kernel, installs and restarts; a one-line `version` asset is read first and the package fetched only when it names something newer; `update check` on demand; the signature (not the transport) is the safeguard, the transport's own verification comes on top
+- [x] Release keys: two built in (one signs, one is kept apart against the loss of the first); a signed `rotate` asset moves machines to a new key, written into their settings, after which the previous key is refused (`tools/sign-rotation.sh`, `tools/rotate-test.sh`); every release carries `SHA256SUMS` and `PROVENANCE`
+- [x] Program interface written down (MANUAL 18): entry, the eight calls and their registers, the message layout, the tags, the image format; `sdk/erebus.h` and `sdk/hello.c` are a program from outside the tree that runs on the machine (`tools/sdktest.sh`)
+- [x] Discovery: broadcast scan, heartbeat to every known node every 30 s, HERE carries key, version and up to four other addresses (propagation across routers); `discovery | local` (default) answers the own network and known nodes only, `open`, `known` and `quiet` widen or narrow that; a machine not in the nodes table is told the name and the work flag and nothing that describes this machine or its network
 - [x] Far work: `ask <task>`, `ask <task> with <object>` (the input rides to each worker -- a script's third gift, a compiled worker's letter box), `as code`, `across N` and any combination, split tasks summed or concatenated, answers name the machines that produced them (`42 (4 parts by alpha, beta)`), foreman for recurring tasks
 - [x] Vouching: `vouch <node>` sends a signed statement that a key is recognised; a node that `allow`s the voucher `vouch` pins the key before meeting it (identity beyond trust on first use, no rights implied); `unvouch <node>` withdraws it and a row that rested on it is dropped; the nodes table's `via` column says how each key came to be there
 - [x] Split ranges everywhere: `split P from LO to HI` divides a compiled task too (each piece gets its range as a `RANG` message) and combines with `across N` (every piece on N machines, a majority per piece)
@@ -184,7 +212,10 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/sshtest.sh | door: exec, pipe, pty; foreign key refused |
 | tools/sshmulti.sh | three ssh visitors served at once through the one door |
 | tools/sshrekey.sh | the door survives a client-driven mid-session rekey |
-| tools/pipe-two.sh | object pipe: discovered by scan, sealed, crosses; nothing in the clear on the wire |
+| tools/pipe-two.sh | object pipe: discovered by scan under `discovery \| local`, sealed, crosses; nothing in the clear on the wire |
+| tools/pipe-local.sh | discovery answers the own network and not the world: a probe from another network (tools/pipe-probe.py, not EreBUS, raw frames on the wire) gets no HERE and the console says so; one from the own network is answered |
+| tools/limits.sh | the limits at their edge: 64 processors up with kernel work on the others (`-smp 64`); 64 nodes trusted through the door, the 65th refused, the table listing all 64 |
+| tools/powerloss.sh | the power goes out inside a write of the store (QEMU killed outright, writes throttled so the cut lands inside), a dozen times; every boot restores a generation no older than the last seen finished and never the one the cut fell into (`RUNS=100` in the pre-release gate) |
 | tools/pipe-identity.sh | the pipe refuses a changed key at a known address |
 | tools/pipe-rotate.sh | a key trusted before meeting; a renewed key propagated to a peer, signed old and new |
 | tools/pipe-update.sh | a kernel through the pipe: refused without the update right, installed and booted with it |
@@ -193,6 +224,9 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 | tools/pipe-quorum.sh | the same task on two machines; the verified majority makes the result |
 | tools/pipe-vouch.sh | a node vouches for a key; a peer that allows it pins the key before meeting, and ignores a vouch it has not allowed |
 | tools/update-test.sh | self-update from a local release: a forged package is refused, a correctly signed newer one is installed and the machine reboots into it (needs release-key.pem and python3) |
+| tools/rotate-test.sh | a signed rotation moves the machine to a new release key: the package signed with the previous key is refused after it, the one signed with the new key installed; without the rotation the new key is nobody's (needs release-key.pem) |
+| tools/sdktest.sh | a program from outside the tree (`sdk/hello.c` against `sdk/erebus.h`) goes in through the door, is compiled beside its header and run; it says hello, reads the clock, and measures a text it is given |
+| tools/oldstore.sh, oldpipe.sh | the last released kernel (built once from its tag) makes a store that today's kernel restores whole, its nodes table widened; a node of it and a node of today send an object across, sealed |
 | tools/pkitest.sh | the certificate checker on the host, built from the kernel's own files: known answers (RFC 6979, fixed RSA vectors), openssl-made chains good and bad (expired, wrong host, wildcard rules, signed by a non-authority, tampered), the live github.com and release-cdn chains against the built-in authorities, CertificateVerify signatures |
 | tools/tlstest.sh | the tls client against a server of its own: verified under an authority written into the settings (an ecdsa chain, an rsa chain), refused without one when `tls | strict` |
 | tools/pipe-work.sh, pipe-desk.sh, pipe-foreman.sh | far work, split tasks over three machines, standing tasks |
@@ -216,7 +250,7 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 
 Every test is a script under `tools/`: `sh tools/<test>.sh` after `make`, or `BUILD=<dir> sh tools/<test>.sh` to keep its images and logs in a directory of its own, which is how several run side by side (on the Linux file system; disk images on `/mnt/c` stall under parallel writes). All of them source `tools/testlib.sh`: KVM when `/dev/kvm` is writable (`NOKVM=1` for TCG), waits on serial log lines and marker files instead of fixed sleeps. renew, update-test and tlstest run alone (renew rebuilds the kernel twice; the other two run a server on the host).
 
-Measured on 32 cores under KVM, six at a time: about 10 minutes for all 37 tests, of which the parallel part is 5 (before that: 38 minutes sequential under KVM, 22 minutes under TCG). The longest is pipe-code, which twice waits out a compiled task's deadline.
+Measured on 32 cores under KVM, six at a time: about 15 minutes for all 44 tests, of which the parallel part is 6 (before that: 38 minutes sequential under KVM, 22 minutes under TCG). The longest is pipe-code, which twice waits out a compiled task's deadline. renew, update-test, rotate-test, oldstore, oldpipe and tlstest run alone (they rebuild the kernel, build the last released tag, or run a server on the host).
 
 ## Using the ISO
 
@@ -237,7 +271,7 @@ Measured on 32 cores under KVM, six at a time: about 10 minutes for all 37 tests
 - The browser reads no scripts; a page that is nothing without them is nothing here. Of a stylesheet it honours what changes the words (hiding, weight, colour, alignment, size in whole steps, block or inline) and lays out no boxes, so a page that is its layout reads in its order; selectors with pseudo-classes never match, `@import` is not followed, up to eight sheets of 2 MiB together and 10800 rules are read per page. The one font grows only by whole factors, so a size is rounded to the body's, twice it, or three times. Progressive jpeg and interlaced png show as their alternative text (so do svg and webp); a page is 2 MiB at most, a picture 1600 x 1200; pictures and sheets are fetched anew with every page; one connection at a time, so a page with many pictures fills in one by one.
 - No wireless chip driver.
 - TLS: thirty-four roots from the Mozilla bundle and the intermediates of github.com and its release cdn are built in; a host under another root is unverified unless its authority is written into the settings. A leaf whose names fall outside a signing authority's name constraints is refused (RFC 5280 dNSName permitted and excluded subtrees). No revocation checking. The self-update does not depend on any of it (the package is ed25519-signed).
-- Self-update: the release private key, if lost, means deployed machines can no longer be sent a signed update.
+- Self-update: two release keys are built in and a signed rotation moves machines to a new one (`tools/sign-rotation.sh`); a key lost after a rotation to it cannot be replaced on deployed machines.
 - Far-work answers are signed by the node that produced them and checked against its key, but the computation itself is not otherwise verified; running the same task on several nodes and comparing is left for later.
 - Node identity is trust on first use; `trust <name> <key>` pins one beforehand, `forget` re-pins a changed key, `renew key` rotates a key under the old key's signature, `vouch` lets a node you have marked `vouch` pin a key for you and `unvouch` takes that back -- but a vouch is only as good as your trust in the voucher.
 - A quorum takes the answer a verified majority agree on, but does not otherwise check the computation; pieces times machines may not exceed eight.
@@ -263,6 +297,7 @@ Measured on 32 cores under KVM, six at a time: about 10 minutes for all 37 tests
 - EreBUS 0.8.5: self-update fixes so it works against a real release host -- the fetch carries the long signed redirect URLs a CDN returns (the request and Location buffers were too small and truncated the token), and no further check runs once an install is pending, so a machine updates and restarts exactly once. Verified end to end against the GitHub release.
 - EreBUS 0.8.6: `update check` answers in the terminal. The check runs in the background (the download can take a while), so its outcome -- already current, a newer version installing, or the source unreachable -- is now printed back into the terminal where it was typed, not only into the log.
 - EreBUS 0.8.9: the web verified -- thirty-four roots from the Mozilla bundle join the built-in authorities, with P-384 and RSA-4096 under SHA-256/384/512, so Wikipedia, Google, Amazon, Microsoft, heise and GitHub verify from the machine; `split` works for compiled tasks and under a quorum; `unvouch` withdraws a vouch and the nodes table says how each key came to be there; the self-update reads a one-line `version` file first; usb disks are driven, and a stick made with `tools/mkusb.sh` carries the store.
+- EreBUS 0.9.7: the road to 1.0, first stretch -- self-hosting whole on the machine (the compiler's build thread on 128 KiB of stack, small code-walk frames, the on-machine build back in the release gate with two guards); two release keys built in and a signed rotation between them; `SHA256SUMS` and `PROVENANCE` on every release; the program interface written down (MANUAL 18) with `sdk/` and a program from outside the tree run on the machine; discovery answering the own network by default and telling strangers nothing that describes the machine; the first reply to a new neighbour no longer lost to a garbled address; 64 processors (x2apic MADT entries read), 64 nodes; the power cut inside a store write survived a hundred times; the last release's store and pipe held to; a nightly gate, `-Werror`, and a list of what 1.0 guarantees with the test behind each line.
 - EreBUS 0.9.5: distributed task packages. A task text may begin with a `key | value` manifest -- kind (code or recipe), split, pieces, across (a quorum), combine, budget, input -- that carries the whole policy, so a distributed task is one artifact rather than loose steps at the shell. `submit <task>` hands it to the desk and the willing machines distribute the pieces; the pieces of a split fold by sum, concat, min, max, count or first. A package feeds into a node over ssh -- `erebus-task prog.c --split 1 1000000 --ssh | ssh node` -- and the nodes deal the work out themselves. `erebus-task`, a host tool (Windows or Linux) built from the machine's own compiler, packages a program and, for C, checks it builds for the node first. The payload rides one datagram (1 KiB) and no foreign binaries run -- a larger program, arbitrary-size results and other languages are the next milestone (a task VM).
 - EreBUS 0.9.4: the browser reads webp pictures and keeps a connection open. Lossless (VP8L) and lossy (VP8) still frames decode beside png and jpeg, exact against the reference on the test set; the wire from one fetch is held for the next fetch to the same host, and over https the tls session is held alongside, so a page and its pictures no longer each pay for a handshake (a stale reuse falls back to a fresh connection; a connection is kept only when the answer had a length and the server agreed to keep-alive). A table's cells line up in columns, `<pre>` and inline `<code>` sit on a faint ground, and a `<blockquote>` carries a left accent bar. The picture fuzzer now feeds webp.
 - EreBUS 0.9.3: the browser reads a page's structure. `font-size` grows the one bitmap font by whole steps, so a heading or anything a page sets large stands at twice or three times the body's height (a heading with no size of its own is set so by its level); the text is held to a readable column down the middle instead of running the whole screen; a link takes its colour, not an underline, so a page that is nothing but links is not a wall of lines. Media queries see the true window width, so a page lays itself out for a desktop rather than for the column.

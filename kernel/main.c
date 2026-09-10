@@ -1024,6 +1024,9 @@ static void persist_thread(void *arg)
                    time_ns() - quiet_since > settings_save_quiet_ns()) {
             object *roots[2] = { persistent_root, shell_session() };
             nothing_kept_yet = false;
+            /* Said before the write, so a log cut short by the power
+             * going out shows a write was in flight (tools/powerloss.sh). */
+            kprintf("snap: writing generation %llu\n", snap_generation() + 1);
             if (snap_save(roots, roots[1] ? 2 : 1)) {
                 written = seen;
                 kprintf("snap: generation %llu written, %u objects, %llu bytes\n",
@@ -2075,7 +2078,31 @@ void kmain(eb_boot_info *bi)
          * the may column is edited by the person (read and write).
          * "network": rewritten by the kernel every 2 s, read-only. */
         {
-            object *nd = find_petnamed(root, "nodes", TYPE_TEXT, NULL, NULL);
+            object *nd_place = NULL;
+            u64     nd_slot  = 0;
+            object *nd = find_petnamed(root, "nodes", TYPE_TEXT, &nd_place, &nd_slot);
+            /* A table from an older store was made smaller than today's
+             * holds rows for; a wider text takes its place in the graph,
+             * carrying the rows over. */
+            if (nd && nd_place && obj_size(nd) < nodes_room()) {
+                object *wider = obj_create(TYPE_TEXT, nodes_room(), 0);
+                if (wider) {
+                    obj_set_name(wider, "nodes");
+                    u8 *w = (u8 *)obj_data(wider);
+                    const u8 *old = (const u8 *)obj_data(nd);
+                    u64 keep = obj_size(nd);
+                    if (w && old) {
+                        for (u64 i = 0; i < keep; i++) w[i] = old[i];
+                        for (u64 i = keep; i < obj_size(wider); i++) w[i] = 0;
+                    }
+                    obj_set_slot(nd_place, nd_slot, wider, obj_slot_rights(nd_place, nd_slot));
+                    obj_set_slot_name(nd_place, nd_slot, "nodes");
+                    obj_release(wider);
+                    nd = wider;
+                    journal_says("system", "the nodes table was widened to today's size");
+                    kprintf("snap: the nodes table was widened to today's size\n");
+                }
+            }
             if (nd) nodes_adopt(nd);
             if (!nodes_object() && nodes_create())
                 list_append(sys_shelf ? sys_shelf : root, nodes_object(),

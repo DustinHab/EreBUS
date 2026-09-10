@@ -12,7 +12,7 @@
  * - may is the person's column: "work" (may ask work of this machine), "update" (may install a kernel on it), "all"
  * - a row removed is a node forgotten; a row added by hand is a node trusted before it is met */
 
-#define NODES_MAX 16
+#define NODES_MAX 64
 #define NODE_MAY_WORK   1u
 #define NODE_MAY_UPDATE 2u
 #define NODE_MAY_VOUCH  4u   /* this node's signed vouches are honoured: a
@@ -21,6 +21,10 @@
 bool    nodes_create(void);
 void    nodes_adopt(object *o);
 object *nodes_object(void);
+
+/* The size the table's text is made at. A text adopted from an older
+ * store may be smaller; the start-up replaces it with one this size. */
+u64     nodes_room(void);
 
 /* Reads the text. Cheap; called whenever it may have changed. */
 void nodes_apply(void);

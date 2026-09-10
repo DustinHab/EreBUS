@@ -37,7 +37,8 @@ jobs:
       - name: Build
         run: |
           touch kernel/gfx/font8x16.h   # use the committed font, do not regenerate
-          make
+          # -Werror: a warning is a fault here; the tree builds without one.
+          make EXTRA=-Werror
           ls -l build/kernel.elf build/BOOTX64.EFI
           sha256sum build/kernel.elf build/BOOTX64.EFI
 
@@ -73,6 +74,19 @@ jobs:
           ESP=build/self/esp.img NOMAKE=1 LOG=build/self-smoke.log \
             LIMIT=600 SMP=4 sh tools/bootsmoke.sh
 
+      # The promise to the last release (MANUAL 17): its store is read by
+      # today's kernel, and a node of it talks to a node of today. The tag
+      # is built once from a worktree. Under TCG; no KVM needed.
+      - name: The last release's store and pipe
+        run: |
+          NOKVM=1 sh tools/oldstore.sh
+          NOKVM=1 sh tools/oldpipe.sh
+
+      # A program from outside the tree, against the written interface
+      # (MANUAL 18), compiled and run on the machine through the door.
+      - name: The program interface
+        run: NOKVM=1 sh tools/sdktest.sh
+
       - name: Upload the kernel and the serial log
         if: always()
         uses: actions/upload-artifact@v4
@@ -83,6 +97,9 @@ jobs:
             build/BOOTX64.EFI
             build/smoke-serial.log
             build/self-smoke.log
+            build/oldstore-*.log
+            build/peer-serial.log
+            build/serial.log
           if-no-files-found: ignore
 
   # Build every parser fuzzer and run each briefly under ASan and UBSan.

@@ -101,6 +101,8 @@ static bool on_link(const u8 *dst)
            dst[2] == ip_ours[2];
 }
 
+bool net_on_link(const u8 ip[4]) { return configured && on_link(ip); }
+
 static u8 frame_out[1600];
 static u8 frame_in[1600];
 
@@ -488,9 +490,20 @@ static bool mac_for(const u8 *dst, u8 out_mac[6])
 }
 
 /* Builds and sends one ip packet to `dst`, by its own door when it is
- * on our street and through the gateway when it is not. */
-static bool ip_send(u8 proto, const u8 *dst, const u8 *payload, u32 len)
+ * on our street and through the gateway when it is not.
+ *
+ * dst is copied first: it may point into frame_in -- the address a
+ * datagram came from, answered from inside its own handling -- and
+ * mac_for pumps the wire while it waits for a neighbour's answer, which
+ * lands in frame_in and would turn the address under the pointer into
+ * bytes of the answer. The first reply to any new neighbour went to a
+ * garbled address that way, and only the cache filled on the failed try
+ * let the second one through. */
+static bool ip_send(u8 proto, const u8 *dst_in, const u8 *payload, u32 len)
 {
+    u8 dst[4];
+    for (u32 i = 0; i < 4; i++) dst[i] = dst_in[i];
+
     u8 door[6];
     if (!mac_for(dst, door)) return false;
 

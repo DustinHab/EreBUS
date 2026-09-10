@@ -3,6 +3,12 @@
 
 #include <eb/types.h>
 
+/* How many processors the kernel is built for: the per-processor tables
+ * (gdt.c, syscall.c) and the start-up list (smp.c) are sized by this, in
+ * one place. A machine with more is run on this many; the rest are left
+ * parked and the boot log says so. */
+#define MAX_CPUS 64
+
 /* Starts the application processors listed in the ACPI tables. Each one
  * comes up through a real-mode trampoline into long mode, enables its
  * local apic, and parks (idle) -- the scheduler still runs on the boot

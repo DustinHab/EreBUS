@@ -35,8 +35,10 @@ void gdt_load_ap(void);
  * descriptor for this processor in the shared table and loads the task
  * register with it. Each processor needs its own, because the task
  * segment holds the ring-0 stack a ring-3 interrupt lands on, and two
- * processors sharing one would land on the same stack at once. */
-void gdt_setup_ap(u32 cpu);
+ * processors sharing one would land on the same stack at once. Its
+ * three fault stacks come from the frame allocator here; false when
+ * there was no memory for them, and the processor must not join. */
+bool gdt_setup_ap(u32 cpu);
 
 /* Stack the hardware switches to when entering ring 0 from ring 3, for
  * the processor this runs on. Only relevant once there are processes. */
