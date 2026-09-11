@@ -95,6 +95,24 @@ shared state:
 - `release-key.pem` is never committed; it is in `.gitignore`.
 - Tags are the bare version number, without a leading letter.
 
+## Releases
+
+- The system's releases are tagged `X.Y.Z` and carry `erebus.iso`,
+  `update.pkg`, `version`, `SHA256SUMS`, `PROVENANCE`, `kernel.elf` and
+  `BOOTX64.EFI` (`tools/mkiso.sh`, `tools/sign-release.sh`).
+- A deployed machine with `update | auto` reads
+  `releases/latest/download/version` first, so **exactly the newest
+  system release may carry GitHub's "Latest" marker**. The companion
+  tools are tagged apart (`gate-X.Y`) and must be published with
+  `gh release create gate-X.Y ... --latest=false`; without that flag
+  GitHub hands the marker to whatever was published last, the `version`
+  file stops resolving, and every machine's update check fails until it
+  is put back (`gh release edit <version> --latest`).
+- After publishing anything, fetch
+  `releases/latest/download/version` once and confirm it answers with
+  the newest system version. The answer can be cached for a few minutes,
+  so a query string (`?x=1`) tells a stale 404 from a real one.
+
 ## Reporting security issues
 
 Do not open a public issue for a security flaw. See `SECURITY.md`.
