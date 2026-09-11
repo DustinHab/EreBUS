@@ -40,3 +40,10 @@ echo "--- the controller and its devices ---"
 grep -a 'usb:\|ps2:' $LOG | cut -c1-110
 echo "--- what the script said, typed by usb ---"
 grep -a 'user: hello' $LOG | grep -v 'ring 3'
+# The test must be able to fail (0.9.9): both devices found on the
+# controller, no ps/2 to fall back on, and the words arrived.
+ok=1
+grep -aq 'ps2:  no controller answers' $LOG && echo "no ps/2 controller, as arranged" || { echo "FAILED: a ps/2 controller answered"; ok=0; }
+grep -aq 'usb:  1 keyboard and 1 mouse' $LOG && echo "the keyboard and the mouse were found on xhci" || { echo "FAILED: the usb devices were not found"; ok=0; }
+grep -a 'user: hello' $LOG | grep -v 'ring 3' | grep -q . && echo "and the keys typed over usb ran the script" || { echo "FAILED: the script's hello never came"; ok=0; }
+[ $ok = 1 ] && echo "usb input works with the i8042 off" || echo "usb input FAILED"

@@ -17,7 +17,7 @@ SECS=${1:-60}
 shift 2>/dev/null
 TOOLS=${*:-"lang pki html css net pipe tls img"}
 CC="clang -O1 -g -std=c11 -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
-    -Wno-unused-function -Wno-incompatible-library-redeclaration -I. -Ikernel/include"
+    -Wno-unused-function -Wno-incompatible-library-redeclaration -I. -Ikernel/include -Iprograms/renderer"
 
 build() {   # build <tool> <sources...>
     t=$1; shift
@@ -205,8 +205,8 @@ for t in $TOOLS; do
     case $t in
         lang) build lang kernel/lang/cc.c kernel/lang/asm.c kernel/lang/ld.c kernel/lang/gnu.c && seed_lang && run lang 65536 ;;
         pki)  build pki kernel/net/asn1.c kernel/net/bn.c kernel/net/ec.c kernel/net/rsa.c kernel/net/x509.c kernel/net/sha256.c kernel/net/sha512.c && seed_pki && run pki 8192 ;;
-        html) build html kernel/gfx/html.c kernel/gfx/css.c && seed_html && run html 32768 ;;
-        css)  build css kernel/gfx/css.c && seed_css && run css 16384 ;;
+        html) build html programs/renderer/html.c programs/renderer/css.c kernel/gfx/render_check.c && seed_html && run html 32768 ;;
+        css)  build css programs/renderer/css.c && seed_css && run css 16384 ;;
         net)  build net kernel/net/net.c kernel/net/ssh.c kernel/net/wifi.c kernel/net/nodes.c kernel/net/sha256.c kernel/net/x25519.c kernel/lib/base64.c && seed_net && run net 65536 ;;
         pipe) build pipe kernel/net/pipe.c kernel/net/nodes.c kernel/net/sha256.c kernel/lib/base64.c && seed_pipe && run pipe 65536 ;;
         tls)  build tls kernel/net/tls.c kernel/net/asn1.c kernel/net/bn.c kernel/net/ec.c kernel/net/rsa.c kernel/net/x509.c kernel/net/pki_selftest.c kernel/net/sha512.c kernel/net/x25519.c && seed_tls && run tls 65536 ;;

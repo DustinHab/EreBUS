@@ -16,9 +16,9 @@ rm -f $BUILD/selfk-store.img $BUILD/selfk.log $BUILD/selfk-up.txt $BUILD/selfk-j
 dd if=/dev/zero of=$BUILD/selfk-store.img bs=1M count=64 status=none
 cp $BUILD/esp.img $BUILD/selfk-esp.img
 cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/selfk-vars.fd
-# The picture decoder's image, fresh, built by the machine's own compiler
-# on the host: it goes in as a text with the sources (tools/mkupload.sh).
-sh tools/selfdecoder.sh >/dev/null || { echo "FAILED: the decoder does not build with the machine's compiler"; exit 1; }
+# The programs' images, fresh, built by the machine's own compiler on
+# the host: they go in as texts with the sources (tools/mkupload.sh).
+sh tools/selfprograms.sh >/dev/null || { echo "FAILED: the programs do not build with the machine's compiler"; exit 1; }
 sh tools/mkupload.sh kernel "$SAYS" > $BUILD/selfk.stream
 
 key_name() {

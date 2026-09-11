@@ -4247,9 +4247,20 @@ static void gen_expr(u32 i)
         else o("    mov rdi, rax\n    pop rax\n");
     }
     if (n->kind == ND_EQ || n->kind == ND_NE || n->kind == ND_LT || n->kind == ND_LE) {
+        /* Compared in the common type, the way c converts both sides
+         * first: two 32-bit operands meet as 32 bits (an unsigned int
+         * against an int makes both unsigned: x == -1 with x unsigned
+         * asks whether x is 0xFFFFFFFF), and the sign of the comparison
+         * is the common type's, not either side's alone (an unsigned
+         * int against a long is a signed comparison of longs). */
         type *rt = N(n->rhs)->ty;
-        emit_binop(n->kind, flt ? C.t_double
-                            : (lt->uns || rt->uns || is_ptr(lt) || is_ptr(rt)) ? C.t_ulong : C.t_long);
+        type *ct;
+        if (flt) ct = C.t_double;
+        else if (is_ptr(lt) || is_ptr(rt)) ct = C.t_ulong;
+        else ct = common_type(lt, rt);
+        if (!flt && ct->kind == T_INT)
+            o(ct->uns ? "    mov eax, eax\n    mov edi, edi\n" : "    movsxd rax, eax\n    movsxd rdi, edi\n");
+        emit_binop(n->kind, flt ? C.t_double : ct->uns ? C.t_ulong : C.t_long);
     } else {
         emit_binop(n->kind, n->ty);
         narrow(n->ty);

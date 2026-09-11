@@ -1,9 +1,9 @@
-#ifndef EB_HTML_H
-#define EB_HTML_H
+#ifndef RENDERER_HTML_H
+#define RENDERER_HTML_H
 
 #include <eb/types.h>
-#include <eb/fb.h>
-#include <eb/css.h>
+#include <eb/render.h>
+#include "css.h"
 
 /* Reading a page the way it was meant, more or less.
  *
@@ -22,51 +22,23 @@
  * headers, footers and asides fold to a line each, opened on request.
  * No scripting: the page decides what it says, not what runs.
  *
- * The renderer draws nothing outside [scroll, scroll+rows) and returns
- * how tall the whole flow was. The sink, if given, collects the links
- * and form fields it found and the rectangles where they landed.
- */
+ * The renderer runs in ring 3 (programs/renderer) and draws nothing
+ * itself: it lays the rectangles, glyph runs, pictures and fields of
+ * the whole flow into a display list (eb/render.h) in the flow's own
+ * coordinates, which the kernel paints at any scroll. It returns how
+ * tall the whole flow was. The sink collects the links, fields and
+ * folds it found and the rectangles where they landed. */
 
-#define HTML_URL_MAX    400
-#define HTML_NAME_MAX   64
-#define HTML_VALUE_MAX  128
-#define HTML_LINKS_MAX  64
-#define HTML_SPOTS_MAX  128
-#define HTML_FORMS_MAX  12
-#define HTML_FIELDS_MAX 32
-#define HTML_IMAGES_MAX 24
-#define HTML_TITLE_MAX  96
+/* The font's cell, as the kernel draws it. */
+#define GLYPH_W 8
+#define GLYPH_H 16
 
-/* A decoded picture, as the browser lends it to the renderer. */
+typedef u32 color;
+
+/* A decoded picture's size, as the browser lends it to the renderer. */
 typedef struct {
-    const u32 *px;                  /* 0x00RRGGBB, w * h of them */
     u32 w, h;
 } html_image;
-
-/* What a form field is for. */
-#define FIELD_TEXT   0
-#define FIELD_PASS   1
-#define FIELD_HIDDEN 2
-#define FIELD_SUBMIT 3
-
-#define METHOD_GET  0
-#define METHOD_POST 1
-
-typedef struct {
-    i32 x, y, w, h;
-    u32 ref;                        /* link: url index. field: field index. fold: its number. */
-} html_spot;
-
-typedef struct {
-    char name[HTML_NAME_MAX];
-    u32  form;                      /* which form it belongs to */
-    u8   kind;
-} html_field;
-
-typedef struct {
-    char action[HTML_URL_MAX];
-    u8   method;
-} html_form;
 
 typedef struct {
     color text;                     /* headings, strong words */
@@ -84,12 +56,22 @@ typedef struct {
     html_colors col;
 } html_view;
 
-/* Where the renderer's findings go. Any pointer may be NULL. The
- * field values come in (what to draw in each box) and the initial
- * values go out (what the markup asked for), which is how a form
- * keeps what a person typed across redraws while still starting from
- * its own defaults. */
+/* Where the drawing goes: words of display list, up to cap. A list
+ * that ran out of room is marked full and the rest of the page draws
+ * nothing, so a page too large to hold is cut rather than wrong. */
 typedef struct {
+    u32 *ops;
+    u32  cap, len;
+    bool full;
+} html_out;
+
+/* Where the renderer's findings go. Any pointer may be NULL. The
+ * initial values of the fields go out (what the markup asked for);
+ * what a person typed is the kernel's, drawn by it into the field
+ * boxes the list names. */
+typedef struct {
+    html_out   *out;
+
     char      (*urls)[HTML_URL_MAX];
     u32        *url_count;
     html_spot  *link_spots;
@@ -101,13 +83,11 @@ typedef struct {
     u32        *field_count;
     html_spot  *field_spots;
     u32        *field_spot_count;
-
-    const char (*field_values)[HTML_VALUE_MAX];   /* in: draw these */
     char       (*field_init)[HTML_VALUE_MAX];     /* out: the defaults */
 
     /* Pictures: the urls the page names go out; for each the renderer
-     * asks the lender for the decoded picture and draws it in place,
-     * or a frame with the alternative text while there is none. */
+     * asks the lender for the decoded picture's size and lays it in
+     * place, or a frame with the alternative text while there is none. */
     char      (*images)[HTML_URL_MAX];
     u32        *image_count;
     const html_image *(*image)(void *ctx, const char *url);
@@ -151,4 +131,4 @@ u32 html_render(const html_view *v, html_sink *sink);
  * the rule table, in the page's order; returns how many rules. */
 u32 html_styles(const html_view *v, html_sink *sink, css_sheet *sheet);
 
-#endif /* EB_HTML_H */
+#endif /* RENDERER_HTML_H */

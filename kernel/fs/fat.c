@@ -79,6 +79,10 @@ static bool vol_open(fat_vol *v, u64 base)
                 ((u32)sec[38] << 16) | ((u32)sec[39] << 24);
     u32 total = (u32)sec[32] | ((u32)sec[33] << 8) |
                 ((u32)sec[34] << 16) | ((u32)sec[35] << 24);
+    /* A small volume may carry its sector count in the 16-bit field
+     * alone: mkfs.fat writes a 16 MiB fat32 volume so, and this refused
+     * every such disk as "no fat32 volume" (0.9.9). */
+    if (!total) total = (u32)sec[19] | ((u32)sec[20] << 8);
 
     /* The numbers are the disk's word. A volume whose tables lie past
      * its own end, or with no data area, is not mounted: the cluster

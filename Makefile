@@ -29,10 +29,11 @@ OVMF_VARS := /usr/share/OVMF/OVMF_VARS_4M.fd
 XRES := 1280
 YRES := 800
 
-# Extra flags for the kernel, used by the "fault" target; and for the
-# decoder program alone (tools/decoder-fault.sh).
+# Extra flags for the kernel, used by the "fault" target; and for one
+# program alone (tools/decoder-fault.sh, tools/renderer-fault.sh).
 EXTRA ?=
 DECODER_EXTRA ?=
+RENDERER_EXTRA ?=
 
 # Where the serial port goes during "make shot". Override with
 # SERIAL=null to time the framebuffer console on its own -- the serial
@@ -81,9 +82,9 @@ KERN_C   := kernel/main.c \
             kernel/hw/time.c \
             kernel/gfx/fb.c \
             kernel/gfx/shell.c \
-            kernel/gfx/html.c \
-            kernel/gfx/css.c \
             kernel/gfx/picture.c \
+            kernel/gfx/render.c \
+            kernel/gfx/render_check.c \
             kernel/lib/inflate.c \
             kernel/net/web.c \
             kernel/hw/ps2.c \
@@ -165,33 +166,43 @@ KERN_S   := kernel/arch/x86_64/start.S \
             kernel/user/wipe.S \
             kernel/user/fetch.S
 
-# The picture decoder: a program of its own, not a part of the kernel.
-# Its sources are compiled a second way -- no kernel code model, its own
-# mem* and stack guard (programs/decoder/lib.c) -- linked alone at the
-# addresses the loader uses (programs/decoder/program.ld), turned into
-# the image the machine's own linker makes (tools/mkimage.py, MANUAL
-# 18.4), and carried by the kernel as an array of bytes. The kernel
-# starts it in ring 3 for every picture the browser fetches; nothing of
-# it runs in ring 0. tools/selfbuild.sh builds the same program with
-# the machine's own compiler.
+# The programs the kernel carries but does not contain: the picture
+# decoder and the page renderer, each a program of its own in ring 3.
+# Their sources are compiled a second way -- no kernel code model, their
+# own mem* and stack guard (programs/lib/lib.c) -- linked alone at the
+# addresses the loader uses (programs/lib/program.ld), turned into the
+# image the machine's own linker makes (tools/mkimage.py, MANUAL 18.4),
+# and carried by the kernel as an array of bytes. The kernel starts them
+# in ring 3 for every picture and every page the browser shows; nothing
+# of them runs in ring 0. tools/selfprograms.sh builds the same programs
+# with the machine's own compiler.
 PROG_FLAGS := -target x86_64-unknown-none-elf $(COMMON_FLAGS) \
-              -fstack-protector-strong \
-              -I$(ROOT)/programs/decoder -I$(ROOT)/sdk $(EXTRA) $(DECODER_EXTRA)
+              -fstack-protector-strong -I$(ROOT)/sdk $(EXTRA)
+PROG_LIB_C := programs/lib/lib.c
+PROG_LIB_S := programs/lib/start.S
+
 DECODER_C := programs/decoder/decoder.c \
              programs/decoder/png.c \
              programs/decoder/jpeg.c \
              programs/decoder/webp.c \
-             programs/decoder/lib.c \
-             kernel/lib/inflate.c
-DECODER_S := programs/decoder/start.S
+             kernel/lib/inflate.c \
+             $(PROG_LIB_C)
 DECODER_OBJ := $(patsubst %.c,$(BUILD)/decoder/%.o,$(DECODER_C)) \
-               $(patsubst %.S,$(BUILD)/decoder/%.o,$(DECODER_S))
+               $(patsubst %.S,$(BUILD)/decoder/%.o,$(PROG_LIB_S))
 DECODER := $(BUILD)/decoder/decoder_image.o
+
+RENDERER_C := programs/renderer/renderer.c \
+              programs/renderer/html.c \
+              programs/renderer/css.c \
+              $(PROG_LIB_C)
+RENDERER_OBJ := $(patsubst %.c,$(BUILD)/renderer/%.o,$(RENDERER_C)) \
+                $(patsubst %.S,$(BUILD)/renderer/%.o,$(PROG_LIB_S))
+RENDERER := $(BUILD)/renderer/renderer_image.o
 
 KERN_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(KERN_C)) \
             $(patsubst %.S,$(BUILD)/%.o,$(KERN_S)) \
             $(BUILD)/version.o \
-            $(DECODER)
+            $(DECODER) $(RENDERER)
 
 # What this build calls itself: the nearest version tag, how far past it,
 # and the commit -- with "-dirty" when the tree has changes not committed.
@@ -288,28 +299,52 @@ $(BUILD)/kernel/user/pulse.o: kernel/user/pulse.c $(FONT)
 	@$(CC) $(KERN_FLAGS) -fno-stack-protector -fno-jump-tables \
 	       -c kernel/user/pulse.c -o $@
 
-# --- the picture decoder ----------------------------------------------
+# --- the programs: the picture decoder and the page renderer ------------
+# DECODER_EXTRA and RENDERER_EXTRA reach one program alone: the fault
+# tests (tools/decoder-fault.sh, tools/renderer-fault.sh) rebuild it
+# with its deliberate faults and leave the kernel as it is.
 $(BUILD)/decoder/%.o: %.c
 	@mkdir -p $(dir $@)
 	@echo "  CC      $< (ring 3, decoder)"
-	@$(CC) $(PROG_FLAGS) -c $< -o $@
+	@$(CC) $(PROG_FLAGS) -I$(ROOT)/programs/decoder $(DECODER_EXTRA) -c $< -o $@
 
 $(BUILD)/decoder/%.o: %.S
 	@mkdir -p $(dir $@)
 	@echo "  AS      $< (ring 3, decoder)"
 	@$(CC) $(PROG_FLAGS) -c $< -o $@
 
-$(BUILD)/decoder/decoder.elf: $(DECODER_OBJ) programs/decoder/program.ld
+$(BUILD)/renderer/%.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "  CC      $< (ring 3, renderer)"
+	@$(CC) $(PROG_FLAGS) -I$(ROOT)/programs/renderer $(RENDERER_EXTRA) -c $< -o $@
+
+$(BUILD)/renderer/%.o: %.S
+	@mkdir -p $(dir $@)
+	@echo "  AS      $< (ring 3, renderer)"
+	@$(CC) $(PROG_FLAGS) -c $< -o $@
+
+$(BUILD)/decoder/decoder.elf: $(DECODER_OBJ) programs/lib/program.ld
 	@echo "  LINK    $@"
-	@$(LD) -T programs/decoder/program.ld -nostdlib -z noexecstack \
-	       -o $@ $(DECODER_OBJ)
+	@$(LD) -T programs/lib/program.ld -nostdlib -z noexecstack -o $@ $(DECODER_OBJ)
+
+$(BUILD)/renderer/renderer.elf: $(RENDERER_OBJ) programs/lib/program.ld
+	@echo "  LINK    $@"
+	@$(LD) -T programs/lib/program.ld -nostdlib -z noexecstack -o $@ $(RENDERER_OBJ)
 
 $(BUILD)/decoder/decoder_image.c: $(BUILD)/decoder/decoder.elf tools/mkimage.py
 	@echo "  IMAGE   $(BUILD)/decoder/decoder.img"
 	@$(PY) tools/mkimage.py $< $(BUILD)/decoder/decoder.img $@ decoder_image
 
+$(BUILD)/renderer/renderer_image.c: $(BUILD)/renderer/renderer.elf tools/mkimage.py
+	@echo "  IMAGE   $(BUILD)/renderer/renderer.img"
+	@$(PY) tools/mkimage.py $< $(BUILD)/renderer/renderer.img $@ renderer_image
+
 $(DECODER): $(BUILD)/decoder/decoder_image.c
 	@echo "  CC      decoder image"
+	@$(CC) $(KERN_FLAGS) -c $< -o $@
+
+$(RENDERER): $(BUILD)/renderer/renderer_image.c
+	@echo "  CC      renderer image"
 	@$(CC) $(KERN_FLAGS) -c $< -o $@
 
 # Linked twice: once with an empty name table, to learn where the code
@@ -562,5 +597,5 @@ clean:
 # It goes last on purpose. An included file full of rules that arrives
 # before the first real target makes one of those rules the default
 # goal, and then "make" builds a single object file and reports success.
-DEPS := $(KERN_OBJ:.o=.d) $(DECODER_OBJ:.o=.d) $(BUILD)/boot.d
+DEPS := $(KERN_OBJ:.o=.d) $(DECODER_OBJ:.o=.d) $(RENDERER_OBJ:.o=.d) $(BUILD)/boot.d
 -include $(DEPS)

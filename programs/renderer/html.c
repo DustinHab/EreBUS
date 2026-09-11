@@ -9,11 +9,14 @@
  *   outside article, section and main
  * - a line is gathered and painted on the break, so it can be centred or set right
  * - scripts, styles, svg, templates, comments and unknown tags are dropped; noscript is read (there is no script)
- * - no JavaScript; width from the window; a picture is drawn when its lender has it decoded, a frame with the
+ * - no JavaScript; width from the window; a picture is laid in when its lender has it decoded, a frame with the
  *   alternative text until then
+ * - draws nothing itself: rectangles, glyph runs, pictures and fields go into a display list in the flow's own
+ *   coordinates (eb/render.h); the kernel paints it. Runs in ring 3 (programs/renderer) and in the fuzzer.
  * - one page at a time: the state is static, too big for a thread's stack
  */
-#include <eb/html.h>
+#include "html.h"
+#include <eb/string.h>
 
 #define WORD_MAX    96
 #define IND_STEP    2               /* columns per level of indent */
@@ -222,6 +225,69 @@ static void spot_add(html_spot *spots, u32 *count, i32 x, i32 y, i32 w, i32 h, u
     spots[(*count)++] = (html_spot){ x, y, w, h, ref };
 }
 
+/* ------------------------------------------------------------------ */
+/* The display list                                                    */
+/* ------------------------------------------------------------------ */
+
+/* One op into the list: the head word, then n words. A list out of
+ * room takes nothing more and says so. */
+static void emit(flow *f, u32 kind, const u32 *w, u32 n)
+{
+    html_out *o = f->sink ? f->sink->out : NULL;
+    if (!o || !o->ops) return;
+    if (o->len + 1 + n > o->cap) { o->full = true; return; }
+    o->ops[o->len++] = OP_HEAD(kind, n);
+    for (u32 i = 0; i < n; i++) o->ops[o->len++] = w[i];
+}
+
+static void emit_rect(flow *f, i32 x, i32 y, i32 w, i32 h, color c)
+{
+    if (w <= 0 || h <= 0) return;
+    u32 v[5] = { (u32)x, (u32)y, (u32)w, (u32)h, c };
+    emit(f, OP_RECT, v, 5);
+}
+
+/* A run of glyphs, all of one colour and size, GLYPH_W * scale apart. */
+static void emit_text(flow *f, i32 x, i32 y, color c, u32 scale, const u32 *cps, u32 n)
+{
+    static u32 v[3 + OP_TEXT_MAX];
+    while (n) {
+        u32 take = n > OP_TEXT_MAX ? OP_TEXT_MAX : n;
+        v[0] = (u32)x; v[1] = (u32)y; v[2] = (c & 0xFFFFFFu) | (scale << 24);
+        for (u32 i = 0; i < take; i++) v[3 + i] = cps[i];
+        emit(f, OP_TEXT, v, 3 + take);
+        x += (i32)(take * scale * GLYPH_W);
+        cps += take;
+        n -= take;
+    }
+}
+
+/* Plain ascii, one glyph per letter. */
+static void emit_ascii(flow *f, i32 x, i32 y, color c, const char *s, u32 n)
+{
+    static u32 cps[OP_TEXT_MAX];
+    while (n) {
+        u32 take = n > OP_TEXT_MAX ? OP_TEXT_MAX : n;
+        for (u32 i = 0; i < take; i++) cps[i] = (u8)s[i];
+        emit_text(f, x, y, c, 1, cps, take);
+        x += (i32)(take * GLYPH_W);
+        s += take;
+        n -= take;
+    }
+}
+
+static void emit_image(flow *f, i32 x, i32 y, i32 dw, i32 dh, u32 index)
+{
+    u32 v[5] = { (u32)x, (u32)y, (u32)dw, (u32)dh, index };
+    emit(f, OP_IMAGE, v, 5);
+}
+
+static void emit_field(flow *f, i32 x, i32 y, i32 w, i32 h, u32 idx, u32 kind)
+{
+    u32 v[6] = { (u32)x, (u32)y, (u32)w, (u32)h, idx, kind };
+    emit(f, OP_FIELD, v, 6);
+}
+
 /* Paints the gathered line where it falls, shifted for its alignment,
  * scaled to its tallest glyph, and notes the links and fields in it.
  * Leaves the line's height in rows in f->line_rows. */
@@ -248,23 +314,37 @@ static void line_paint(flow *f)
                 if (!(f->line[c].cp && f->line[c].code)) { c++; continue; }
                 i32 start = c;
                 while (c < f->line_end && f->line[c].cp && f->line[c].code) c++;
-                fb_rect(f->v->x + (start + shift) * GLYPH_W - 1, top,
-                        (c - start) * GLYPH_W + 2, (i32)tall * GLYPH_H, f->v->col.faint);
+                emit_rect(f, f->v->x + (start + shift) * GLYPH_W - 1, top,
+                          (c - start) * GLYPH_W + 2, (i32)tall * GLYPH_H, f->v->col.faint);
             }
             /* the left accent bar(s) of a blockquote, one per nesting level */
             for (u32 q = 1; q <= f->quote; q++) {
                 i32 gcol = f->indent - (i32)q * IND_STEP;
                 if (gcol < 0) gcol = 0;
-                fb_rect(f->v->x + gcol * GLYPH_W + 2, top, 2, (i32)tall * GLYPH_H, f->v->col.accent);
+                emit_rect(f, f->v->x + gcol * GLYPH_W + 2, top, 2, (i32)tall * GLYPH_H, f->v->col.accent);
             }
-            for (i32 c = 0; c < f->line_end; c++) {
+            /* the glyphs, as runs of one colour and size; a found word
+             * has the accent behind it */
+            static u32 glyphs[LINE_MAX];
+            for (i32 c = 0; c < f->line_end; ) {
                 cell *k = &f->line[c];
-                if (!k->cp) continue;
-                i32 x = f->v->x + (c + shift) * GLYPH_W;
+                if (!k->cp) { c++; continue; }
                 u32 sc = k->scale ? k->scale : 1;
+                color col = k->color;
+                u8 found = k->found;
+                i32 start = c;
+                u32 n = 0;
+                /* a cell of scale sc holds sc columns; the next glyph is sc cells on */
+                while (c < f->line_end && f->line[c].cp &&
+                       (f->line[c].scale ? f->line[c].scale : 1) == sc &&
+                       f->line[c].color == col && f->line[c].found == found && n < LINE_MAX) {
+                    glyphs[n++] = f->line[c].cp;
+                    c += (i32)sc;
+                }
+                i32 x = f->v->x + (start + shift) * GLYPH_W;
                 i32 y = top + (i32)(tall - sc) * GLYPH_H;   /* sit on the line's floor */
-                if (k->found) fb_rect(x, y, (i32)sc * GLYPH_W, (i32)sc * GLYPH_H, f->v->col.accent);
-                fb_glyph_cp_scaled(x, y, k->cp, k->color, (i32)sc);
+                if (found) emit_rect(f, x, y, (i32)(n * sc) * GLYPH_W, (i32)sc * GLYPH_H, f->v->col.accent);
+                emit_text(f, x, y, col, sc, glyphs, n);
             }
             if (s && s->link_spots && s->link_spot_count) {
                 i32 run = -1, start = 0, end = 0;
@@ -281,30 +361,15 @@ static void line_paint(flow *f)
             }
         }
 
+        /* the fields: the kernel draws the box and what stands in it,
+         * so typing into one needs no new render */
         for (u32 i = 0; i < f->nlf; i++) {
             const lfield *lf = &f->lf[i];
             i32 x = f->v->x + (lf->col + shift) * GLYPH_W;
             i32 w = (i32)lf->w * GLYPH_W;
             i32 y = top + (i32)(tall - 1) * GLYPH_H;
             if (!vis) continue;
-            if (lf->kind == FIELD_SUBMIT) {
-                const char *label = (s && s->field_init) ? s->field_init[lf->idx] : "";
-                fb_rect(x - 2, y - 2, w + 2, GLYPH_H + 4, f->v->col.edge);
-                fb_glyph(x, y, '[', f->v->col.accent, 0, false);
-                u32 ll = 0;
-                for (; label[ll] && ll + 2 < lf->w; ll++)
-                    fb_glyph(x + GLYPH_W + (i32)ll * GLYPH_W, y, (u8)label[ll], f->v->col.accent, 0, false);
-                fb_glyph(x + GLYPH_W + (i32)ll * GLYPH_W, y, ']', f->v->col.accent, 0, false);
-            } else {
-                const char *shown = "";
-                if (s && s->field_values) shown = s->field_values[lf->idx];
-                else if (s && s->field_init) shown = s->field_init[lf->idx];
-                fb_rect(x - 2, y - 2, w + 2, GLYPH_H + 3, f->v->col.edge);
-                fb_rect(x - 1, y - 1, w, GLYPH_H + 1, f->v->col.faint);
-                for (u32 k = 0; shown[k] && k + 1 < lf->w; k++)
-                    fb_glyph(x + (i32)k * GLYPH_W, y, lf->kind == FIELD_PASS ? '*' : (u8)shown[k],
-                             f->v->col.text, 0, false);
-            }
+            emit_field(f, x, y, w, GLYPH_H, lf->idx, lf->kind);
             if (s) spot_add(s->field_spots, s->field_spot_count, x - 2, y - 2, w + 2, GLYPH_H + 4, lf->idx);
         }
     }
@@ -469,8 +534,8 @@ static void rule(flow *f, color c)
     settle_blanks(f);
     if (f->line_dirty) line_break(f);
     if (visible(f, f->row))
-        fb_rect(f->v->x + f->indent * GLYPH_W, pixel_y(f, f->row) + GLYPH_H / 2,
-                (f->cols - f->indent) * GLYPH_W, 1, c);
+        emit_rect(f, f->v->x + f->indent * GLYPH_W, pixel_y(f, f->row) + GLYPH_H / 2,
+                  (f->cols - f->indent) * GLYPH_W, 1, c);
     f->row++;
     f->col = f->indent;
 }
@@ -512,7 +577,7 @@ static void plain_line(flow *f, const char *text, color c, i32 *x, i32 *y, i32 *
     *y = -1;
     if (visible(f, f->row)) {
         *y = pixel_y(f, f->row);
-        for (u32 i = 0; i < n; i++) fb_glyph(*x + (i32)i * GLYPH_W, *y, (u8)text[i], c, 0, false);
+        emit_ascii(f, *x, *y, c, text, n);
     }
     f->row++;
     f->col = f->indent;
@@ -1054,6 +1119,7 @@ static void picture(flow *f, const parsed_tag *t)
     const char *wa = attr(t, "width"), *ha = attr(t, "height");
     html_sink *sk = f->sink;
     const html_image *img = NULL;
+    u32 index = HTML_IMAGES_MAX;    /* the picture's place in the list of urls */
 
     /* a tracking pixel is nothing to look at */
     if ((wa && (wa[0] == '0' || wa[0] == '1') && wa[1] == 0) ||
@@ -1069,8 +1135,12 @@ static void picture(flow *f, const parsed_tag *t)
             sk->images[i][c] = 0;
             (*sk->image_count)++;
         }
-        if (sk->image) img = sk->image(sk->image_ctx, src);
+        if (i < HTML_IMAGES_MAX) {
+            index = i;
+            if (sk->image) img = sk->image(sk->image_ctx, src);
+        }
     }
+    if (img && (!img->w || !img->h || index >= HTML_IMAGES_MAX)) img = NULL;
 
     if (!img && !(alt && alt[0])) {
         if (!src || !sk || !sk->images) return;       /* nothing to say for it */
@@ -1106,16 +1176,16 @@ static void picture(flow *f, const parsed_tag *t)
     i32 y = f->v->y + ((i32)f->row - (i32)f->v->scroll) * GLYPH_H;
     if (y + dh > win_top && y < win_bottom) {
         if (img) {
-            fb_image(x, y, dw, dh, img->px, img->w, img->h, win_top, win_bottom);
+            emit_image(f, x, y, dw, dh, index);
         } else {
             i32 cy = y > win_top ? y : win_top;
             i32 ch = (y + dh < win_bottom ? y + dh : win_bottom) - cy;
-            if (ch > 0) fb_rect(x, cy, dw, ch, f->v->col.faint);
+            if (ch > 0) emit_rect(f, x, cy, dw, ch, f->v->col.faint);
             if (y >= win_top && y + GLYPH_H + 4 <= win_bottom) {
-                i32 tx = x + GLYPH_W;
                 const char *say = (alt && alt[0]) ? alt : "picture";
-                for (u32 i = 0; say[i] && tx + GLYPH_W <= x + dw; i++, tx += GLYPH_W)
-                    fb_glyph(tx, y + 2, (u8)say[i], f->v->col.dim, 0, false);
+                u32 n = 0;
+                while (say[n] && x + GLYPH_W + (i32)(n + 1) * GLYPH_W <= x + dw) n++;
+                emit_ascii(f, x + GLYPH_W, y + 2, f->v->col.dim, say, n);
             }
         }
         if (f->link >= 0 && sk) {

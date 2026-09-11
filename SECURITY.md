@@ -13,21 +13,24 @@ an object one was not given. Authority travels as a reference; holding
 the reference is the permission.
 
 Capability isolation governs what a running program can name and reach.
-It is not, today, a privilege boundary for most of the code. The browser
-and its HTML/CSS renderer, the C compiler, and the shell are compiled
-into the kernel and run in ring 0 (`kernel/gfx/`, `kernel/lang/`); the
-picture decoders (png, jpeg, webp, with inflate for png) run in ring 3
-since 0.9.8, as a program of their own (`programs/decoder`) started on
-each picture's bytes and ended after, so a bug there costs one picture
-(`tools/decoder-fault.sh` shows it). Beyond that only a small set of user
-programs -- about two and a half thousand lines under `kernel/user/` --
-runs in ring 3 behind the system-call ABI, against some fifty thousand
-lines of ring-0 C. So a bug in a parser that reads outside input -- a
-page, a stylesheet, a certificate, a compiled task -- is still a bug in
-ring 0. Moving those parsers into ring 3 to shrink the trusted base is
-the largest open piece of work and is not done; until it is, capability
-isolation is what a correct kernel enforces between programs, not a
-wall that contains a broken parser.
+It is not, today, a privilege boundary for all of the code. The parsers
+of what the browser fetches run in ring 3: the picture decoders (png,
+jpeg, webp, with inflate for png) since 0.9.8 and the html and
+stylesheet readers since 0.9.9, each a program of its own
+(`programs/decoder`, `programs/renderer`) started on the bytes and ended
+after, so a bug there costs one picture or one page (`tools/decoder-
+fault.sh`, `tools/renderer-fault.sh` show it). What the renderer answers
+-- a display list -- is checked by the kernel before a word of it is
+used (`kernel/gfx/render_check.c`, fuzzed with the renderer); a program
+that lies is refused. The C compiler, the shell, the network stack with
+its parsers (tcp, http, tls, ssh, the pipe's datagrams, the certificate
+checker) are compiled into the kernel and run in ring 0 (`kernel/lang/`,
+`kernel/net/`), against some fifty thousand lines of ring-0 C. So a bug
+in a parser of what comes over the wire -- a certificate, a handshake, a
+compiled task -- is still a bug in ring 0. Moving those into ring 3 to
+shrink the trusted base is the largest open piece of work and is not
+done; until it is, capability isolation is what a correct kernel
+enforces between programs, not a wall that contains every broken parser.
 
 The machine speaks outward mostly as a client (http, https, ssh). Two
 services listen:
@@ -45,9 +48,10 @@ services listen:
 - The UEFI loader (`boot/`), written here; no third-party boot code.
 - The kernel (`kernel/`): scheduler, memory, object store, capabilities,
   drivers, the network stack, the cryptographic primitives, and -- until
-  the ring-3 move above -- the browser, the renderer, the compiler and
-  the shell. The picture decoders under `programs/` are not in it: they
-  run in ring 3, and the kernel checks the shape of what they answer.
+  the ring-3 move above -- the browser's fetching side, the compiler and
+  the shell. The programs under `programs/` -- the picture decoder and
+  the page renderer -- are not in it: they run in ring 3, and the kernel
+  checks the shape of what they answer.
 - The built-in trust anchors: the TLS root authorities in
   `kernel/net/authorities.h` and the release-signing public key compiled
   into the kernel.

@@ -6,7 +6,7 @@
  * - rules keyed by the element's own compound (id, else a class, else the tag, else any) into buckets
  * - every read bounded by the length given; the table refuses rules past CSS_RULES_MAX and counts them
  */
-#include <eb/css.h>
+#include "css.h"
 
 #define NONE ((u32)-1)
 

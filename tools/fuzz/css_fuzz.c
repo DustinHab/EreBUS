@@ -9,7 +9,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>
-#include <eb/css.h>
+#include "css.h"
 
 void kprintf(const char *fmt, ...) { (void)fmt; }
 

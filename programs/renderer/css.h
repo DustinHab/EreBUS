@@ -1,5 +1,5 @@
-#ifndef EB_CSS_H
-#define EB_CSS_H
+#ifndef RENDERER_CSS_H
+#define RENDERER_CSS_H
 
 #include <eb/types.h>
 
@@ -25,8 +25,11 @@
 #define CSS_BUCKETS     1024
 #define CSS_ELEM_CLASSES 8          /* classes remembered per element */
 #define CSS_ELEM_ATTRS   8          /* attributes remembered per element */
-#define CSS_SHEETS_MAX   8          /* external sheets fetched for one page */
+#define CSS_SHEETS_MAX   8          /* external sheets fetched for one page (RENDER_SHEETS_MAX) */
 #define CSS_SHEET_PAGES  512        /* 2 MiB for the rule table */
+
+/* This runs in ring 3, in the renderer program (programs/renderer) and
+ * the fuzzers; nothing here is linked into the kernel. */
 
 /* what a declaration block sets */
 #define CSS_SET_DISPLAY    (1u << 0)
@@ -108,4 +111,4 @@ void css_declarations(const u8 *text, u64 len, css_decl *d); /* a style attribut
  * whose ancestors are chain[0 .. depth - 2], the root first. */
 void css_match(const css_sheet *s, const css_elem *chain, u32 depth, css_decl *out);
 
-#endif /* EB_CSS_H */
+#endif /* RENDERER_CSS_H */

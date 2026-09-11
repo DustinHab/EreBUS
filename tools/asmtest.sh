@@ -60,3 +60,8 @@ grep -a 'running an image\|user: hello from' $LOG
 
 echo "--- second boot: came back on its own ---"
 grep -a 'restored\|running an image\|user: hello from' $LOG2
+# The test must be able to fail (0.9.9).
+ok=1
+grep -aq 'running an image' $LOG && grep -aq 'user: hello from the machine' $LOG && echo "the machine page was assembled, run and heard" || { echo "FAILED: the assembled program did not run and speak"; ok=0; }
+grep -aq 'graph restored' $LOG2 && grep -aq 'running an image' $LOG2 && grep -aq 'user: hello from the machine' $LOG2 && echo "and it came back on the second boot, running" || { echo "FAILED: the program did not come back on the second boot"; ok=0; }
+[ $ok = 1 ] && echo "the assembler on the machine holds" || echo "the assembler test FAILED"

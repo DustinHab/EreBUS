@@ -8,15 +8,16 @@ SAYS=${2:-built on the machine itself}
 
 printf 'make list %s\n' "$LIST"
 printf 'go %s\n' "$LIST"
-# The picture decoder is a program of its own, not one of the kernel's
-# sources: it goes in as the text of its image, built by the machine's
-# own compiler on the host (tools/selfdecoder.sh). The machine has no
-# way yet to turn a program it built into such a text itself.
-[ -f build/self/decoder_image.c ] || sh tools/selfdecoder.sh >/dev/null 2>&1 || exit 1
+# The picture decoder and the page renderer are programs of their own,
+# not among the kernel's sources: each goes in as the text of its image,
+# built by the machine's own compiler on the host (tools/selfprograms.sh).
+# The machine has no way yet to turn a program it built into such a text
+# itself.
+[ -f build/self/decoder_image.c ] && [ -f build/self/renderer_image.c ] || sh tools/selfprograms.sh >/dev/null 2>&1 || exit 1
 for f in kernel/*.c kernel/*/*.c kernel/*/*/*.c \
          kernel/arch/x86_64/*.S kernel/user/*.S \
          kernel/include/eb/*.h kernel/net/*.h kernel/gfx/*.h common/*.h \
-         build/self/decoder_image.c; do
+         build/self/decoder_image.c build/self/renderer_image.c; do
     [ -f "$f" ] || continue
     printf 'receive %s bytes as %s\n' "$(wc -c < "$f")" "$(basename "$f")"
     cat "$f"

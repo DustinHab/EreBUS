@@ -101,6 +101,12 @@ jobs:
       - name: A decoder that faults or hangs
         run: NOKVM=1 sh tools/decoder-fault.sh
 
+      # The page renderer runs in ring 3 too: rebuilt to fault on one
+      # page and hang on another, the browser says so and goes on to the
+      # next page, which is laid out without waiting for the limit.
+      - name: A renderer that faults or hangs
+        run: NOKVM=1 sh tools/renderer-fault.sh
+
       - name: Upload the kernel and the serial log
         if: always()
         uses: actions/upload-artifact@v4

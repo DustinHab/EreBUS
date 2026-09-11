@@ -46,3 +46,4 @@ grep -a 'running an image\|user: hello from c\|user: 5050' $LOG
 # compiler cut the line there, "the compiler" would not compile and this
 # line would be missing.
 grep -aq 'user: from // and' $LOG && echo "a comment marker inside a string survived a #define" || echo "FAILED: the // in a #define string did not survive"
+grep -aq 'user: hello from c' $LOG && grep -aq 'user: 5050' $LOG && echo "the compiler page compiled, ran and summed" || echo "FAILED: the compiled page did not say hello and 5050"

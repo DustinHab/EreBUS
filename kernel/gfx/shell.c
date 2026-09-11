@@ -26,7 +26,7 @@
 #include <eb/cc.h>
 #include <eb/ld.h>
 #include <eb/lang.h>
-#include <eb/html.h>
+#include <eb/renderer.h>
 #include <eb/web.h>
 #include <eb/picture.h>
 #include <eb/decoder.h>
@@ -1409,6 +1409,8 @@ static i32         pic_decoding = -1;      /* which picture the decoder holds */
 static web_answer  pic_held;               /* a picture that came, not yet handed over */
 static bool        pic_have_held;
 
+static void web_render_tick(void);
+
 typedef struct {
     char url[HTML_URL_MAX];                 /* as the page named it */
     u32  at, len;                           /* where it lies in the sheet store */
@@ -1417,11 +1419,24 @@ typedef struct {
 
 static struct {
     u8  *buf, *pic_buf;
-    css_sheet *rules;                       /* the page's rule table */
     u8  *sheets;                            /* the stylesheets fetched, end to end */
-    web_sheet sheet[CSS_SHEETS_MAX]; u32 nsheet; u32 sheet_used;
+    web_sheet sheet[RENDER_SHEETS_MAX]; u32 nsheet; u32 sheet_used;
     i32  sheet_loading; u32 sheet_req;
-    bool styled;                            /* the rule table matches the page and the sheets in hand */
+
+    /* The page as the renderer program laid it (eb/renderer.h): the
+     * checked block the frames paint from. A rendering is asked for
+     * whenever what it depends on changes -- the key below -- and the
+     * last good list stays on the screen until the new one is there. */
+    render_out *list;
+    u8   *render_in;                        /* the input block, RENDER_IN_MAX */
+    render_job rj;
+    bool list_ok;                           /* the list stands for the page and the state under list_key */
+    bool list_failed;                       /* the renderer could not lay this page out */
+    u64  list_key, job_key, failed_key;
+    u32  job_nsheet, job_there, job_settled;  /* the sheets as the job under way was given them */
+    u32  page_gen;                          /* counts the pages that came, for the key */
+    u32  geom_w, geom_usew;                 /* the measure the last frame laid the page in */
+    const char *fail_reason;
     bool plain;                             /* styles and folds off, by the person */
     bool style_report;                      /* say what the styles did after the next render */
     u64  unfold;                            /* the folds opened, by number */
@@ -1445,28 +1460,28 @@ static struct {
     i32  spot;                              /* keyboard focus over the spots; -1 none */
     u32  rows, vis;
 } web = { .pic_loading = -1, .sheet_loading = -1, .spot = -1 };
-static char web_images[HTML_IMAGES_MAX][HTML_URL_MAX];
-static u32  web_image_count;
-static char web_sheet_urls[CSS_SHEETS_MAX][HTML_URL_MAX];
-static u32  web_sheet_count;
 static html_spot fold_spots[HTML_SPOTS_MAX];
 static u32  fold_spot_count;
 static u8   web_start[16384];               /* the start page, built from the bookmarks */
+
+#define RENDER_OUT_PAGES (RENDER_OUT_MAX / PAGE_SIZE)
+#define RENDER_IN_PAGES  (RENDER_IN_MAX / PAGE_SIZE)
 
 static bool web_prepare(void)
 {
     if (web.buf) return true;
     phys_addr b = pmm_alloc_contig(WEB_BUF_PAGES);
     phys_addr p = pmm_alloc_contig(WEB_PIC_PAGES);
-    phys_addr r = pmm_alloc_contig(CSS_SHEET_PAGES);
     phys_addr t = pmm_alloc_contig(WEB_SHEET_PAGES);
-    if (b == PMM_NO_FRAME || p == PMM_NO_FRAME ||
-        r == PMM_NO_FRAME || t == PMM_NO_FRAME) return false;
+    phys_addr l = pmm_alloc_contig(RENDER_OUT_PAGES);
+    phys_addr r = pmm_alloc_contig(RENDER_IN_PAGES);
+    if (b == PMM_NO_FRAME || p == PMM_NO_FRAME || t == PMM_NO_FRAME ||
+        l == PMM_NO_FRAME || r == PMM_NO_FRAME) return false;
     web.buf = (u8 *)phys_to_virt(b);
     web.pic_buf = (u8 *)phys_to_virt(p);
-    web.rules = (css_sheet *)phys_to_virt(r);
     web.sheets = (u8 *)phys_to_virt(t);
-    css_reset(web.rules, 0);
+    web.list = (render_out *)phys_to_virt(l);
+    web.render_in = (u8 *)phys_to_virt(r);
     return true;
 }
 
@@ -1477,28 +1492,29 @@ static void web_sheets_drop(void)
     web.nsheet = 0;
     web.sheet_used = 0;
     web.sheet_loading = -1;
-    web.styled = false;
 }
 
-/* What the style reader asks for: the sheet's text, when it is there.
- * The urls it names are noted, so the tick can go and get them. */
-static const u8 *web_sheet_text(void *ctx, const char *url, u32 *len)
+/* What the rendering named: the sheets the page links and the
+ * pictures it holds are noted, so the tick can go and get them. */
+static void web_note_wants(const render_out *o)
 {
-    (void)ctx;
-    for (u32 i = 0; i < web.nsheet; i++) {
-        if (strcmp(web.sheet[i].url, url) != 0) continue;
-        if (web.sheet[i].state != 2) return NULL;
-        *len = web.sheet[i].len;
-        return web.sheets + web.sheet[i].at;
-    }
-    if (web.nsheet < CSS_SHEETS_MAX && !web.loading && !web.has_pending) {
+    if (web.loading || web.has_pending) return;
+    for (u32 k = 0; k < o->nsheets; k++) {
+        u32 i = 0;
+        for (; i < web.nsheet; i++) if (strcmp(web.sheet[i].url, o->sheets[k]) == 0) break;
+        if (i < web.nsheet || web.nsheet >= RENDER_SHEETS_MAX) continue;
         web_sheet *s = &web.sheet[web.nsheet++];
         memset(s, 0, sizeof(*s));
-        u32 n = 0;
-        while (url[n] && n < HTML_URL_MAX - 1) { s->url[n] = url[n]; n++; }
-        s->url[n] = 0;
+        memcpy(s->url, o->sheets[k], HTML_URL_MAX);
     }
-    return NULL;
+    for (u32 k = 0; k < o->nimages; k++) {
+        u32 i = 0;
+        for (; i < web.npic; i++) if (strcmp(web.pic[i].url, o->images[k]) == 0) break;
+        if (i < web.npic || web.npic >= HTML_IMAGES_MAX) continue;
+        web_pic *p = &web.pic[web.npic++];
+        memset(p, 0, sizeof(*p));
+        memcpy(p->url, o->images[k], HTML_URL_MAX);
+    }
 }
 
 static void web_pics_drop(void)
@@ -1696,7 +1712,6 @@ static void web_tick(void)
             memcpy(web.sheets + web.sheet_used, a.data, a.len);
             sh->at = web.sheet_used; sh->len = a.len; sh->state = 2;
             web.sheet_used += a.len;
-            web.styled = false;
         } else {
             sh->state = 3;
             if (a.ok && a.len > room) kprintf("web:  stylesheet %s: no room for %u bytes\n", sh->url, a.len);
@@ -1738,13 +1753,20 @@ static void web_tick(void)
         web.find_from = 0;
         web.spot = -1;
         field_focus = -1;
-        web_image_count = 0;
         web_pics_drop();                 /* the old page's pictures, noted while it was still shown */
-        web_sheet_count = 0;
         web_sheets_drop();
         web.unfold = 0;
+        /* the old page's list is not this page's: nothing to paint
+         * until the renderer has laid the new one out */
+        web.page_gen++;
+        web.list_ok = false;
+        web.list_failed = false;
+        web.style_report = a.ok;
+        link_spot_count = field_spot_count = fold_spot_count = 0;
         nav.redraw = true;
     }
+
+    web_render_tick();
 
     if (web.loading || web.has_pending) return;
     if (web.pic_loading >= 0 || web.sheet_loading >= 0) return;
@@ -1774,26 +1796,151 @@ static void web_tick(void)
     }
 }
 
-/* What the renderer asks for: the picture, when it is there. The
- * urls it names are noted, so the tick can go and get them. */
-static const html_image *web_image_lookup(void *ctx, const char *url)
+/* ------------------------------------------------------------------ */
+/* The page laid out by the renderer program                           */
+/* ------------------------------------------------------------------ */
+
+static u32 web_start_page(void);
+
+static u64 mix(u64 h, u64 v) { return (h ^ v) * 0x100000001B3ULL; }
+static u64 mix_str(u64 h, const char *s) { while (*s) h = mix(h, (u8)*s++); return h; }
+
+/* Everything a rendering depends on, as one number: the page, the
+ * sheets and pictures in hand, the folds, the styles switch, the word
+ * looked for, the measure. A list made under another key is stale. */
+static u64 web_render_key(void)
 {
-    (void)ctx;
-    static html_image img;
-    for (u32 i = 0; i < web.npic; i++) {
-        if (strcmp(web.pic[i].url, url) != 0) continue;
-        if (web.pic[i].state != 2) return NULL;
-        img.px = web.pic[i].px; img.w = web.pic[i].w; img.h = web.pic[i].h;
-        return &img;
+    u64 h = 0xCBF29CE484222325ULL;
+    h = mix(h, web.page_gen);
+    h = mix(h, web.have ? web.len : 0);
+    if (!web.have || !web.url[0]) h = mix(h, nav.changes);      /* the start page follows the bookmarks */
+    for (u32 i = 0; i < web.nsheet; i++) h = mix(h, web.sheet[i].state == 2 ? 2u : 0u);
+    for (u32 i = 0; i < web.npic; i++) h = mix(h, web.pic[i].state == 2 ? (u64)web.pic[i].w << 16 | web.pic[i].h : 0);
+    h = mix(h, web.npic); h = mix(h, web.nsheet);
+    h = mix(h, web.plain); h = mix(h, web.unfold);
+    h = mix_str(h, web.find); h = mix(h, web.find_from);
+    h = mix(h, web.geom_w); h = mix(h, web.geom_usew);
+    return h;
+}
+
+/* The block for the renderer: the page, the sheets fetched, the
+ * pictures decoded (their sizes), the word, the switches. */
+static u32 web_render_block(void)
+{
+    render_input b;
+    u32 col[5] = { C_TEXT, C_DIM, C_FAINT, C_ACCENT, C_EDGE };
+    render_input_begin(&b, web.render_in, RENDER_IN_MAX, web.geom_w, web.geom_usew,
+                       web.plain ? RENDER_PLAIN : 0, web.unfold, col);
+    if (web.have && web.url[0]) render_input_page(&b, web.body, web.len);
+    else { u32 n = web_start_page(); render_input_page(&b, web_start, n); }
+    for (u32 i = 0; i < web.nsheet; i++)
+        render_input_sheet(&b, web.sheet[i].url,
+                           web.sheet[i].state == 2 ? web.sheets + web.sheet[i].at : NULL,
+                           web.sheet[i].state == 2 ? web.sheet[i].len : 0);
+    for (u32 i = 0; i < web.npic; i++)
+        render_input_image(&b, web.pic[i].url,
+                           web.pic[i].state == 2 ? web.pic[i].w : 0,
+                           web.pic[i].state == 2 ? web.pic[i].h : 0);
+    if (web.find_len) {
+        char low[48];
+        for (u32 i = 0; i < web.find_len; i++) low[i] = to_lower(web.find[i]);
+        low[web.find_len] = 0;
+        render_input_find(&b, low, web.find_from);
     }
-    if (web.npic < HTML_IMAGES_MAX && !web.loading && !web.has_pending) {
-        web_pic *p = &web.pic[web.npic++];
-        memset(p, 0, sizeof(*p));
-        u32 n = 0;
-        while (url[n] && n < HTML_URL_MAX - 1) { p->url[n] = url[n]; n++; }
-        p->url[n] = 0;
+    return render_input_end(&b);
+}
+
+/* A rendering came: what the page holds is taken over, and what it
+ * wants is noted for the tick to fetch. */
+static void web_take_list(void)
+{
+    const render_out *o = web.list;
+    memcpy(web.title, o->title, HTML_TITLE_MAX);
+    web.rows = o->rows;
+    web.hidden_n = o->hidden_n; web.fold_n = o->fold_n; web.nrules = o->nrules;
+    web.find_row = o->find_row;
+    link_count = o->nurls;
+    memcpy(link_urls, o->urls, sizeof(link_urls));
+    form_count = o->nforms;
+    memcpy(form_defs, o->forms, sizeof(form_defs));
+    field_count = o->nfields;
+    memcpy(field_defs, o->fields, sizeof(field_defs));
+    memcpy(field_init, o->init, sizeof(field_init));
+    web_note_wants(o);
+
+    /* A page that changed shape is a new page: take its defaults, and
+     * let go of any field the writing was in. */
+    u32 print = fields_print();
+    if (print != field_shape) {
+        field_shape = print;
+        field_focus = -1;
+        for (u32 i = 0; i < field_count; i++) memcpy(field_val[i], field_init[i], HTML_VALUE_MAX);
     }
-    return NULL;
+    /* What the styles did, said once the sheets are settled: fetched or
+     * given up on. Until then each rendering says how far it got. The
+     * counts are the ones the rendering was made with, not today's. */
+    if (web.style_report && !web.plain) {
+        kprintf("web:  styles: %u rules, %u of %u sheets%s, %u parts hidden, %u folds\n",
+                web.nrules, web.job_there, web.job_nsheet, o->dropped ? " (table full)" : "",
+                web.hidden_n, web.fold_n);
+        /* settled, and no sheet named that the rendering did not yet know */
+        if (web.job_settled == web.job_nsheet && web.nsheet == web.job_nsheet) web.style_report = false;
+    }
+}
+
+/* Once a loop: the renderer's answer taken, and a rendering asked for
+ * when the list no longer stands for the page. */
+static void web_render_tick(void)
+{
+    if (!web.list) return;
+    if (render_busy(&web.rj)) {
+        int r = render_poll(&web.rj, web.list, RENDER_OUT_MAX);
+        if (r == RENDER_WAIT) {
+            /* Still wanted, or the page moved on under it: a rendering
+             * nobody will look at is ended, not waited for -- a page
+             * that hangs its renderer must not hold the next page. */
+            if (!web.geom_w || web.job_key == web_render_key()) return;
+            render_end(&web.rj);
+        } else if (web.geom_w && web.job_key != web_render_key()) {
+            /* an answer for a page that moved on meanwhile: dropped,
+             * whatever it was; the next one is asked for below */
+        } else if (r == RENDER_DONE) {
+            web.list_ok = true;
+            web.list_failed = false;
+            web.list_key = web.job_key;
+            web_take_list();
+        } else {
+            web.list_ok = false;
+            web.list_failed = true;
+            web.failed_key = web.job_key;
+            web.fail_reason = r == RENDER_REFUSED ? "the renderer refused the page" :
+                              r == RENDER_LATE    ? "the renderer was ended after the time limit" :
+                                                    "the renderer ended without a page";
+            kprintf("web:  page not laid out: %s\n", web.fail_reason);
+        }
+        if (r != RENDER_WAIT) nav.redraw = true;
+    }
+    if (!web.geom_w) return;                    /* no frame has measured the window yet */
+    u64 key = web_render_key();
+    if ((web.list_ok && web.list_key == key) || (web.list_failed && web.failed_key == key)) return;
+    if (render_busy(&web.rj)) return;           /* the one under way is taken first */
+    u32 total = web_render_block();
+    if (!total || !render_start(&web.rj, nav.dom, web.render_in, total)) {
+        web.list_failed = true;
+        web.list_ok = false;
+        web.failed_key = key;
+        web.fail_reason = total ? "no room for a renderer" : "the page does not fit the renderer's block";
+        kprintf("web:  page not laid out: %s\n", web.fail_reason);
+        nav.redraw = true;
+        return;
+    }
+    web.job_key = key;
+    web.job_nsheet = web.nsheet;
+    web.job_there = web.job_settled = 0;
+    for (u32 i = 0; i < web.nsheet; i++) {
+        if (web.sheet[i].state == 2) web.job_there++;
+        if (web.sheet[i].state >= 2) web.job_settled++;
+    }
 }
 
 /* The start page: the bookmarks as links, out of the bookmarks text
@@ -1967,7 +2114,6 @@ static void web_fold_toggle(u32 spot_index)
 static void web_plain_toggle(void)
 {
     web.plain = !web.plain;
-    web.styled = false;
     kprintf("web:  styles %s\n", web.plain ? "off: the page as it came" : "on");
     if (!web.plain) {
         /* the sheets are asked for again when they were skipped */
@@ -2099,71 +2245,50 @@ static void draw_web_shell(i32 sw, i32 sh, i32 top, i32 bottom)
     i32 bh = bottom - by - 6;
     if (bh < GLYPH_H) return;
 
-    /* The page: the one fetched, or the bookmarks. */
-    const u8 *src; u64 len;
-    if (web.have && web.url[0]) { src = web.body; len = web.len; }
-    else { len = web_start_page(); src = web_start; }
-
-    char find_low[48];
-    for (u32 i = 0; i < web.find_len; i++) find_low[i] = to_lower(web.find[i]);
-    find_low[web.find_len] = 0;
-
-    html_sink sink = {
-        .urls = link_urls, .url_count = &link_count,
-        .link_spots = link_spots, .link_spot_count = &link_spot_count,
-        .forms = form_defs, .form_count = &form_count,
-        .fields = field_defs, .field_count = &field_count,
-        .field_spots = field_spots, .field_spot_count = &field_spot_count,
-        .field_values = field_val, .field_init = field_init,
-        .images = web_images, .image_count = &web_image_count,
-        .image = web_image_lookup, .image_ctx = NULL,
-        .title = web.title, .title_max = sizeof(web.title),
-        .find = web.find_len ? find_low : NULL, .find_from = web.find_from, .find_row = &web.find_row,
-        .sheet = web.plain ? NULL : web.rules, .fold = !web.plain, .unfold = web.unfold,
-        .fold_spots = fold_spots, .fold_spot_count = &fold_spot_count,
-        .hidden_count = &web.hidden_n, .fold_count = &web.fold_n,
-        .sheets = web_sheet_urls, .sheet_count = &web_sheet_count,
-        .sheet_text = web_sheet_text, .sheet_ctx = NULL,
-    };
     /* The flow is held to a readable measure and centred: a line of a
      * hundred-odd glyphs reads far better than one across the whole
      * screen. The media queries still see the true window width, so a
-     * page lays itself out for a desktop, not for the column. */
+     * page lays itself out for a desktop, not for the column. The
+     * renderer program lays the page out for these measures; the tick
+     * asks it when they change. */
     i32 avail = w - 2 * GLYPH_W;
     i32 usew = avail;
     i32 maxw = 112 * GLYPH_W;
     if (usew > maxw) usew = maxw;
     i32 vx = x + (avail - usew) / 2;
-    html_view v = {
-        .src = src, .len = len,
-        .x = vx, .y = by, .w = avail, .h = bh,
-        .scroll = scrolls[SCR_WEB],
-        .col = { C_TEXT, C_DIM, C_FAINT, C_ACCENT, C_EDGE },
-    };
-    /* The rule table is read again when the page or its sheets changed;
-     * html_styles wants the true width for its media queries. */
-    if (!web.styled && !web.plain) {
-        web.nrules = html_styles(&v, &sink, web.rules);
-        web.styled = true;
-        web.style_report = web.have && web.url[0];
-    }
-    v.w = usew;
-    web.rows = html_render(&v, &sink);
+    web.geom_w = (u32)avail;
+    web.geom_usew = (u32)usew;
     web.vis = (u32)(bh / GLYPH_H);
-    if (web.style_report) {
-        u32 there = 0;
-        for (u32 i = 0; i < web.nsheet; i++) if (web.sheet[i].state == 2) there++;
-        kprintf("web:  styles: %u rules, %u of %u sheets%s, %u parts hidden, %u folds\n",
-                web.nrules, there, web.nsheet, web.rules->dropped ? " (table full)" : "",
-                web.hidden_n, web.fold_n);
-        web.style_report = false;
-    }
 
-    u32 print = fields_print();
-    if (print != field_shape) {
-        field_shape = print;
-        field_focus = -1;
-        for (u32 i = 0; i < field_count; i++) memcpy(field_val[i], field_init[i], HTML_VALUE_MAX);
+    if (web.list_ok) {
+        static render_picture pics[HTML_IMAGES_MAX];
+        for (u32 i = 0; i < web.list->nimages; i++) {
+            pics[i].px = NULL; pics[i].w = pics[i].h = 0;
+            for (u32 k = 0; k < web.npic; k++) {
+                if (web.pic[k].state != 2 || strcmp(web.pic[k].url, web.list->images[i]) != 0) continue;
+                pics[i].px = web.pic[k].px; pics[i].w = web.pic[k].w; pics[i].h = web.pic[k].h;
+                break;
+            }
+        }
+        render_window win = {
+            .x = vx, .y = by, .w = usew, .h = bh,
+            .scroll = scrolls[SCR_WEB],
+            .col = { C_TEXT, C_DIM, C_FAINT, C_ACCENT, C_EDGE },
+            .values = (const char (*)[HTML_VALUE_MAX])field_val,
+            .pictures = pics,
+        };
+        render_paint(web.list, &win);
+        link_spot_count = render_spots(web.list, &win, RENDER_SPOTS_LINKS, link_spots);
+        field_spot_count = render_spots(web.list, &win, RENDER_SPOTS_FIELDS, field_spots);
+        fold_spot_count = render_spots(web.list, &win, RENDER_SPOTS_FOLDS, fold_spots);
+    } else {
+        link_spot_count = field_spot_count = fold_spot_count = 0;
+        if (web.list_failed) {
+            text_at(vx, by, vx + usew, "this page could not be laid out:", C_FAINT);
+            text_at(vx, by + ROW, vx + usew, web.fail_reason ? web.fail_reason : "no rendering", C_FAINT);
+        } else if (!web.loading) {
+            text_at(vx, by, vx + usew, "laying the page out ...", C_FAINT);
+        }
     }
 
     for (u32 i = 0; i < link_spot_count; i++)
@@ -2327,6 +2452,61 @@ static bool web_hot(const hot_region *r)
     }
 }
 
+/* The html lens's renderings: the renderer program laid the text out
+ * as a page; one entry per object shown -- the focus and a preview at
+ * most -- each with a block of its own. The input block is shared:
+ * the program takes a copy of it as it starts. */
+#define LENS_OUT_MAX (4u << 20)
+typedef struct {
+    object     *o;                          /* whose text; NULL for a free entry */
+    u64         key, job_key;               /* what the list was laid for; what the job under way is */
+    bool        ok, failed;
+    render_out *list;
+    render_job  job;
+} lens_entry;
+static lens_entry lens_r[2];
+static u8 *lens_in;
+
+static lens_entry *lens_slot(object *o)
+{
+    static u32 next;
+    for (u32 i = 0; i < 2; i++) if (lens_r[i].o == o) return &lens_r[i];
+    lens_entry *e = NULL;
+    for (u32 i = 0; i < 2 && !e; i++) if (!lens_r[i].o) e = &lens_r[i];
+    if (!e) { e = &lens_r[next]; next ^= 1; }
+    render_end(&e->job);
+    e->o = o;
+    e->ok = e->failed = false;
+    if (!e->list) {
+        phys_addr l = pmm_alloc_contig(LENS_OUT_MAX / PAGE_SIZE);
+        if (l != PMM_NO_FRAME) e->list = (render_out *)phys_to_virt(l);
+    }
+    if (!lens_in) {
+        phys_addr r = pmm_alloc_contig(RENDER_IN_PAGES);
+        if (r != PMM_NO_FRAME) lens_in = (u8 *)phys_to_virt(r);
+    }
+    return e;
+}
+
+/* Once a loop: the renderer's answer for a lens taken. */
+static void lens_render_tick(void)
+{
+    for (u32 i = 0; i < 2; i++) {
+        lens_entry *e = &lens_r[i];
+        if (!e->o || !render_busy(&e->job)) continue;
+        int r = render_poll(&e->job, e->list, LENS_OUT_MAX);
+        if (r == RENDER_WAIT) continue;
+        e->key = e->job_key;
+        e->ok = r == RENDER_DONE;
+        e->failed = !e->ok;
+        if (e->failed) kprintf("html: page not laid out: %s\n",
+                               r == RENDER_REFUSED ? "the renderer refused the text" :
+                               r == RENDER_LATE    ? "the renderer was ended after the time limit" :
+                                                     "the renderer ended without a page");
+        nav.redraw = true;
+    }
+}
+
 static void lens_html(object *o, i32 x, i32 y, i32 w, i32 h, bool live)
 {
     const u8 *d = (const u8 *)obj_data(o);
@@ -2393,36 +2573,69 @@ static void lens_html(object *o, i32 x, i32 y, i32 w, i32 h, bool live)
         return;
     }
 
-    html_sink sink = {
-        .urls = link_urls, .url_count = &link_count,
-        .link_spots = link_spots, .link_spot_count = &link_spot_count,
-        .forms = form_defs, .form_count = &form_count,
-        .fields = field_defs, .field_count = &field_count,
-        .field_spots = field_spots, .field_spot_count = &field_spot_count,
-        .field_values = field_val, .field_init = field_init,
-    };
-
-    html_view v = {
-        .src = d + ask + 1,
-        .len = len - ask - 1,
-        .x = x, .y = by, .w = w - 2 * GLYPH_W, .h = bh,
-        .scroll = nav.html_scroll,
-        .col = { C_TEXT, C_DIM, C_FAINT, C_ACCENT, C_EDGE },
-    };
-
-    html_rows = html_render(&v, live ? &sink : NULL);
+    /* The text as a page, laid out by the renderer program; laid out
+     * again when the text, its length or the measure change. */
+    /* What the layout depends on: the text itself, sampled (every
+     * 64th byte and both ends -- a fetch or an edit moves those), the
+     * person's changes, the measure. Not the store's touch count: the
+     * activity table is rewritten every second and would have the page
+     * laid out again every second. */
+    i32 usew = w - 2 * GLYPH_W;
+    lens_entry *e = lens_slot(o);
+    u64 key = 0xCBF29CE484222325ULL;
+    key = mix(key, obj_id(o)); key = mix(key, len); key = mix(key, nav.changes);
+    for (u64 i = 0; i < len; i += 64) key = mix(key, d[i]);
+    for (u64 i = len > 512 ? len - 512 : 0; i < len; i++) key = mix(key, d[i]);
+    key = mix(key, (u64)usew);
+    bool have = e->list && e->ok && e->key == key;
+    bool gave_up = e->failed && e->key == key;
+    if (render_busy(&e->job) && e->job_key != key) render_end(&e->job);   /* laid out for a text that moved on */
+    if (!have && !gave_up && e->list && lens_in && !render_busy(&e->job)) {
+        render_input b;
+        u32 col[5] = { C_TEXT, C_DIM, C_FAINT, C_ACCENT, C_EDGE };
+        render_input_begin(&b, lens_in, RENDER_IN_MAX, (u32)usew, (u32)usew,
+                           RENDER_PLAIN | RENDER_LENS, 0, col);
+        render_input_page(&b, d + ask + 1, (u32)(len - ask - 1));
+        u32 total = render_input_end(&b);
+        if (total && render_start(&e->job, nav.dom, lens_in, total)) e->job_key = key;
+        else { e->failed = true; e->ok = false; e->key = key; }
+    }
     html_vis = (u32)(bh / GLYPH_H);
-
-    if (live) {
-        /* A page that changed shape is a new page: take its defaults,
-         * and let go of any field the writing was in. */
-        u32 print = fields_print();
-        if (print != field_shape) {
-            field_shape = print;
-            field_focus = -1;
-            for (u32 i = 0; i < field_count; i++)
-                memcpy(field_val[i], field_init[i], HTML_VALUE_MAX);
+    if (have) {
+        render_window win = {
+            .x = x, .y = by, .w = usew, .h = bh,
+            .scroll = nav.html_scroll,
+            .col = { C_TEXT, C_DIM, C_FAINT, C_ACCENT, C_EDGE },
+            .values = (const char (*)[HTML_VALUE_MAX])field_val,
+            .pictures = NULL,
+        };
+        html_rows = e->list->rows;
+        if (live) {
+            link_count = e->list->nurls;
+            memcpy(link_urls, e->list->urls, sizeof(link_urls));
+            form_count = e->list->nforms;
+            memcpy(form_defs, e->list->forms, sizeof(form_defs));
+            field_count = e->list->nfields;
+            memcpy(field_defs, e->list->fields, sizeof(field_defs));
+            memcpy(field_init, e->list->init, sizeof(field_init));
+            /* A page that changed shape is a new page: take its
+             * defaults, and let go of any field the writing was in. */
+            u32 print = fields_print();
+            if (print != field_shape) {
+                field_shape = print;
+                field_focus = -1;
+                for (u32 i = 0; i < field_count; i++)
+                    memcpy(field_val[i], field_init[i], HTML_VALUE_MAX);
+            }
+            link_spot_count = render_spots(e->list, &win, RENDER_SPOTS_LINKS, link_spots);
+            field_spot_count = render_spots(e->list, &win, RENDER_SPOTS_FIELDS, field_spots);
         }
+        render_paint(e->list, &win);
+    } else {
+        html_rows = 0;
+        if (live) { link_spot_count = 0; field_spot_count = 0; }
+        text_at(x, by, x + w, gave_up ? "this text could not be laid out as a page." :
+                                        "laying the page out ...", C_FAINT);
     }
 
     /* Links and buttons carry only as far as writing does: following
@@ -6672,8 +6885,10 @@ void shell_run(void *arg)
             if (update_report(rep, sizeof rep)) { term_note(rep); nav.redraw = true; }
         }
 
-        /* The browser's answers, and the next picture it wants. */
+        /* The browser's answers, and the next picture it wants; the
+         * renderer's answers for the html lens. */
         web_tick();
+        lens_render_tick();
 
         if (nav.redraw) {
             nav.redraw = false;

@@ -25,6 +25,11 @@ fresh_vars $BUILD/test-vars.fd
 start_machine() {                   # $1: its serial log; monitor on fd 3
     rm -f $BUILD/pl-mon
     mkfifo $BUILD/pl-mon
+    # The firmware's variable store fresh for every boot: a cut can land
+    # while the firmware itself is writing it, and a firmware that then
+    # boots into nothing (an empty log, boot 62 of a hundred) is the
+    # firmware's failure, not the store's, which is what is under test.
+    fresh_vars $BUILD/test-vars.fd
     qemu-system-x86_64 $QEMU_BASE \
       -drive if=pflash,format=raw,file=$BUILD/test-vars.fd \
       -drive format=raw,file=$BUILD/esp.img \

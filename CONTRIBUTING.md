@@ -24,8 +24,8 @@ From Windows: `wsl -d Ubuntu -- bash -lc "cd /mnt/c/erebus && make run"`.
 
 - One regression test: `sh tools/<test>.sh` (the table is in `MANUAL.md`).
   A test uses KVM when `/dev/kvm` is writable and TCG otherwise.
-- The whole battery: `sh tools/battery.sh` -- one build, then 45 tests,
-  38 in parallel lanes, seven run alone. It prints seconds per test,
+- The whole battery: `sh tools/battery.sh` -- one build, then 46 tests,
+  38 in parallel lanes, eight run alone. It prints seconds per test,
   any `FAILED` lines, and a total. A failed or timed-out test runs once
   more before it is reported.
 - The battery must be green before a change is committed for release.
@@ -65,9 +65,11 @@ new case; the fuzzers are under `tools/fuzz/`.
   attack surface; add it only when it earns its place, and make it
   self-test at boot like the rest.
 - A parser of foreign input belongs in ring 3 where it can: the picture
-  decoder under `programs/` is the pattern -- a program written against
-  `sdk/erebus.h`, linked on its own, started by the kernel on the bytes
-  and ended after, its answer checked before it is used.
+  decoder and the page renderer under `programs/` are the pattern -- a
+  program written against `sdk/erebus.h`, linked on its own, started by
+  the kernel on the bytes and ended after, its answer checked before it
+  is used (`kernel/gfx/render_check.c` for the renderer's block). What
+  the programs share lives in `programs/lib`.
 
 ## Concurrency
 

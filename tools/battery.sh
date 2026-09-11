@@ -16,9 +16,9 @@ OUT=build/par
 
 PARALLEL="termtest usbtest usbhub usbplug asmtest cctest cctest2 sshtest sshmulti sshrekey pipe-two pipe-local pipe-update pipe-input pipe-code pipe-quorum pipe-rotate pipe-vouch pipe-task ssh-task sdktest relay agent persist powerloss limits stick usbstick usbunplug foreign settle settlefree install nictest wifi pkitest irqtest webtest"
 # renew rebuilds the kernel, update-test and rotate-test rebuild it as 9.9.9, oldstore and
-# oldpipe build the last released tag once, decoder-fault rebuilds the decoder program with its
-# deliberate faults: none of these may share build/ with a lane.
-SERIAL="renew update-test rotate-test oldstore oldpipe decoder-fault tlstest"
+# oldpipe build the last released tag once, decoder-fault and renderer-fault rebuild one program
+# with its deliberate faults: none of these may share build/ with a lane.
+SERIAL="renew update-test rotate-test oldstore oldpipe decoder-fault renderer-fault tlstest"
 
 script_of() {
     case "$1" in

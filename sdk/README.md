@@ -23,10 +23,11 @@ program said. Nothing in this directory is part of the kernel: it is the
 outside looking in, kept here so the interface cannot drift without a test
 noticing.
 
-The system's own picture decoder, `programs/decoder`, is written against
-this header too -- the same `main(console, inbox)`, the same eight calls
--- and is built with clang and lld on the host into the image format
-(MANUAL.md 18.4: `programs/decoder/program.ld` lays the code and the data
-at the two addresses, `tools/mkimage.py` writes the head), so a second
-toolchain makes images the machine loads. The kernel starts it in ring 3
-on every picture the browser fetches (MANUAL.md 18.6).
+The system's own picture decoder and page renderer, `programs/decoder`
+and `programs/renderer`, are written against this header too -- the
+same `main(console, inbox)`, the same eight calls -- and are built with
+clang and lld on the host into the image format (MANUAL.md 18.4:
+`programs/lib/program.ld` lays the code and the data at the two
+addresses, `tools/mkimage.py` writes the head), so a second toolchain
+makes images the machine loads. The kernel starts them in ring 3 on
+every picture and every page the browser shows (MANUAL.md 18.6).

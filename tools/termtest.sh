@@ -22,6 +22,17 @@ fresh_vars $BUILD/test-vars.fd
     waitcount $LOG 'user: hello' $((n + 1)) 20
     say "find hello"
     say "journal"
+    # a text that reads as a page -- an address on its first line, markup
+    # after -- is shown through the html lens in the focus view: the
+    # renderer program lays it out, in ring 3, and is ended after
+    say "make text page"
+    say "go page"
+    say "write example.org/page"
+    say "write <html><body><h1>a page</h1><p>laid out by a program</p></body></html>"
+    keys tab tab pause
+    waitlog $LOG '(renderer) ended' 20
+    keys tab tab tab tab tab pause
+    say "back"
     sleep 1
     echo "screendump $BUILD/termtest.ppm"
     sleep 1
@@ -41,3 +52,7 @@ echo "--- what the script said ---"
 # cannot be matched to its end; the boot-time greeting is the one
 # other "hello", and it names its ring.
 grep -a 'user: hello' $LOG | grep -v 'ring 3'
+# The test must be able to fail (0.9.9): the script's hello must be there.
+if grep -a 'user: hello' $LOG | grep -v 'ring 3' | grep -q .; then echo "the text was made, written, run and heard"
+else echo "FAILED: the script's hello never came"; fi
+grep -aq '(renderer) ended; all capabilities released' $LOG && echo "a text that reads as a page was laid out by the renderer program in ring 3" || echo "FAILED: the html lens started no renderer"

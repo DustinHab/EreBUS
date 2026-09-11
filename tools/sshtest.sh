@@ -80,3 +80,15 @@ echo "--- the machine's side ---"
 grep -a 'ssh:\|door:\|crypto:' $LOG
 echo "--- the host key the client saw ---"
 ssh-keygen -lf $KEYS/known_hosts 2>/dev/null | head -1
+# The test must be able to fail (0.9.9): every session served, the
+# stranger refused, and the key the client saw the one the door has.
+echo "--- the checks ---"
+ok=1
+grep -q 'home  list' $BUILD/ssh-exec.txt && echo "exec: look listed home" || { echo "FAILED: exec"; ok=0; }
+grep -q 'system  list' $BUILD/ssh-pipe.txt && grep -q 'home > system' $BUILD/ssh-pipe.txt && echo "pipe: go system and where answered" || { echo "FAILED: pipe"; ok=0; }
+grep -q -- '--  up ' $BUILD/ssh-pty.txt && echo "pty: time answered" || { echo "FAILED: pty"; ok=0; }
+grep -q 'Permission denied' $BUILD/ssh-refused.txt && grep -aq 'a key not in the settings' $LOG && echo "a key the door was never told about was refused" || { echo "FAILED: the unknown key was not refused"; ok=0; }
+[ "$(count $LOG 'someone logged in')" -ge 3 ] && echo "three sessions served" || { echo "FAILED: sessions served: $(count $LOG 'someone logged in')"; ok=0; }
+SEEN=$(ssh-keygen -lf $KEYS/known_hosts 2>/dev/null | head -1 | grep -o 'SHA256:[A-Za-z0-9+/=]*')
+[ -n "$SEEN" ] && grep -aq "the door's key is $SEEN" $LOG && echo "the host key the client saw is the door's" || { echo "FAILED: host key $SEEN not the door's"; ok=0; }
+[ $ok = 1 ] && echo "the ssh door serves, refuses and proves itself" || echo "the ssh door FAILED"

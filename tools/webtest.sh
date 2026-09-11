@@ -230,6 +230,7 @@ grep -aq 'picture /i.png: png 16x16' $W/boot1.log && echo "the png was decoded" 
 grep -aq 'picture p.jpg: jpeg 24x16' $W/boot1.log && echo "the jpeg was decoded" || { echo "FAILED: jpeg"; ok=0; }
 grep -aq 'picture /i.webp: webp 16x16' $W/boot1.log && echo "the webp was decoded" || { echo "FAILED: webp"; ok=0; }
 [ "$(count $W/boot1.log '(decoder) ended; all capabilities released')" -ge 3 ] && echo "each by a program in ring 3 that was ended after" || { echo "FAILED: no decoder programs"; ok=0; }
+[ "$(count $W/boot1.log '(renderer) ended; all capabilities released')" -ge 3 ] && echo "and every page was laid out by a renderer program in ring 3, ended after" || { echo "FAILED: no renderer programs"; ok=0; }
 grep -aq 'get http://10.0.2.100/s.css -> 200.*text/css' $W/boot1.log && echo "the stylesheet was fetched" || { echo "FAILED: sheet"; ok=0; }
 grep -aq 'styles: [0-9]* rules, 1 of 1 sheets, 2 parts hidden, 1 folds' $W/boot1.log && echo "and read: two parts hidden, the navigation folded" || { echo "FAILED: styles"; ok=0; }
 grep -aq 'get http://10.0.2.100/second -> 200' $W/boot1.log && echo "a link was followed by keyboard" || { echo "FAILED: link"; ok=0; }

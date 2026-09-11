@@ -277,6 +277,30 @@ again:
     check(25, nest.len == 9 && nest.nstrs == 8 && nest.strs[1].len == 7 &&
               (char *)&nest.len - (char *)&nest == 48);
 
+    /* 26: a number has the type c gives it: an operation on two 32-bit
+     * operands is a 32-bit operation, so a hash with a literal in it
+     * wraps and shifts as an unsigned int (0.9.8: every number was a
+     * long, and a self-built kernel's browser fell over on this) */
+    unsigned int key = 0x6f6f66;                      /* "foo" folded */
+    unsigned int bucket = (key * 2654435761u) >> 22;
+    int wrapped = 2000000000 + 2000000000;            /* wraps as an int, sign carried up */
+    check(26, bucket == 878 && bucket < 1024 && wrapped == -294967296 &&
+              (0x7FFFFFFF + 1) == (int)0x80000000 && 1u << 31 == 0x80000000u);
+
+    /* 27: comparisons happen in the common type: an unsigned int meets
+     * an int as unsigned (x == -1 asks for 0xFFFFFFFF), and an unsigned
+     * int meets a long as a long, signed */
+    unsigned int all = 0xFFFFFFFFu, five = 5;
+    long minus = -1;
+    int m1 = -1;
+    check(27, all == m1 && !(five == m1) && five < m1 && !(five < minus) && all > minus &&
+              (all + 1) == 0 && all != -2);
+
+    /* 28: a byte and a short promote to int before the comparison */
+    unsigned char b255 = 255;
+    short s7 = -7;
+    check(28, b255 != m1 && b255 == 255 && s7 < 0 && s7 * 2 == -14 && (unsigned short)s7 == 65529);
+
     if (bad_count == 0) say("all checks ok");
     else say("some checks bad");
     return bad_count;
