@@ -453,6 +453,33 @@ static const char lang_text[] =
 
 /* Finds a reference by petname and type, on the root or one list
  * below it -- the one search the shelved graph needs everywhere. */
+/* The "network" page's size: room for 64 node rows and 64 heard rows
+ * with the lines after them (pipe.c page_write). */
+#define NETWORK_PAGE_BYTES 16384
+
+/* A text from an older store, made smaller than today's kernel writes:
+ * a wider text takes its place in the slot that held it, its bytes
+ * carried over and its rights kept. Answers the wider text (held by the
+ * slot) or NULL when there was no memory; the old one stays in place
+ * then. */
+static object *widen_text(object *place, u64 slot, object *old, u64 size, const char *name)
+{
+    object *wider = obj_create(TYPE_TEXT, size, 0);
+    if (!wider) return NULL;
+    obj_set_name(wider, name);
+    u8 *w = (u8 *)obj_data(wider);
+    const u8 *o = (const u8 *)obj_data(old);
+    u64 keep = obj_size(old);
+    if (w && o) {
+        for (u64 i = 0; i < keep; i++) w[i] = o[i];
+        for (u64 i = keep; i < size; i++) w[i] = 0;
+    }
+    obj_set_slot(place, slot, wider, obj_slot_rights(place, slot));
+    obj_set_slot_name(place, slot, name);
+    obj_release(wider);
+    return wider;
+}
+
 static object *find_petnamed(object *root, const char *nm, type_id t,
                              object **holder, u64 *slot)
 {
@@ -2085,19 +2112,8 @@ void kmain(eb_boot_info *bi)
              * holds rows for; a wider text takes its place in the graph,
              * carrying the rows over. */
             if (nd && nd_place && obj_size(nd) < nodes_room()) {
-                object *wider = obj_create(TYPE_TEXT, nodes_room(), 0);
+                object *wider = widen_text(nd_place, nd_slot, nd, nodes_room(), "nodes");
                 if (wider) {
-                    obj_set_name(wider, "nodes");
-                    u8 *w = (u8 *)obj_data(wider);
-                    const u8 *old = (const u8 *)obj_data(nd);
-                    u64 keep = obj_size(nd);
-                    if (w && old) {
-                        for (u64 i = 0; i < keep; i++) w[i] = old[i];
-                        for (u64 i = keep; i < obj_size(wider); i++) w[i] = 0;
-                    }
-                    obj_set_slot(nd_place, nd_slot, wider, obj_slot_rights(nd_place, nd_slot));
-                    obj_set_slot_name(nd_place, nd_slot, "nodes");
-                    obj_release(wider);
                     nd = wider;
                     journal_says("system", "the nodes table was widened to today's size");
                     kprintf("snap: the nodes table was widened to today's size\n");
@@ -2117,9 +2133,17 @@ void kmain(eb_boot_info *bi)
                     nodes_meet(NULL, kkey, kip, PIPE_PORT, NULL, true);
             }
 
-            object *pg = find_petnamed(root, "network", TYPE_TEXT, NULL, NULL);
+            /* The page holds a row per node and per machine heard, 64 of
+             * each at most; an older store's smaller page is widened. */
+            object *pg_place = NULL;
+            u64     pg_slot  = 0;
+            object *pg = find_petnamed(root, "network", TYPE_TEXT, &pg_place, &pg_slot);
+            if (pg && pg_place && obj_size(pg) < NETWORK_PAGE_BYTES) {
+                object *wider = widen_text(pg_place, pg_slot, pg, NETWORK_PAGE_BYTES, "network");
+                if (wider) pg = wider;
+            }
             if (!pg) {
-                object *made = obj_create(TYPE_TEXT, 4096, 0);
+                object *made = obj_create(TYPE_TEXT, NETWORK_PAGE_BYTES, 0);
                 if (made) {
                     obj_set_name(made, "network");
                     if (list_append(sys_shelf ? sys_shelf : root, made,

@@ -3215,13 +3215,19 @@ static void page_write(void)
     u64 size = obj_size(page);
     if (!d || size < 512) return;
 
-    static char buf[4096];
+    /* Room for 64 node rows and 64 heard rows; the lines after the
+     * rows -- the desk, the work, the transfer -- take a few hundred
+     * bytes at most, and TAIL is kept free for them however many rows
+     * there were. The page object is made this size too (main.c); an
+     * older store's smaller page gets what fits. */
+    static char buf[16384];
+    enum { TAIL = 512 };
     u64 now = time_ns();
     u32 at = put(buf, 0, "node          address            version         seen     free    up      work  seal\n");
 
     nodes_apply();
     u32 n = nodes_count();
-    for (u32 i = 0; i < n && at + 200 < sizeof(buf); i++) {
+    for (u32 i = 0; i < n && at + 200 < sizeof(buf) - TAIL; i++) {
         char nm[24], ver[24];
         u8 ip[4];
         u16 port;
@@ -3256,7 +3262,7 @@ static void page_write(void)
     if (n == 0) at = put(buf, at, "(no node met yet)\n");
 
     bool head = false;
-    for (u32 k = 0; k < HEARD_MAX && at + 120 < sizeof(buf); k++) {
+    for (u32 k = 0; k < HEARD_MAX && at + 120 < sizeof(buf) - TAIL; k++) {
         heardrec *h = &heard[k];
         if (!h->used || now - h->seen_ns > QUIET_S * SECOND) continue;
         if (h->has_key && nodes_by_key(h->key) >= 0) continue;
