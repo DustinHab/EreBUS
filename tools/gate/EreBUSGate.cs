@@ -5,9 +5,14 @@
  * program (json on stdout).
  *
  * No SDK: build with the .NET Framework compiler.
- *   tools\gate\build.cmd            -> build\gate\EreBUS-Gate.exe
- * No arguments opens the window; --headless builds/feeds a package from a
- * command line; --shot <file.png> [--view <name>] renders a view.
+ *   tools\gate\build.cmd            -> build\gate\EreBUS-Gate.exe      the window
+ *                                   -> build\gate\EreBUS-Gate-api.exe  the machine interface
+ * The two are one source: the window build opens the window when it is given
+ * no arguments, the console build never does and is the one a shell can
+ * redirect or pipe (Windows gives a window program no standard handles).
+ * --headless builds/feeds a package from a command line; --shot <file.png>
+ * [--view <name>] renders a view with made-up nodes, for documentation -- it
+ * asks no node and shows no live one.
  */
 using System;
 using System.Collections.Generic;
@@ -442,7 +447,11 @@ namespace EreBUSGate
         {
             this.demo = demo;
             Store.Load(nodes, last);
-            if (demo && nodes.Count == 0) SeedDemo();
+            /* A picture for the documentation shows the made-up cluster and
+             * nothing of whoever renders it: the saved nodes are set aside,
+             * so no real name or address ends up in a published screenshot,
+             * and the tiles, the table and the header say one thing. */
+            if (demo) { nodes.Clear(); SeedDemo(); }
             target = PickTarget();
 
             this.Text = "EreBUS Gate";
@@ -478,6 +487,7 @@ namespace EreBUSGate
 
             BuildOverview(); BuildNodes(); BuildTasks(); BuildJobs(); BuildLogs(); BuildCluster(); BuildSettings();
             ShowView(active);
+            if (demo) Say("sample data for a picture; no node was asked.");
         }
 
         void Dark(Control c) { try { SetWindowTheme(c.Handle, "DarkMode_Explorer", null); } catch { } }
@@ -1572,6 +1582,22 @@ namespace EreBUSGate
         [STAThread]
         static int Main(string[] args)
         {
+#if CONSOLE
+            /* EreBUS-Gate-api.exe: the same program built for a console, so
+             * that a shell can redirect or pipe what it prints. Windows hands
+             * a window program no standard handles, so the window build's
+             * "api status > file" and "api watch | jq" reach nobody, however
+             * the console is attached; a program that spawns it with pipes of
+             * its own gets the lines either way. The window is the other
+             * build; this one never opens it. */
+            if (args.Length > 0 && args[0] == "api") return Api(args);
+            if (Has(args, "--version")) { Console.WriteLine("EreBUS Gate " + Ver.V); return 0; }
+            if (Has(args, "--shot")) return Shot(Arg(args, "--shot"), Arg(args, "--view"));
+            if (Has(args, "--headless")) return Headless(args);
+            Console.Error.WriteLine("EreBUS Gate " + Ver.V + ", the machine interface: api <verb>, --headless, --shot.");
+            Console.Error.WriteLine("'api schema' lists the verbs; the window is EreBUS-Gate.exe.");
+            return 2;
+#else
             if (args.Length > 0) AttachConsole(-1);
             if (args.Length > 0 && args[0] == "api") return Api(args);
             if (Has(args, "--version")) { Console.WriteLine("EreBUS Gate " + Ver.V); return 0; }
@@ -1581,6 +1607,7 @@ namespace EreBUSGate
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new GateForm());
             return 0;
+#endif
         }
 
         static bool Has(string[] a, string k) { foreach (var x in a) if (x == k) return true; return false; }

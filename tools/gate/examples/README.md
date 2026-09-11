@@ -18,24 +18,33 @@ A payload rides one datagram (at most 1 KiB), and no foreign binaries run -- the
 
 The same without the window:
 
-    EreBUS-Gate.exe --headless --source sum.c --node user@host --lo 1 --hi 1000000 --pieces 8 --combine sum
+    EreBUS-Gate-api.exe --headless --source sum.c --node user@host --lo 1 --hi 1000000 --pieces 8 --combine sum
 
 ## Machine interface
 
-`api <verb>` speaks the node's binary control protocol over ssh and prints one json object on
-stdout (an error object with `"ok":false` and a non-zero exit on failure); `api watch` streams one
-json event per line. It shares the saved nodes with the window, so `--node` also takes a saved
-node's name.
+`EreBUS-Gate-api.exe` is the same program built for a console: `api <verb>` speaks the node's
+binary control protocol over ssh and prints one json object on stdout (an error object with
+`"ok":false` and a non-zero exit on failure); `api watch` streams one json event per line. It
+shares the saved nodes with the window, so `--node` also takes a saved node's name.
 
-    EreBUS-Gate.exe api schema
-    EreBUS-Gate.exe api status  --node user@host --key C:\keys\id
-    EreBUS-Gate.exe api jobs    --node user@host
-    EreBUS-Gate.exe api submit  --source sum.c --node user@host --split 1..1000000 --pieces 8 --combine sum --wait 6
-    EreBUS-Gate.exe api watch   --node user@host --for 60
-    EreBUS-Gate.exe api log     --node user@host --lines 20
-    EreBUS-Gate.exe api peers   --node user@host
-    EreBUS-Gate.exe api cluster --node user@host
-    EreBUS-Gate.exe api door    --grant id.pub
+Use this one wherever the output is redirected or piped. `EreBUS-Gate.exe` is the window, and
+Windows gives a window program no standard handles, so `EreBUS-Gate.exe api status > out.json`
+writes nothing -- a program that spawns it with pipes of its own reads it either way.
+
+    EreBUS-Gate-api.exe api schema
+    EreBUS-Gate-api.exe api status  --node user@host --key C:\keys\id
+    EreBUS-Gate-api.exe api jobs    --node user@host
+    EreBUS-Gate-api.exe api submit  --source sum.c --node user@host --split 1..1000000 --pieces 8 --combine sum --wait 6
+    EreBUS-Gate-api.exe api watch   --node user@host --for 60
+    EreBUS-Gate-api.exe api log     --node user@host --lines 20
+    EreBUS-Gate-api.exe api peers   --node user@host
+    EreBUS-Gate-api.exe api cluster --node user@host
+    EreBUS-Gate-api.exe api door    --grant id.pub
+
+A split job is dealt to the machines a scan finds that welcome work, and a job without a split goes
+to the node's `peer`; a node standing alone answers `no machine accepts work` or `no peer is named
+in the settings`, and the refusal is written into its ledger. A node welcomes work only when its
+settings say so (`work | welcomed`); the default is `refused`.
 
 `submit` hands the package to the desk over the control channel and returns a handle; with `--wait`
 it reads the folded result back in the same session. `watch` subscribes and streams a job event

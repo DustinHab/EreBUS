@@ -15,3 +15,13 @@ if exist "%~dp0gate.ico" set ICON=/win32icon:"%~dp0gate.ico"
   "%~dp0EreBUSGate.cs"
 if errorlevel 1 ( echo build failed & exit /b 1 )
 echo built %ROOT%\build\gate\EreBUS-Gate.exe
+
+rem The same source as a console program: the machine interface, for a shell
+rem that redirects or pipes. Windows hands a window program no standard
+rem handles, so "EreBUS-Gate.exe api status > file" writes nothing.
+"%CSC%" /nologo /target:exe /platform:anycpu /define:CONSOLE ^
+  /out:"%ROOT%\build\gate\EreBUS-Gate-api.exe" %ICON% ^
+  /reference:System.Windows.Forms.dll /reference:System.Drawing.dll ^
+  "%~dp0EreBUSGate.cs"
+if errorlevel 1 ( echo build of the machine interface failed & exit /b 1 )
+echo built %ROOT%\build\gate\EreBUS-Gate-api.exe
