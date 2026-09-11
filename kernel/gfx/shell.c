@@ -28,7 +28,8 @@
 #include <eb/lang.h>
 #include <eb/html.h>
 #include <eb/web.h>
-#include <eb/image.h>
+#include <eb/picture.h>
+#include <eb/decoder.h>
 #include <eb/mm.h>
 #include <eb/string.h>
 #include <eb/time.h>
@@ -1389,17 +1390,24 @@ static void submit_form(u32 field_index)
 #define WEB_URL_MAX       512
 #define WEB_HIST          24
 #define WEB_BUF_PAGES     512               /* 2 MiB: the answer, the page unpacked in place */
-#define WEB_PIC_PAGES     256               /* 1 MiB for a picture as it came */
-#define WEB_SCRATCH_PAGES 2048              /* 8 MiB of decoding room */
-#define WEB_PIC_PIXELS    (1600u * 1200u)   /* the largest picture decoded */
+#define WEB_PIC_PAGES     256               /* 1 MiB for a picture as it came (DECODER_IN_MAX) */
 #define WEB_BODY_MAX      2048
 #define WEB_SHEET_PAGES   512               /* 2 MiB: the stylesheets as they came */
 
 typedef struct {
     char url[HTML_URL_MAX];                 /* as the page named it */
     u32 *px; u32 w, h, pages;
-    u8   state;                             /* 0 wanted, 1 loading, 2 ready, 3 failed */
+    u8   state;                             /* 0 wanted, 1 loading or decoding, 2 ready, 3 failed */
 } web_pic;
+
+/* The decoder at work: a program in ring 3 on one picture at a time
+ * (eb/picture.h). A picture that came while it is busy is held in the
+ * picture buffer until it is free; the next fetch waits for that, the
+ * decoding does not wait for the fetch. */
+static picture_job pic_job;
+static i32         pic_decoding = -1;      /* which picture the decoder holds */
+static web_answer  pic_held;               /* a picture that came, not yet handed over */
+static bool        pic_have_held;
 
 typedef struct {
     char url[HTML_URL_MAX];                 /* as the page named it */
@@ -1408,7 +1416,7 @@ typedef struct {
 } web_sheet;
 
 static struct {
-    u8  *buf, *pic_buf, *scratch;
+    u8  *buf, *pic_buf;
     css_sheet *rules;                       /* the page's rule table */
     u8  *sheets;                            /* the stylesheets fetched, end to end */
     web_sheet sheet[CSS_SHEETS_MAX]; u32 nsheet; u32 sheet_used;
@@ -1450,14 +1458,12 @@ static bool web_prepare(void)
     if (web.buf) return true;
     phys_addr b = pmm_alloc_contig(WEB_BUF_PAGES);
     phys_addr p = pmm_alloc_contig(WEB_PIC_PAGES);
-    phys_addr s = pmm_alloc_contig(WEB_SCRATCH_PAGES);
     phys_addr r = pmm_alloc_contig(CSS_SHEET_PAGES);
     phys_addr t = pmm_alloc_contig(WEB_SHEET_PAGES);
-    if (b == PMM_NO_FRAME || p == PMM_NO_FRAME || s == PMM_NO_FRAME ||
+    if (b == PMM_NO_FRAME || p == PMM_NO_FRAME ||
         r == PMM_NO_FRAME || t == PMM_NO_FRAME) return false;
     web.buf = (u8 *)phys_to_virt(b);
     web.pic_buf = (u8 *)phys_to_virt(p);
-    web.scratch = (u8 *)phys_to_virt(s);
     web.rules = (css_sheet *)phys_to_virt(r);
     web.sheets = (u8 *)phys_to_virt(t);
     css_reset(web.rules, 0);
@@ -1504,6 +1510,10 @@ static void web_pics_drop(void)
     }
     web.npic = 0;
     web.pic_loading = -1;
+    /* A decoder still at work is on a picture nobody wants now. */
+    if (pic_decoding >= 0) picture_end(&pic_job);
+    pic_decoding = -1;
+    pic_have_held = false;
 }
 
 static u32 web_scheme(const char *u)
@@ -1610,25 +1620,48 @@ static void web_go(const char *url, u8 method, const u8 *body, u32 blen, bool re
     web_begin(url, method, body, blen);
 }
 
-static void web_decode_pic(web_pic *p, const u8 *data, u32 len)
+/* The decoder's answer, when it has one: the pixels taken, or the
+ * picture given up. The decoding itself ran in a program of its own,
+ * and however it went, the page goes on. */
+static void web_decoded(void)
 {
-    u32 w, h;
-    p->state = 3;
-    if (!image_size(data, len, &w, &h) || (u64)w * h > WEB_PIC_PIXELS) return;
-    u32 pages = (u32)(((u64)w * h * 4 + PAGE_SIZE - 1) / PAGE_SIZE);
-    phys_addr pa = pmm_alloc_contig(pages);
-    if (pa == PMM_NO_FRAME) return;
-    u32 *px = (u32 *)phys_to_virt(pa);
-    int kind = image_kind(data, len);
-    const u32 scratch_len = WEB_SCRATCH_PAGES * PAGE_SIZE;
-    bool ok = kind == IMAGE_PNG  ? png_decode(data, len, px, WEB_PIC_PIXELS, &w, &h, web.scratch, scratch_len)
-            : kind == IMAGE_WEBP ? webp_decode(data, len, px, WEB_PIC_PIXELS, &w, &h, web.scratch, scratch_len)
-            :                      jpeg_decode(data, len, px, WEB_PIC_PIXELS, &w, &h, web.scratch, scratch_len);
-    if (!ok) { pmm_free_contig(pa, pages); return; }
-    p->px = px; p->w = w; p->h = h; p->pages = pages;
-    p->state = 2;
-    kprintf("web:  picture %s: %s %ux%u\n", p->url,
-            kind == IMAGE_PNG ? "png" : kind == IMAGE_WEBP ? "webp" : "jpeg", w, h);
+    u32 *px = NULL, pages = 0, w = 0, h = 0, kind = 0;
+    int r = picture_poll(&pic_job, &px, &pages, &w, &h, &kind);
+    if (r == PICTURE_WAIT) return;
+    web_pic *p = &web.pic[pic_decoding];
+    pic_decoding = -1;
+    if (r == PICTURE_DONE) {
+        p->px = px; p->w = w; p->h = h; p->pages = pages;
+        p->state = 2;
+        kprintf("web:  picture %s: %s %ux%u\n", p->url,
+                kind == DECODER_KIND_PNG ? "png" : kind == DECODER_KIND_WEBP ? "webp" :
+                kind == DECODER_KIND_JPEG ? "jpeg" : "?", w, h);
+    } else {
+        p->state = 3;
+        kprintf("web:  picture %s: %s\n", p->url,
+                r == PICTURE_REFUSED ? "not a picture the decoder reads" :
+                r == PICTURE_LATE    ? "the decoder was ended after the time limit" :
+                                       "the decoder ended without an answer");
+    }
+    nav.redraw = true;
+}
+
+/* A picture that came goes to the decoder program: at once when it is
+ * free, else held in the picture buffer until it is. The buffer is
+ * not asked into again while it holds one. */
+static void web_hand_over(void)
+{
+    if (!pic_have_held || pic_decoding >= 0 || web.pic_loading < 0) return;
+    web_pic *p = &web.pic[web.pic_loading];
+    if (picture_start(&pic_job, nav.dom, pic_held.data, pic_held.len)) {
+        pic_decoding = web.pic_loading;
+    } else {
+        p->state = 3;
+        kprintf("web:  picture %s: no decoder could be started\n", p->url);
+        nav.redraw = true;
+    }
+    pic_have_held = false;
+    web.pic_loading = -1;
 }
 
 /* Once a loop of the shell: the answer taken when it came, the next
@@ -1638,17 +1671,24 @@ static void web_tick(void)
     if (!web.buf) return;
     web_answer a;
 
+    if (pic_decoding >= 0) web_decoded();
+
     /* A picture or a sheet that came is taken first, whatever else is
      * pending: the wire is one ask at a time, and an ask nobody takes
      * would hold it forever. What came for a page already left is
      * dropped. */
-    if (web.pic_loading >= 0 && web_finished(web.pic_req, &a)) {
+    if (web.pic_loading >= 0 && !pic_have_held && web_finished(web.pic_req, &a)) {
         web_pic *p = &web.pic[web.pic_loading];
-        if (a.ok && a.status == 200 && a.len && !web.has_pending) web_decode_pic(p, a.data, a.len);
-        else p->state = 3;
-        web.pic_loading = -1;
-        nav.redraw = true;
+        if (a.ok && a.status == 200 && a.len && a.len <= DECODER_IN_MAX && !web.has_pending) {
+            pic_held = a;
+            pic_have_held = true;
+        } else {
+            p->state = 3;
+            web.pic_loading = -1;
+            nav.redraw = true;
+        }
     }
+    web_hand_over();
     if (web.sheet_loading >= 0 && web_finished(web.sheet_req, &a)) {
         web_sheet *sh = &web.sheet[web.sheet_loading];
         u32 room = WEB_SHEET_PAGES * PAGE_SIZE - web.sheet_used;

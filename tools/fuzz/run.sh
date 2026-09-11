@@ -210,7 +210,7 @@ for t in $TOOLS; do
         net)  build net kernel/net/net.c kernel/net/ssh.c kernel/net/wifi.c kernel/net/nodes.c kernel/net/sha256.c kernel/net/x25519.c kernel/lib/base64.c && seed_net && run net 65536 ;;
         pipe) build pipe kernel/net/pipe.c kernel/net/nodes.c kernel/net/sha256.c kernel/lib/base64.c && seed_pipe && run pipe 65536 ;;
         tls)  build tls kernel/net/tls.c kernel/net/asn1.c kernel/net/bn.c kernel/net/ec.c kernel/net/rsa.c kernel/net/x509.c kernel/net/pki_selftest.c kernel/net/sha512.c kernel/net/x25519.c && seed_tls && run tls 65536 ;;
-        img)  build img kernel/gfx/png.c kernel/gfx/jpeg.c kernel/gfx/webp.c kernel/lib/inflate.c && seed_img && run img 65536 ;;
+        img)  build img programs/decoder/png.c programs/decoder/jpeg.c programs/decoder/webp.c kernel/lib/inflate.c && seed_img && run img 65536 ;;
         *) echo "no such tool: $t" ;;
     esac
 done

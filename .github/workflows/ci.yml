@@ -74,6 +74,13 @@ jobs:
           ESP=build/self/esp.img NOMAKE=1 LOG=build/self-smoke.log \
             LIMIT=600 SMP=4 sh tools/bootsmoke.sh
 
+      # The self-built kernel at work, not only at idle: its browser, with
+      # its self-built picture decoder, against the host's test server. A
+      # kernel the machine's compiler got wrong can boot and pass its
+      # self-tests and still fall over on the first page.
+      - name: The self-built kernel's browser (TCG)
+        run: BUILD=build/self NOKVM=1 sh tools/webtest.sh
+
       # The promise to the last release (MANUAL 17): its store is read by
       # today's kernel, and a node of it talks to a node of today. The tag
       # is built once from a worktree. Under TCG; no KVM needed.
@@ -86,6 +93,13 @@ jobs:
       # (MANUAL 18), compiled and run on the machine through the door.
       - name: The program interface
         run: NOKVM=1 sh tools/sdktest.sh
+
+      # The picture decoders run in ring 3. The decoder program is
+      # rebuilt with deliberate faults -- a jpeg takes it down on a page
+      # fault, a webp makes it never answer -- and the browser goes on
+      # without those pictures while the kernel stays up.
+      - name: A decoder that faults or hangs
+        run: NOKVM=1 sh tools/decoder-fault.sh
 
       - name: Upload the kernel and the serial log
         if: always()

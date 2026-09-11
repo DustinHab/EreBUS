@@ -15,6 +15,7 @@
 #include <eb/time.h>
 #include <eb/panic.h>
 #include <eb/spin.h>
+#include <eb/string.h>
 
 /* The user section of the kernel image, from the linker script. */
 #include <eb/asm.h>
@@ -40,6 +41,11 @@ struct process {
     object     *self;
     object     *inbox;
     cap_handle  console_cap, inbox_cap;
+
+    /* Kernel threads reading this process's memory right now
+     * (proc_read_memory). The reaper waits for them before the address
+     * space goes, so a read never lands in freed frames. */
+    volatile u32 readers;
 };
 
 extern void user_enter(u64 entry, u64 stack, u64 arg0, u64 arg1);
@@ -238,31 +244,37 @@ static process *proc_begin(const char *name)
 }
 
 /* Fresh pages of the process's own at a user address, filled from src
- * as far as it reaches and zero beyond. Either to run and never to be
- * written, or to be written and never to run -- the stack and a loaded
- * program's data are the second kind, because this is where anything
- * a program is fed ends up, so it is the first place an attacker
- * would like to put code. The filling happens before the mapping, on
- * the kernel's own view of the frame. */
-static bool map_fresh(process *p, virt_addr at, u64 size, bool exec,
+ * as far as it reaches and zero beyond, mapped with the given leaf
+ * flags on top of present and user. The filling happens before the
+ * mapping, on the kernel's own view of the frame. */
+static bool map_pages(process *p, virt_addr at, u64 size, u64 leaf,
                       const u8 *src, u64 src_len)
 {
     for (u64 off = 0; off < size; off += PAGE_SIZE) {
         phys_addr frame = pmm_alloc();
         if (frame == PMM_NO_FRAME) return false;
         u8 *page = (u8 *)phys_to_virt(frame);
-        for (u32 i = 0; i < PAGE_SIZE; i++) {
-            u64 s = off + i;
-            page[i] = (src && s < src_len) ? src[s] : 0;
-        }
-        u64 flags = PTE_PRESENT | PTE_USER |
-                    (exec ? 0 : (PTE_WRITE | PTE_NX));
-        if (!vmm_map(p->pml4, at + off, frame, PAGE_SIZE, flags)) {
+        u64 have = (src && off < src_len) ? src_len - off : 0;
+        if (have > PAGE_SIZE) have = PAGE_SIZE;
+        if (have) memcpy(page, src + off, have);
+        if (have < PAGE_SIZE) memset(page + have, 0, PAGE_SIZE - have);
+        if (!vmm_map(p->pml4, at + off, frame, PAGE_SIZE,
+                     PTE_PRESENT | PTE_USER | leaf)) {
             pmm_free(frame);
             return false;
         }
     }
     return true;
+}
+
+/* Either to run and never to be written, or to be written and never to
+ * run -- the stack and a loaded program's data are the second kind,
+ * because this is where anything a program is fed ends up, so it is the
+ * first place an attacker would like to put code. */
+static bool map_fresh(process *p, virt_addr at, u64 size, bool exec,
+                      const u8 *src, u64 src_len)
+{
+    return map_pages(p, at, size, exec ? 0 : (PTE_WRITE | PTE_NX), src, src_len);
 }
 
 /* The end every process shares: the stack, the two things it starts
@@ -331,8 +343,9 @@ process *proc_create(const char *name, const void *entry_point,
     return proc_finish(p, name, console);
 }
 
-process *proc_create_code(const char *name, const u8 *image, u64 len,
-                          object *console)
+process *proc_create_code_laid(const char *name, const u8 *image, u64 len,
+                               object *console, virt_addr at,
+                               const u8 *bytes, u64 blen)
 {
     u32 head, code_len, data_len, zero_len, entry;
     if (!code_image_read(image, len, &head, &code_len, &data_len, &zero_len, &entry))
@@ -356,7 +369,25 @@ process *proc_create_code(const char *name, const u8 *image, u64 len,
                    image + head + code_len, data_len))
         return proc_abandon(p);
 
+    /* Bytes laid for the program to read: neither to be written nor
+     * to run. They must not land on the code, the data or the stack;
+     * the caller names a page-aligned place clear of those. */
+    if (bytes && blen) {
+        u64 bsize = PAGE_UP(blen);
+        bool clear = !(at & (PAGE_SIZE - 1)) && at + bsize > at &&
+                     (at + bsize <= USER_STACK_TOP - USER_STACK_SIZE || at >= USER_STACK_TOP) &&
+                     (at + bsize <= USER_LOAD_CODE || at >= USER_LOAD_DATA + dsize);
+        if (!clear || !map_pages(p, at, bsize, PTE_NX, bytes, blen))
+            return proc_abandon(p);
+    }
+
     return proc_finish(p, name, console);
+}
+
+process *proc_create_code(const char *name, const u8 *image, u64 len,
+                          object *console)
+{
+    return proc_create_code_laid(name, image, len, console, 0, NULL, 0);
 }
 
 object *proc_object(process *p) { return p ? p->self : NULL; }
@@ -598,6 +629,11 @@ static void proc_reap(void *arg)
     domain_destroy(p->dom);
     if (p->inbox) obj_release(p->inbox);
 
+    /* A kernel thread still reading the program's memory finishes
+     * first: it took its hold while the process was live, and the
+     * process left the live table above, so no new reader begins. */
+    while (p->readers) sched_yield();
+
     addrspace_destroy(p->pml4);
 
     kprintf("proc: %llu (%s) ended; all capabilities released\n",
@@ -679,6 +715,51 @@ bool copy_to_user(virt_addr dst, const void *src, u64 len)
     for (u64 i = 0; i < len; i++) d[i] = s[i];
     if (smap) smap_close();
     return true;
+}
+
+/* Reads out of a running program's memory from another thread: the
+ * kernel taking what a program laid down for it -- a decoder's pixels.
+ * Every page of the range is resolved through the program's own tables
+ * and must be its own, mapped for user access; a range that reaches
+ * anywhere else refuses the whole read. The program keeps running
+ * meanwhile, so what is read is what it wrote by the time it said so,
+ * plus whatever it writes after -- which is why a caller checks the
+ * shape of what it takes and takes nothing it would then trust. */
+bool proc_read_memory(object *program, virt_addr src, void *dst, u64 len)
+{
+    if (!program || obj_type(program) != TYPE_PROGRAM || !dst) return false;
+    if (obj_size(program) < sizeof(program_ref)) return false;
+    if (len == 0) return true;
+    if (src >= EB_PHYSMAP_BASE || src + len < src || src + len > EB_PHYSMAP_BASE) return false;
+
+    /* The hold: taken under the lock only while the process is live,
+     * dropped after the copy; the reaper waits for it. */
+    const program_ref *ref = (const program_ref *)obj_data(program);
+    process *p = ref->p;
+    u64 flags = spin_lock_irq(&proc_lock);
+    bool alive = is_live_locked(p) && p->stamp == ref->stamp;
+    if (alive) p->readers++;
+    spin_unlock_irq(&proc_lock, flags);
+    if (!alive) return false;
+
+    bool ok = true;
+    u8 *d = (u8 *)dst;
+    u64 done = 0;
+    while (done < len) {
+        virt_addr va = src + done;
+        phys_addr pa;
+        u64 pf;
+        if (!vmm_resolve_in(p->pml4, va, &pa, &pf) || !(pf & PTE_USER)) { ok = false; break; }
+        u64 chunk = PAGE_SIZE - (va & (PAGE_SIZE - 1));
+        if (chunk > len - done) chunk = len - done;
+        memcpy(d + done, phys_to_virt(pa), chunk);
+        done += chunk;
+    }
+
+    flags = spin_lock_irq(&proc_lock);
+    p->readers--;
+    spin_unlock_irq(&proc_lock, flags);
+    return ok;
 }
 
 /* ------------------------------------------------------------------ */

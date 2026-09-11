@@ -4,7 +4,7 @@
  * - alpha is composed onto white: the page's ground is light, and the screen keeps no alpha
  * - interlaced files are refused (rare on the web, and their rows arrive in seven passes)
  */
-#include <eb/image.h>
+#include "image.h"
 #include <eb/inflate.h>
 
 static u32 be32(const u8 *p) { return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3]; }

@@ -152,10 +152,8 @@ bool vmm_unmap_page(phys_addr pml4, virt_addr va, phys_addr *out_frame)
     return ok;
 }
 
-bool vmm_resolve(virt_addr va, phys_addr *out_pa, u64 *out_flags)
+static bool resolve_from(u64 *t, virt_addr va, phys_addr *out_pa, u64 *out_flags)
 {
-    u64 *t = table_at(read_cr3());
-
     u64 e = t[(va >> 39) & 0x1FF];
     if (!(e & PTE_PRESENT)) return false;
     t = table_at(e);
@@ -183,6 +181,17 @@ bool vmm_resolve(virt_addr va, phys_addr *out_pa, u64 *out_flags)
     if (out_pa) *out_pa = (e & ADDR_MASK) + (va & 0xFFF);
     if (out_flags) *out_flags = e & ~ADDR_MASK;
     return true;
+}
+
+bool vmm_resolve(virt_addr va, phys_addr *out_pa, u64 *out_flags)
+{
+    return resolve_from(table_at(read_cr3()), va, out_pa, out_flags);
+}
+
+bool vmm_resolve_in(phys_addr pml4, virt_addr va, phys_addr *out_pa, u64 *out_flags)
+{
+    if (!pml4) return false;
+    return resolve_from(table_at(pml4), va, out_pa, out_flags);
 }
 
 phys_addr vmm_kernel_pml4(void) { return kernel_pml4; }

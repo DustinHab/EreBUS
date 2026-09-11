@@ -29,8 +29,10 @@ OVMF_VARS := /usr/share/OVMF/OVMF_VARS_4M.fd
 XRES := 1280
 YRES := 800
 
-# Extra flags for the kernel, used by the "fault" target.
+# Extra flags for the kernel, used by the "fault" target; and for the
+# decoder program alone (tools/decoder-fault.sh).
 EXTRA ?=
+DECODER_EXTRA ?=
 
 # Where the serial port goes during "make shot". Override with
 # SERIAL=null to time the framebuffer console on its own -- the serial
@@ -81,9 +83,7 @@ KERN_C   := kernel/main.c \
             kernel/gfx/shell.c \
             kernel/gfx/html.c \
             kernel/gfx/css.c \
-            kernel/gfx/png.c \
-            kernel/gfx/jpeg.c \
-            kernel/gfx/webp.c \
+            kernel/gfx/picture.c \
             kernel/lib/inflate.c \
             kernel/net/web.c \
             kernel/hw/ps2.c \
@@ -165,9 +165,33 @@ KERN_S   := kernel/arch/x86_64/start.S \
             kernel/user/wipe.S \
             kernel/user/fetch.S
 
+# The picture decoder: a program of its own, not a part of the kernel.
+# Its sources are compiled a second way -- no kernel code model, its own
+# mem* and stack guard (programs/decoder/lib.c) -- linked alone at the
+# addresses the loader uses (programs/decoder/program.ld), turned into
+# the image the machine's own linker makes (tools/mkimage.py, MANUAL
+# 18.4), and carried by the kernel as an array of bytes. The kernel
+# starts it in ring 3 for every picture the browser fetches; nothing of
+# it runs in ring 0. tools/selfbuild.sh builds the same program with
+# the machine's own compiler.
+PROG_FLAGS := -target x86_64-unknown-none-elf $(COMMON_FLAGS) \
+              -fstack-protector-strong \
+              -I$(ROOT)/programs/decoder -I$(ROOT)/sdk $(EXTRA) $(DECODER_EXTRA)
+DECODER_C := programs/decoder/decoder.c \
+             programs/decoder/png.c \
+             programs/decoder/jpeg.c \
+             programs/decoder/webp.c \
+             programs/decoder/lib.c \
+             kernel/lib/inflate.c
+DECODER_S := programs/decoder/start.S
+DECODER_OBJ := $(patsubst %.c,$(BUILD)/decoder/%.o,$(DECODER_C)) \
+               $(patsubst %.S,$(BUILD)/decoder/%.o,$(DECODER_S))
+DECODER := $(BUILD)/decoder/decoder_image.o
+
 KERN_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(KERN_C)) \
             $(patsubst %.S,$(BUILD)/%.o,$(KERN_S)) \
-            $(BUILD)/version.o
+            $(BUILD)/version.o \
+            $(DECODER)
 
 # What this build calls itself: the nearest version tag, how far past it,
 # and the commit -- with "-dirty" when the tree has changes not committed.
@@ -263,6 +287,30 @@ $(BUILD)/kernel/user/pulse.o: kernel/user/pulse.c $(FONT)
 	@echo "  CC      kernel/user/pulse.c (ring 3)"
 	@$(CC) $(KERN_FLAGS) -fno-stack-protector -fno-jump-tables \
 	       -c kernel/user/pulse.c -o $@
+
+# --- the picture decoder ----------------------------------------------
+$(BUILD)/decoder/%.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "  CC      $< (ring 3, decoder)"
+	@$(CC) $(PROG_FLAGS) -c $< -o $@
+
+$(BUILD)/decoder/%.o: %.S
+	@mkdir -p $(dir $@)
+	@echo "  AS      $< (ring 3, decoder)"
+	@$(CC) $(PROG_FLAGS) -c $< -o $@
+
+$(BUILD)/decoder/decoder.elf: $(DECODER_OBJ) programs/decoder/program.ld
+	@echo "  LINK    $@"
+	@$(LD) -T programs/decoder/program.ld -nostdlib -z noexecstack \
+	       -o $@ $(DECODER_OBJ)
+
+$(BUILD)/decoder/decoder_image.c: $(BUILD)/decoder/decoder.elf tools/mkimage.py
+	@echo "  IMAGE   $(BUILD)/decoder/decoder.img"
+	@$(PY) tools/mkimage.py $< $(BUILD)/decoder/decoder.img $@ decoder_image
+
+$(DECODER): $(BUILD)/decoder/decoder_image.c
+	@echo "  CC      decoder image"
+	@$(CC) $(KERN_FLAGS) -c $< -o $@
 
 # Linked twice: once with an empty name table, to learn where the code
 # lies, and again with the table of those names. The table sits after
@@ -514,5 +562,5 @@ clean:
 # It goes last on purpose. An included file full of rules that arrives
 # before the first real target makes one of those rules the default
 # goal, and then "make" builds a single object file and reports success.
-DEPS := $(KERN_OBJ:.o=.d) $(BUILD)/boot.d
+DEPS := $(KERN_OBJ:.o=.d) $(DECODER_OBJ:.o=.d) $(BUILD)/boot.d
 -include $(DEPS)

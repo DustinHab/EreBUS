@@ -34,6 +34,21 @@ process *proc_create(const char *name, const void *entry_point,
 process *proc_create_code(const char *name, const u8 *image, u64 len,
                           object *console);
 
+/* The same, with bytes laid into the space for the program to read:
+ * blen bytes at the page-aligned address at, mapped to be neither
+ * written nor run, clear of the code, the data and the stack. How the
+ * picture decoder is handed its picture (eb/decoder.h). */
+process *proc_create_code_laid(const char *name, const u8 *image, u64 len,
+                               object *console, virt_addr at,
+                               const u8 *bytes, u64 blen);
+
+/* Copies len bytes out of a running program's memory, from an address
+ * in its own space, into kernel memory. Every page must be the
+ * program's own; false otherwise, and false once the program has
+ * ended. From any thread: the program's tables are walked, not the
+ * caller's. */
+bool proc_read_memory(object *program, virt_addr src, void *dst, u64 len);
+
 /* The program as it appears in the object graph. Pointing this object
  * at something hands the program that thing -- the same gesture as
  * anywhere else, and the only way a program comes to hold anything. */

@@ -4,7 +4,7 @@
  * - progressive and arithmetic files are refused; the caller shows the alternative text
  * - the planes are laid in the scratch the caller lends, then joined to rgb
  */
-#include <eb/image.h>
+#include "image.h"
 
 typedef struct {
     u8  bits[17];              /* codes of each length, 1..16 */

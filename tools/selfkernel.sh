@@ -16,6 +16,9 @@ rm -f $BUILD/selfk-store.img $BUILD/selfk.log $BUILD/selfk-up.txt $BUILD/selfk-j
 dd if=/dev/zero of=$BUILD/selfk-store.img bs=1M count=64 status=none
 cp $BUILD/esp.img $BUILD/selfk-esp.img
 cp /usr/share/OVMF/OVMF_VARS_4M.fd $BUILD/selfk-vars.fd
+# The picture decoder's image, fresh, built by the machine's own compiler
+# on the host: it goes in as a text with the sources (tools/mkupload.sh).
+sh tools/selfdecoder.sh >/dev/null || { echo "FAILED: the decoder does not build with the machine's compiler"; exit 1; }
 sh tools/mkupload.sh kernel "$SAYS" > $BUILD/selfk.stream
 
 key_name() {
@@ -119,7 +122,8 @@ echo "--- what the machine said about itself, each boot ---"
 grep -a 'EreBUS .* (x86_64)\|the installed kernel\|previous one' $BUILD/selfk.log | cut -c1-100
 echo "--- the checks ---"
 ok=1
-[ "$(grep -c 'created here' $BUILD/selfk-up.txt)" -ge 139 ] && echo "every source went in through the door" || { echo "FAILED: sources missing"; ok=0; }
+SENT=$(grep -ac '^receive ' $BUILD/selfk.stream)
+[ "$(grep -c 'created here' $BUILD/selfk-up.txt)" -ge "$SENT" ] && echo "every source went in through the door ($SENT texts)" || { echo "FAILED: sources missing ($(grep -c 'created here' $BUILD/selfk-up.txt) of $SENT)"; ok=0; }
 [ "$outcome" = built ] && echo "the machine built a kernel from them with its own tools" || { echo "FAILED: no kernel came of it ($outcome)"; ok=0; }
 grep -aq "EreBUS $SAYS" $BUILD/selfk.log && echo "and booted it: it says it was $SAYS" || { echo "FAILED: the self-built kernel did not come up"; ok=0; }
 [ "$outcome2" = built ] && echo "the self-built kernel built a kernel too (second generation)" || { echo "FAILED: the self-built kernel's compiler did not build a kernel ($outcome2)"; ok=0; }

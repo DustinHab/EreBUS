@@ -35,7 +35,7 @@
 #define REGARGS     6                 /* of which this many ride in registers */
 #define EXP_POOL    32768
 #define NGLOBALS    384
-#define INIT_MAX    65536
+#define INIT_MAX    (512 * 1024)      /* one initializer: the decoder's image is a 118 KiB array */
 #define NFIX        512
 #define NDYN        256
 #define NGOTO       64
@@ -127,6 +127,7 @@ enum { TK_EOF, TK_NUM, TK_FNUM, TK_IDENT, TK_PUNCT, TK_STR };
 
 typedef struct {
     u8     kind;
+    u8     num;                       /* TK_NUM: NUM_UNS, NUM_LONG from the suffix, NUM_HEX from the form */
     i64    val;
     u64    fval;                      /* a double, as its bits */
     char   text[NAME_MAX];
@@ -134,6 +135,10 @@ typedef struct {
     u32    line;
     char   where[NAME_MAX];           /* which text it came from */
 } token;
+
+#define NUM_UNS  1
+#define NUM_LONG 2
+#define NUM_HEX  4
 
 typedef struct {
     const u8 *text;
@@ -1312,7 +1317,9 @@ static void lex_raw(token *t)
             u64 sig = 0;                       /* the digits, as one number */
             i32 dexp = 0;                      /* and the power of ten they carry */
             u32 digits = 0;
+            u8  num = 0;
             if (c == '0' && (peekc(0) == 'x' || peekc(0) == 'X')) {
+                num |= NUM_HEX;
                 getc_();
                 for (;;) {
                     i32 h = peekc(0);
@@ -1351,11 +1358,13 @@ static void lex_raw(token *t)
             }
             while (peekc(0) == 'u' || peekc(0) == 'U' || peekc(0) == 'l' || peekc(0) == 'L' ||
                    peekc(0) == 'f' || peekc(0) == 'F') {
-                if (peekc(0) == 'f' || peekc(0) == 'F') fp = true;
-                getc_();
+                i32 sfx = getc_();
+                if (sfx == 'f' || sfx == 'F') fp = true;
+                else if (sfx == 'u' || sfx == 'U') num |= NUM_UNS;
+                else num |= NUM_LONG;
             }
             if (fp) { t->kind = TK_FNUM; t->fval = sf_from_decimal(sig, dexp); }
-            else { t->kind = TK_NUM; t->val = v; }
+            else { t->kind = TK_NUM; t->val = v; t->num = num; }
             return;
         }
 
@@ -1365,6 +1374,7 @@ static void lex_raw(token *t)
             if (getc_() != '\'') { fail("the letter never closes", NULL); t->kind = TK_EOF; return; }
             t->kind = TK_NUM;
             t->val = v;
+            t->num = 0;
             return;
         }
 
@@ -1609,6 +1619,26 @@ static u32 mk_num(i64 v)
     N(i)->val = v;
     N(i)->ty = C.t_long;
     return i;
+}
+
+/* The type of a number as written, the way c gives it: int when it fits,
+ * else long; a u suffix makes it unsigned; an l suffix makes it long; a
+ * hex or octal form that fits an unsigned int but not an int is one.
+ * The type matters because an operation on two 32-bit operands is a
+ * 32-bit operation: key * 2654435761u wraps at 32 bits and shifts as an
+ * unsigned int, and a literal typed long would make it a 64-bit product
+ * -- the way this compiler read every number until 0.9.8, which broke
+ * every hash of that shape in a self-built kernel. Numbers the compiler
+ * makes itself (sizeof, enum values) stay long through mk_num. */
+static type *literal_type(i64 v, u8 num)
+{
+    u64 u = (u64)v;
+    if (num & NUM_LONG) return (num & NUM_UNS) ? C.t_ulong : C.t_long;
+    if (num & NUM_UNS)  return u <= 0xFFFFFFFFu ? C.t_uint : C.t_ulong;
+    if (u <= 0x7FFFFFFFu) return C.t_int;
+    if ((num & NUM_HEX) && u <= 0xFFFFFFFFu) return C.t_uint;
+    if (u <= 0x7FFFFFFFFFFFFFFFu) return C.t_long;
+    return C.t_ulong;
 }
 
 static u32 mk_bin(u8 kind, u32 l, u32 r)
@@ -2278,6 +2308,7 @@ static u32 primary(void)
     }
     if (C.cur.kind == TK_NUM) {
         u32 n = mk_num(C.cur.val);
+        N(n)->ty = literal_type(C.cur.val, C.cur.num);
         advance();
         return n;
     }

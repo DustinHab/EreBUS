@@ -17,9 +17,14 @@ else
     make -s cchost >/dev/null 2>&1 || { echo "cchost does not build"; exit 1; }
     rm -f $OUT/*.obj $OUT/*.asm $OUT/kernel.elf
 
+    # The picture decoder first: a program of its own, built with the
+    # same tools and wrapped as a text of bytes the kernel carries.
+    sh tools/selfdecoder.sh || exit 1
+
     HEADERS="kernel/include/eb/*.h kernel/net/*.h kernel/gfx/*.h common/*.h"
     CS=$(ls kernel/*.c kernel/*/*.c kernel/*/*/*.c 2>/dev/null)
     [ -f $BUILD/version.c ] && CS="$CS $BUILD/version.c"     # what the kernel calls itself, made by make
+    CS="$CS $OUT/decoder_image.c"
     SS=$(ls kernel/arch/x86_64/*.S kernel/user/*.S)
 
     fails=0

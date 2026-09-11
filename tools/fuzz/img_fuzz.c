@@ -9,7 +9,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>
-#include <eb/image.h>
+#include "programs/decoder/image.h"
 #include <eb/inflate.h>
 
 void kprintf(const char *fmt, ...) { (void)fmt; }

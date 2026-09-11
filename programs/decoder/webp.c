@@ -9,7 +9,7 @@
  * - scratch is the caller's room: VP8L needs one argb image (4 * w * h) plus its transforms' small images; VP8 needs
  *   the three reconstructed planes and a little context. Too little of it is false.
  */
-#include <eb/image.h>
+#include "image.h"
 #include <eb/string.h>
 
 /* ================================================================== */

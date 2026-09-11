@@ -54,6 +54,10 @@ bool vmm_map(phys_addr pml4, virt_addr va, phys_addr pa, u64 size, u64 flags);
  * if nothing is mapped there. */
 bool vmm_resolve(virt_addr va, phys_addr *out_pa, u64 *out_flags);
 
+/* The same through another table: a process's, from a thread that is
+ * not in that address space. */
+bool vmm_resolve_in(phys_addr pml4, virt_addr va, phys_addr *out_pa, u64 *out_flags);
+
 /* Removes one 4 KiB leaf and returns the frame it mapped. Freeing that
  * frame is the caller's decision -- only the caller knows whether the
  * page was owned or shared. */
