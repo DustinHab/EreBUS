@@ -29,12 +29,12 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyTitle("EreBUS Gate")]
 [assembly: System.Reflection.AssemblyProduct("EreBUS Gate")]
 [assembly: System.Reflection.AssemblyCompany("github.com/DustinHab/EreBUS")]
-[assembly: System.Reflection.AssemblyVersion("0.2.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.2.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.2.1.0")]
 
 namespace EreBUSGate
 {
-    static class Ver { public const string V = "0.2"; }
+    static class Ver { public const string V = "0.2.1"; }
 
     static class Look
     {
